@@ -1,3 +1,4 @@
+import { BrandLogo } from "@/components/BrandLogo";
 import { Generator } from "@/components/Generator";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { UsageMeter } from "@/components/UsageMeter";
@@ -16,11 +17,11 @@ export default function Home() {
         </div>
       </div>
 
-      <header className="relative z-10 mx-auto w-full max-w-3xl px-6 pt-10 sm:pt-16">
-        <p className="animate-rise font-[family-name:var(--font-display)] text-5xl tracking-tight text-[var(--ink)] sm:text-7xl">
-          NowIGetIt
-        </p>
-        <h1 className="animate-rise-delay mt-5 max-w-xl text-xl leading-snug text-[var(--ink-muted)] sm:text-2xl">
+      <header className="relative z-10 mx-auto w-full max-w-3xl px-6 pt-8 sm:pt-10">
+        <div className="animate-rise">
+          <BrandLogo size="md" withWordmark priority />
+        </div>
+        <h1 className="animate-rise-delay mt-5 max-w-xl text-lg leading-snug text-[var(--ink-muted)] sm:text-xl">
           Prompt in. Scene plan, visual QA, voice — until the idea clicks.
         </h1>
       </header>

@@ -124,3 +124,16 @@ body {
 .progress-dot {
   animation: pulse-line 1.6s ease-in-out infinite;
 }
+
+/* Theme-aware brand marks (data-theme set on <html>) */
+.brand-logo-light {
+  display: none;
+}
+
+html[data-theme="light"] .brand-logo-dark {
+  display: none;
+}
+
+html[data-theme="light"] .brand-logo-light {
+  display: block;
+}

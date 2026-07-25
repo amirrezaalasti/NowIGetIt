@@ -19,6 +19,15 @@ export const metadata: Metadata = {
   title: "NowIGetIt — Explain it until it clicks",
   description:
     "Turn a prompt into a scene-planned educational video with VLM review and voiceover.",
+  icons: {
+    icon: [{ url: "/logo.png", type: "image/png" }],
+    apple: [{ url: "/apple-touch-icon.png" }],
+  },
+  openGraph: {
+    title: "NowIGetIt",
+    description: "Turn ideas into understanding.",
+    images: [{ url: "/logo.png", width: 1024, height: 1024 }],
+  },
 };
 
 export default function RootLayout({

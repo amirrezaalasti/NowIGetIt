@@ -1,4 +1,5 @@
 import { auth, signIn } from "@/auth";
+import { BrandLogo } from "@/components/BrandLogo";
 import { redirect } from "next/navigation";
 
 function googleConfigured(): boolean {
@@ -26,11 +27,12 @@ export default async function LoginPage({
     <main className="relative flex min-h-full flex-1 flex-col items-center justify-center overflow-hidden bg-atmosphere px-6">
       <div className="pointer-events-none absolute inset-0 grid-haze" aria-hidden />
 
-      <div className="relative z-10 w-full max-w-md text-center">
-        <p className="font-[family-name:var(--font-display)] text-5xl tracking-tight text-[var(--ink)]">
+      <div className="relative z-10 flex w-full max-w-md flex-col items-center text-center">
+        <BrandLogo size="lg" priority />
+        <p className="mt-4 font-[family-name:var(--font-display)] text-3xl tracking-tight text-[var(--ink)]">
           NowIGetIt
         </p>
-        <h1 className="mt-4 text-lg text-[var(--ink-muted)]">
+        <h1 className="mt-3 text-lg text-[var(--ink-muted)]">
           Sign in to save and revisit your explanations.
         </h1>
 
