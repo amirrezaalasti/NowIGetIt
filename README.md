@@ -7,7 +7,7 @@
 [![Manim](https://img.shields.io/badge/Manim-GL-e07a5f?logo=python&logoColor=white)](https://3b1b.github.io/manim/)
 [![Vercel](https://img.shields.io/badge/Deploy-Vercel-000000?logo=vercel&logoColor=white)](https://vercel.com/)
 [![OpenRouter](https://img.shields.io/badge/LLM-OpenRouter-6366f1)](https://openrouter.ai/)
-[![License](https://img.shields.io/badge/License-Private-lightgrey)](#)
+[![License](https://img.shields.io/badge/License-Proprietary-red)](./LICENSE)
 
 Turn a natural-language prompt into an educational video — plan scenes with an LLM, generate Manim animations, review frames with a VLM, and narrate with TTS.
 
@@ -94,7 +94,8 @@ Default monthly quotas per user: **40 generations**, **500k LLM tokens**, **500 
 /opt/homebrew/bin/python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -U pip setuptools==70.3.0 wheel
-pip install -r requirements.txt
+pip install -r requirements-local.txt   # API + Manim (local)
+# Vercel uses requirements.txt (API only, no Manim)
 
 # macOS (if missing):
 # brew install ffmpeg cairo pango pkg-config glew
@@ -170,6 +171,12 @@ Or split frontend and API into two projects and point `NEXT_PUBLIC_API_BASE_URL`
 ## Legacy
 
 The previous Streamlit app lives under [`legacy/`](./legacy/) for reference.
+
+## License
+
+**Proprietary — all rights reserved.** See [`LICENSE`](./LICENSE).
+
+This project is **not** free to use. Company, commercial, organizational, and unpaid personal use are prohibited without a written paid license from the copyright holder. For licensing: amirrezaalasti@gmail.com
 
 ---
 
