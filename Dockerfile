@@ -1,4 +1,3 @@
-# Alias of ./Dockerfile — prefer the root Dockerfile (Railway auto-detects it).
 # Railway Manim render worker (Manim Community Edition + ffmpeg)
 FROM python:3.12-slim-bookworm
 
