@@ -8,30 +8,59 @@ import re
 # Pango lays out Text() at the given font_size in pixels; small sizes get
 # uneven letter advances (broken kerning). Render at a safe size, then scale.
 # See: https://github.com/ManimCommunity/manim/issues/2844
+#
+# Separately, Pango/Cairo often underestimates the right side bearing so the
+# LAST letter is clipped ("Network" → "Networ"). Pad with NBSPs to widen the
+# SVG viewBox, then hide the pad glyphs when Text is split per-character.
 _TEXT_KERNING_MARKER = "# _NOWIGETIT_TEXT_KERNING_SHIM"
+_TEXT_KERNING_END_MARKER = "# _NOWIGETIT_TEXT_KERNING_END"
 _TEXT_KERNING_MIN_SIZE = 48.0
 _TEXT_KERNING_SHIM = f"""{_TEXT_KERNING_MARKER}
 _ManimText = Text
 _ManimMarkupText = MarkupText
 _ManimParagraph = Paragraph
 _TEXT_KERNING_MIN = {_TEXT_KERNING_MIN_SIZE}
+_TEXT_CLIP_PAD = "\\u00a0\\u00a0"  # non-breaking spaces — expand layout width
+
+def _pad_for_clip(text):
+    raw = text if isinstance(text, str) else str(text)
+    if not raw:
+        return raw, 0
+    # Don't double-pad if caller already trailing-spaced.
+    if raw.endswith((" ", "\\u00a0")):
+        return raw + "\\u00a0", 1
+    return raw + _TEXT_CLIP_PAD, len(_TEXT_CLIP_PAD)
+
+def _hide_pad_glyphs(mob, n_pad):
+    if n_pad <= 0:
+        return mob
+    try:
+        # disable_ligatures=True → one submobject per character (incl. pads)
+        if len(mob) >= n_pad:
+            for i in range(n_pad):
+                mob[-(i + 1)].set_opacity(0)
+    except Exception:
+        pass
+    return mob
 
 def _kerning_safe_text(factory, text, args, kwargs):
-    # width/height stretch the SVG and ruin letter spacing
+    # width/height stretch the SVG and ruin letter spacing / clip glyphs
     kwargs.pop("width", None)
     kwargs.pop("height", None)
     kwargs.setdefault("disable_ligatures", True)
+    padded, n_pad = _pad_for_clip(text)
     font_size = kwargs.get("font_size", 48)
     try:
         size = float(font_size)
     except (TypeError, ValueError):
-        return factory(text, *args, **kwargs)
+        mob = factory(padded, *args, **kwargs)
+        return _hide_pad_glyphs(mob, n_pad)
     internal = max(size, _TEXT_KERNING_MIN)
     kwargs["font_size"] = internal
-    mob = factory(text, *args, **kwargs)
+    mob = factory(padded, *args, **kwargs)
     if internal != size:
         mob.scale(size / internal)
-    return mob
+    return _hide_pad_glyphs(mob, n_pad)
 
 def Text(text, *args, **kwargs):
     return _kerning_safe_text(_ManimText, text, args, kwargs)
@@ -43,17 +72,22 @@ def Paragraph(*text, **kwargs):
     kwargs.pop("width", None)
     kwargs.pop("height", None)
     kwargs.setdefault("disable_ligatures", True)
+    padded_lines = []
+    for line in text:
+        p, _n = _pad_for_clip(line)
+        padded_lines.append(p)
     font_size = kwargs.get("font_size", 48)
     try:
         size = float(font_size)
     except (TypeError, ValueError):
-        return _ManimParagraph(*text, **kwargs)
+        return _ManimParagraph(*padded_lines, **kwargs)
     internal = max(size, _TEXT_KERNING_MIN)
     kwargs["font_size"] = internal
-    mob = _ManimParagraph(*text, **kwargs)
+    mob = _ManimParagraph(*padded_lines, **kwargs)
     if internal != size:
         mob.scale(size / internal)
     return mob
+{_TEXT_KERNING_END_MARKER}
 """
 
 
@@ -76,10 +110,35 @@ def validate_manim_code(code: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _inject_text_kerning_shim(code: str) -> str:
-    """Shadow Text/MarkupText/Paragraph with kerning-safe wrappers."""
-    if _TEXT_KERNING_MARKER in code:
+def _strip_text_kerning_shim(code: str) -> str:
+    """Remove a previously injected shim block (old or new format)."""
+    start = code.find(_TEXT_KERNING_MARKER)
+    if start < 0:
         return code
+    end_token = _TEXT_KERNING_END_MARKER
+    end = code.find(end_token, start)
+    if end >= 0:
+        end = end + len(end_token)
+        # Consume trailing newline
+        if end < len(code) and code[end] == "\n":
+            end += 1
+        return code[:start] + code[end:]
+    # Legacy shims had no end marker — cut until the next top-level class.
+    rest = code[start:]
+    m = re.search(r"^class\s", rest, flags=re.M)
+    if m:
+        return code[:start] + rest[m.start() :]
+    # Last resort: drop the marker line only.
+    nl = code.find("\n", start)
+    return code[:start] + (code[nl + 1 :] if nl >= 0 else "")
+
+
+def _inject_text_kerning_shim(code: str) -> str:
+    """Shadow Text/MarkupText/Paragraph with kerning-safe wrappers.
+
+    Always refresh an existing shim so older jobs pick up clip/kerning fixes.
+    """
+    code = _strip_text_kerning_shim(code)
     shim = _TEXT_KERNING_SHIM.strip() + "\n"
     match = re.search(r"^from manim import \*[ \t]*$", code, flags=re.M)
     if match:
@@ -131,6 +190,9 @@ def clean_manim_code(code: str) -> str:
     code = re.sub(r"\bMathTex\s*\(", "Text(", code)
     code = re.sub(r"\bTex\s*\(", "Text(", code)
     code = re.sub(r"\bTexText\s*\(", "Text(", code)
+    # Horizontal/vertical stretch distorts glyphs and often clips the last letter.
+    code = re.sub(r"\.stretch_to_fit_width\s*\([^)]*\)", "", code)
+    code = re.sub(r"\.stretch_to_fit_height\s*\([^)]*\)", "", code)
 
     color_replacements = {
         "LIGHT_BLUE": "BLUE_A",

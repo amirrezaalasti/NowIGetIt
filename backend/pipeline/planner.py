@@ -40,7 +40,10 @@ DENSITY / LAYOUT (critical — prevents messy overlapping frames):
 - visual_description must name spatial zones (e.g. "title top; gate box center;
   one equation bottom") so codegen has a layout plan.
 - animation_beats should say "clear previous labels" / "fade out prior formula"
-  when advancing.
+  when advancing — but the FINAL beat must leave the core diagram + title on screen
+  (never end on an empty frame).
+- For neural nets / backprop: prefer sparse node columns or 3 labeled boxes; never
+  ask for full weight matrices, many simultaneous equations, or crowded heatmaps.
 
 - Pick ONE visual_device per scene from:
   number_line | unit_circle | before_after | particle_flow | equation_reveal |

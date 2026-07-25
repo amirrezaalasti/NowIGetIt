@@ -109,21 +109,27 @@ class OpenRouterClient:
         *,
         system: str,
         prompt: str,
-        image_bytes: bytes,
+        image_bytes: bytes | list[bytes],
         mime_type: str = "image/png",
         temperature: float = 0.2,
         max_tokens: int = 2048,
         json_mode: bool = True,
     ) -> dict[str, Any] | str:
         """Image review always uses OPENROUTER_VLM_MODEL (multimodal)."""
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        blobs = image_bytes if isinstance(image_bytes, list) else [image_bytes]
         user_content: list[dict[str, Any]] = [
             {"type": "text", "text": prompt},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime_type};base64,{b64}"},
-            },
         ]
+        for blob in blobs:
+            if not blob:
+                continue
+            b64 = base64.b64encode(blob).decode("utf-8")
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{b64}"},
+                }
+            )
         if json_mode:
             return self.chat_json(
                 system=system,

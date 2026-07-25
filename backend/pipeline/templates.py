@@ -44,14 +44,52 @@ self.play(FadeIn(dot), tracker.animate.set_value(2), run_time=2.5)
         tags=("equation", "formula", "reveal", "algebra"),
         devices=("equation_reveal",),
         snippet="""
-# Pattern: stacked Text equations, Transform between steps (no MathTex)
-eq1 = Text("Q = m * c * ΔT", font_size=40)
-eq2 = Text("heat = mass × heat capacity × temp change", font_size=32)
-eq1.to_edge(UP)
-eq2.next_to(eq1, DOWN, buff=0.6)
+# Pattern: one formula at a time (FadeOut → FadeIn). No TransformMatchingShapes.
+eq1 = Text("loss = (y - ŷ)²", font_size=40)
+eq1.move_to(ORIGIN)
 self.play(Write(eq1), run_time=1.2)
-self.wait(0.4)
-self.play(TransformMatchingShapes(eq1.copy(), eq2), run_time=1.5)
+self.wait(0.5)
+eq2 = Text("smaller loss → better fit", font_size=32)
+eq2.move_to(ORIGIN)
+self.play(FadeOut(eq1), FadeIn(eq2), run_time=1.0)
+""".strip(),
+    ),
+    ManimTemplate(
+        id="neural_net_layers",
+        title="Sparse neural net: columns of nodes + edges",
+        tags=("network", "neural", "layers", "nodes", "weights", "backprop"),
+        devices=("labeled_box_flow", "annotated_diagram", "particle_flow"),
+        snippet="""
+# Pattern: 3 columns of Circles (≤4/layer), thin Lines, short layer labels
+title = Text("Neural Net", font_size=36).to_edge(UP, buff=0.35)
+layers = [3, 4, 2]
+cols = VGroup()
+for li, n in enumerate(layers):
+    nodes = VGroup(*[Circle(radius=0.22, color=TEAL, stroke_width=2) for _ in range(n)])
+    nodes.arrange(DOWN, buff=0.35)
+    cols.add(nodes)
+cols.arrange(RIGHT, buff=2.2)
+cols.move_to(ORIGIN + DOWN * 0.15)
+edges = VGroup()
+for a, b in zip(cols[:-1], cols[1:]):
+    for na in a:
+        for nb in b:
+            edges.add(Line(na.get_right(), nb.get_left(), stroke_width=1.5, color=GREY_B))
+labels = VGroup(
+    Text("In", font_size=24).next_to(cols[0], DOWN, buff=0.35),
+    Text("Hidden", font_size=24).next_to(cols[1], DOWN, buff=0.35),
+    Text("Out", font_size=24).next_to(cols[2], DOWN, buff=0.35),
+)
+self.play(Write(title), run_time=0.5)
+self.play(LaggedStart(*[FadeIn(c) for c in cols], lag_ratio=0.25), run_time=1.2)
+self.play(Create(edges), FadeIn(labels), run_time=1.0)
+# Highlight a path instead of dumping weight text
+self.play(
+    cols[0][1].animate.set_color(ORANGE),
+    cols[1][2].animate.set_color(ORANGE),
+    cols[2][0].animate.set_color(ORANGE),
+    run_time=1.2,
+)
 """.strip(),
     ),
     ManimTemplate(
@@ -295,9 +333,21 @@ def retrieve_templates(scene: SceneSection, *, limit: int = 2) -> list[ManimTemp
         return [by_id["gate_mechanism"], by_id["annotated_diagram"]]
     if any(
         w in blob
+        for w in (
+            "neural",
+            "neuron",
+            "backprop",
+            "forward pass",
+            "hidden layer",
+            "weights",
+        )
+    ):
+        return [by_id["neural_net_layers"], by_id["annotated_diagram"]]
+    if any(
+        w in blob
         for w in ("pipeline", "layer", "network", "transformer", "encoder", "boxes")
     ):
-        return [by_id["labeled_box_flow"]]
+        return [by_id["labeled_box_flow"], by_id["neural_net_layers"]]
     if any(w in blob for w in ("graph", "plot", "curve", "parabola", "axes")):
         return [by_id["axes_parabola"]]
     if any(w in blob for w in ("equation", "formula", "equals")):

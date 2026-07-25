@@ -54,11 +54,12 @@ Also score teaching quality (0–1):
 {_JSON_SHAPE}
 """
 
-IMAGE_VLM_SYSTEM = f"""You are a strict visual QA reviewer for educational Manim animations.
-A REAL rendered preview frame is attached (not a text storyboard).
-Compare the frame + code against the intended scene description.
+IMAGE_VLM_SYSTEM = f"""You are a visual QA reviewer for educational Manim animations.
+One or more REAL rendered preview frames are attached (not text storyboards).
+When multiple images are present: earlier = mid-scene, last = near end.
+Compare frames + code against the intended scene description.
 
-Approve only if the frame clearly shows the intended concept AND is readable.
+Approve when the frames clearly teach the intended concept AND are readable.
 REJECT (approved=false) when ANY of these are true:
 - text/labels/formulas overlap each other or sit on top of arrows/paths
 - labels are cut off at box or frame edges
@@ -66,18 +67,31 @@ REJECT (approved=false) when ANY of these are true:
 - illegible text, broken letter spacing, empty frame, off-brief
 - clutter that would confuse a learner in a pause-frame screenshot
 
+Do NOT reject for:
+- sparse / clean layouts with intentional white space
+- progressive scenes where mid-frame is denser than the end hold
+- missing decorative polish if the core diagram + title are clear
+
+Scoring calibration (be consistent):
+- 0.75–1.0: clean teaching frame; concept obvious; little/no overlap
+- 0.55–0.74: readable with minor spacing issues
+- 0.35–0.54: messy or partially illegible; needs layout fixes
+- <0.35: broken, empty, or badly off-brief
+
 When rejecting, revision_instructions MUST be concrete and spatial, e.g.:
 "FadeOut the bitstream overlay; move formula to bottom with buff 0.5;
 shorten box label to 'Input Gate'; keep only sigma+tanh inside the box."
+If the scene is already clear enough, set approved=true and keep revision_instructions short.
 
 CRITICAL CONSTRAINTS for revision_instructions:
 - NEVER suggest MathTex, Tex, TexText, or LaTeX — unavailable on this host.
 - Fix cut-off labels by shortening Text(...) / smaller font_size / scale_to_fit —
   e.g. Text("Cell State C(t)", font_size=24), not Tex/MathTex.
 - Do not mention kerning shims; just request shorter, simpler Text labels.
+- Prefer 1–3 surgical fixes; do not demand a full redesign of a mostly-good scene.
 
 Also score teaching quality (0–1):
-- clarity_score: how clearly the frame teaches the concept (penalize clutter heavily)
+- clarity_score: how clearly the frames teach the concept (penalize clutter, not sparseness)
 - misconception_risk: how likely a learner is to walk away confused
 
 {_JSON_SHAPE}
@@ -144,6 +158,7 @@ def review_scene(
     scene: SceneSection,
     code: str,
     frame_path: str | None = None,
+    frame_paths: list[str] | None = None,
     frame_source: str = "none",
 ) -> VlmReview:
     # Keep prompt lean so the model has room to finish JSON.
@@ -163,21 +178,29 @@ Manim code:
 {code_excerpt}
 ```
 """
+    paths: list[str] = []
+    if frame_paths:
+        paths.extend(p for p in frame_paths if p and Path(p).exists())
+    elif frame_path and Path(frame_path).exists():
+        paths.append(frame_path)
+
     # Only use vision when we have a true Manim preview.
     try:
-        if (
-            frame_source == "manim_preview"
-            and frame_path
-            and Path(frame_path).exists()
-        ):
-            image_bytes = Path(frame_path).read_bytes()
+        if frame_source == "manim_preview" and paths:
+            images = [Path(p).read_bytes() for p in paths]
+            mime = "image/png" if paths[-1].endswith(".png") else "image/jpeg"
+            n = len(images)
+            attach_note = (
+                f"\n{n} real rendered preview frame(s) attached "
+                "(mid-scene then end, if both present). "
+                "Score the teaching quality across them; do not fail solely because "
+                "the end hold is sparser than the mid-frame."
+            )
             data = client.chat_with_image(
                 system=IMAGE_VLM_SYSTEM,
-                prompt=prompt + "\nA real rendered preview frame is attached.",
-                image_bytes=image_bytes,
-                mime_type=(
-                    "image/png" if frame_path.endswith(".png") else "image/jpeg"
-                ),
+                prompt=prompt + attach_note,
+                image_bytes=images,
+                mime_type=mime,
                 json_mode=True,
                 max_tokens=4096,
             )

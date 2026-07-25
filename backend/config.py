@@ -13,8 +13,12 @@ _ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_env_files() -> None:
-    """Load .env then .env.local, but never let empty local values wipe .env."""
-    load_dotenv(_ROOT / ".env")
+    """Load .env then .env.local, but never let empty local values wipe .env.
+
+    Override existing process env so stale exports (e.g. from `vercel env pull`)
+    cannot silently point TTS at OpenAI while the UI offers Gemini voices.
+    """
+    load_dotenv(_ROOT / ".env", override=True)
     local_path = _ROOT / ".env.local"
     if not local_path.exists():
         return

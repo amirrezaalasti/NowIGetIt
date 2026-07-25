@@ -23,7 +23,7 @@ from backend.pipeline.compose import (
     probe_duration,
 )
 from backend.pipeline.planner import create_scene_plan
-from backend.pipeline.renderer import render_scene
+from backend.pipeline.renderer import extract_review_frames, render_scene
 from backend.pipeline.scene_generator import generate_scene_code, revise_scene_code
 from backend.pipeline.storyboard import create_storyboard_frame
 from backend.pipeline.tts import synthesize_narration
@@ -52,11 +52,16 @@ def _needs_visual_revision(review: Any, *, clarity_threshold: float) -> bool:
     risk = float(getattr(review, "misconception_risk", 0.0) or 0.0)
     issues = list(getattr(review, "issues", None) or [])
     if not approved:
-        return True
+        # Require actionable signal — bare rejects with no issues/clarity hit thrash.
+        return bool(issues) or clarity < clarity_threshold or risk >= 0.55
     # Approved but still messy: only revise when the reviewer flagged problems.
     if clarity < clarity_threshold and (issues or risk >= 0.65):
         return True
     return risk >= 0.75
+
+
+def _review_clarity(review: Any) -> float:
+    return float(getattr(review, "clarity_score", 0.0) or 0.0)
 
 
 def _revision_instructions_from_review(review: Any) -> str:
@@ -66,11 +71,12 @@ def _revision_instructions_from_review(review: Any) -> str:
     if instructions:
         parts.append(instructions)
     if issues:
-        parts.append("Issues to fix:\n- " + "\n- ".join(issues[:8]))
+        parts.append("Issues to fix:\n- " + "\n- ".join(issues[:4]))
+    # Keep boilerplate short so revises stay surgical (long generic lists strip content).
     parts.append(
-        "Layout priority: remove overlapping text/arrows, stop cut-off labels, "
-        "shorten on-screen text, fade previous labels before new dense beats, "
-        "keep at most one formula in a bottom zone with clear margins."
+        "Surgical layout fixes only: remove overlaps/cutoffs, shorten labels, "
+        "FadeOut prior labels before dense beats, one formula in a bottom zone, "
+        "keep the core diagram visible in the final hold."
     )
     return "\n\n".join(parts)
 
@@ -376,10 +382,21 @@ def _process_one_scene(
     else:
         preview_note = "Render skipped by request."
 
+    review_frame_paths: list[str] = []
+
     def _ensure_preview_frame(rev: int) -> tuple[Optional[str], str]:
         """Return (frame_path, frame_source) for review; fall back to storyboard."""
-        nonlocal frame_path, frame_source
+        nonlocal frame_path, frame_source, review_frame_paths
+        if video_path and Path(video_path).exists():
+            review_frame_paths = extract_review_frames(
+                video_path, sdir / f"vlm_frames_r{rev}"
+            )
+            if review_frame_paths:
+                frame_path = review_frame_paths[-1]
+                frame_source = "manim_preview"
+                return frame_path, frame_source
         if frame_path and frame_source == "manim_preview":
+            review_frame_paths = [frame_path]
             return frame_path, frame_source
         create_storyboard_frame(
             scene,
@@ -390,10 +407,11 @@ def _process_one_scene(
             output_path=sdir / f"vlm_r{rev}_preview.png",
         )
         frame_source = "visual_preview"
+        review_frame_paths = [frame_path] if frame_path else []
         return frame_path, frame_source
 
     def _run_review(rev: int) -> Any:
-        nonlocal frame_path, frame_source
+        nonlocal frame_path, frame_source, review_frame_paths
         _ensure_preview_frame(rev)
         syntax_ok, syntax_err = validate_manim_code(code)
         use_image_vlm = frame_source == "manim_preview"
@@ -402,6 +420,7 @@ def _process_one_scene(
             scene=scene,
             code=code,
             frame_path=frame_path if use_image_vlm else None,
+            frame_paths=review_frame_paths if use_image_vlm else None,
             frame_source=frame_source if use_image_vlm else "visual_preview",
         )
         if not syntax_ok:
@@ -428,6 +447,7 @@ def _process_one_scene(
                 "revision": rev,
                 "frame_source": frame_source,
                 "frame_url": saved.get("frame_url"),
+                "frame_count": len(review_frame_paths),
                 "review_mode": (
                     "image_vlm" if frame_source == "manim_preview" else "code_only"
                 ),
@@ -457,6 +477,20 @@ def _process_one_scene(
 
     review = _run_review(0)
 
+    # Keep-best: never ship a revision that scores worse than a prior attempt.
+    best: dict[str, Any] = {
+        "code": code,
+        "video_path": video_path,
+        "frame_path": frame_path,
+        "frame_source": frame_source,
+        "review": review,
+        "clarity": _review_clarity(review),
+        "preview_note": preview_note,
+        "revision": 0,
+    }
+    stagnant = 0
+    max_stagnant = 1
+
     # Auto-revise cluttered / rejected scenes (shares MAX_SCENE_REVISIONS budget).
     while (
         settings.enable_auto_vlm_revise
@@ -476,15 +510,18 @@ def _process_one_scene(
                 "job_id": job_id,
                 "revision": revision_count,
                 "clarity_score": getattr(review, "clarity_score", None),
+                "best_clarity": best["clarity"],
             },
             job_id=job_id,
         )
+        # Always revise from the best known code — not a worse intermediate rewrite.
         code = revise_scene_code(
             client,
-            code=code,
+            code=best["code"],
             scene=scene,
             revision_instructions=rev_instructions,
             target_duration_seconds=target_duration,
+            surgical=True,
         )
         store.save_code(job_id, scene.id, code, revision=revision_count)
 
@@ -518,6 +555,8 @@ def _process_one_scene(
                             "Fix so it renders; keep layout sparse and non-overlapping."
                         ),
                         target_duration_seconds=target_duration,
+                        surgical=False,
+                        render_error=(render_log or "")[-500:],
                     )
                     store.save_code(
                         job_id, scene.id, code, revision=revision_count
@@ -539,6 +578,53 @@ def _process_one_scene(
                     )
 
         review = _run_review(revision_count)
+        new_clarity = _review_clarity(review)
+        if new_clarity > best["clarity"] + 0.02:
+            best = {
+                "code": code,
+                "video_path": video_path,
+                "frame_path": frame_path,
+                "frame_source": frame_source,
+                "review": review,
+                "clarity": new_clarity,
+                "preview_note": preview_note,
+                "revision": revision_count,
+            }
+            stagnant = 0
+        else:
+            stagnant += 1
+            # Restore best artifacts so the next attempt (or ship) uses them.
+            code = best["code"]
+            video_path = best["video_path"]
+            frame_path = best["frame_path"]
+            frame_source = best["frame_source"]
+            preview_note = best["preview_note"]
+            review = best["review"]
+            _emit(
+                on_event,
+                PipelineEventType.status,
+                f"Kept best {scene.id} at clarity {best['clarity']:.0%} "
+                f"(r{best['revision']}; attempt {revision_count} did not improve)",
+                data={
+                    "scene_id": scene.id,
+                    "job_id": job_id,
+                    "best_clarity": best["clarity"],
+                    "attempt_clarity": new_clarity,
+                    "revision": revision_count,
+                },
+                job_id=job_id,
+            )
+            if stagnant > max_stagnant:
+                break
+
+    # Ship the best revision we saw (may be r0).
+    code = best["code"]
+    video_path = best["video_path"]
+    frame_path = best["frame_path"]
+    frame_source = best["frame_source"]
+    preview_note = best["preview_note"]
+    review = best["review"]
+    store.save_code(job_id, scene.id, code, revision=best["revision"])
 
     approved = bool(getattr(review, "approved", False))
     issues = list(getattr(review, "issues", None) or [])
