@@ -19,9 +19,11 @@ from backend import artifacts as store
 from backend import supabase_db as db
 from backend.auth import CurrentUser, MediaUser, auth_is_configured
 from backend.config import get_settings
+from backend import job_runner
 from backend.pipeline.orchestrator import (
     approve_scene,
     iter_continue_events,
+    iter_job_event_stream,
     iter_pipeline_events,
     iter_regenerate_scene,
     iter_retouch_scene,
@@ -219,9 +221,21 @@ def list_jobs(user: CurrentUser, limit: int = 50) -> dict:
 def get_job(job_id: str, user: CurrentUser) -> dict:
     _require_job_owner(job_id, user.id)
     try:
-        return store.load_job(job_id)
+        payload = store.load_job(job_id)
+        payload["runtime"] = job_runner.job_status(job_id)
+        return payload
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+
+
+@app.get("/api/jobs/{job_id}/status")
+def get_job_status(job_id: str, user: CurrentUser) -> dict:
+    _require_job_owner(job_id, user.id)
+    try:
+        store.load_job(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+    return job_runner.job_status(job_id)
 
 
 @app.put("/api/jobs/{job_id}/plan")
@@ -232,6 +246,34 @@ def put_scene_plan(
     _require_job_owner(job_id, user.id)
     plan = update_scene_plan(job_id, body.plan)
     return {"ok": True, "job_id": job_id, "plan": plan.model_dump()}
+
+
+@app.get("/api/jobs/{job_id}/events/stream")
+def job_events_stream(
+    job_id: str,
+    user: CurrentUser,
+    after: int = 0,
+) -> StreamingResponse:
+    """SSE: attach to a job's durable event log (refresh / navigate safe)."""
+    _require_job_owner(job_id, user.id)
+    try:
+        store.load_job(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+
+    def event_stream():
+        for chunk in iter_job_event_stream(job_id, after=max(0, after)):
+            yield chunk
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/jobs/{job_id}/continue/stream")

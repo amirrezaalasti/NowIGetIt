@@ -6,10 +6,12 @@ import json
 import shutil
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
 from backend import artifacts as store
+from backend import job_runner
 from backend import supabase_db as db
 from backend.code_utils import validate_manim_code
 from backend.config import get_settings
@@ -39,6 +41,36 @@ from backend.schemas import (
 )
 
 EventCallback = Callable[[PipelineEvent], None]
+
+
+def _needs_visual_revision(review: Any, *, clarity_threshold: float) -> bool:
+    """True when VLM/code review says the scene is cluttered, unclear, or rejected."""
+    approved = bool(getattr(review, "approved", False))
+    clarity = float(getattr(review, "clarity_score", 1.0) or 1.0)
+    risk = float(getattr(review, "misconception_risk", 0.0) or 0.0)
+    issues = list(getattr(review, "issues", None) or [])
+    if not approved:
+        return True
+    # Approved but still messy: only revise when the reviewer flagged problems.
+    if clarity < clarity_threshold and (issues or risk >= 0.65):
+        return True
+    return risk >= 0.75
+
+
+def _revision_instructions_from_review(review: Any) -> str:
+    instructions = (getattr(review, "revision_instructions", None) or "").strip()
+    issues = list(getattr(review, "issues", None) or [])
+    parts = []
+    if instructions:
+        parts.append(instructions)
+    if issues:
+        parts.append("Issues to fix:\n- " + "\n- ".join(issues[:8]))
+    parts.append(
+        "Layout priority: remove overlapping text/arrows, stop cut-off labels, "
+        "shorten on-screen text, fade previous labels before new dense beats, "
+        "keep at most one formula in a bottom zone with clear margins."
+    )
+    return "\n\n".join(parts)
 
 
 def _slim_data(data: Optional[dict], *, event_type: Optional[str] = None) -> Optional[dict]:
@@ -239,7 +271,7 @@ def _process_one_scene(
     if not skip_render:
         video_path, frame_path, render_log = render_scene(
             code,
-            work_dir=work_dir / "render",
+            work_dir=work_dir / "render" / scene.id,
             resolution=resolution,
             scene_id=f"{scene.id}_r{revision_count}",
         )
@@ -283,7 +315,7 @@ def _process_one_scene(
             store.save_code(job_id, scene.id, code, revision=revision_count)
             video_path, frame_path, render_log = render_scene(
                 code,
-                work_dir=work_dir / "render",
+                work_dir=work_dir / "render" / scene.id,
                 resolution=resolution,
                 scene_id=f"{scene.id}_r{revision_count}",
             )
@@ -307,77 +339,172 @@ def _process_one_scene(
     else:
         preview_note = "Render skipped by request."
 
-    if not frame_path:
+    def _ensure_preview_frame(rev: int) -> tuple[Optional[str], str]:
+        """Return (frame_path, frame_source) for review; fall back to storyboard."""
+        nonlocal frame_path, frame_source
+        if frame_path and frame_source == "manim_preview":
+            return frame_path, frame_source
         create_storyboard_frame(
             scene,
-            output_path=sdir / "vlm_r0_plan_card.png",
+            output_path=sdir / f"vlm_r{rev}_plan_card.png",
         )
         frame_path = create_visual_preview(
             scene,
-            output_path=sdir / "vlm_r0_preview.png",
+            output_path=sdir / f"vlm_r{rev}_preview.png",
         )
         frame_source = "visual_preview"
+        return frame_path, frame_source
 
-    syntax_ok, syntax_err = validate_manim_code(code)
-    use_image_vlm = frame_source == "manim_preview"
-    review = review_scene(
-        client,
-        scene=scene,
-        code=code,
-        frame_path=frame_path if use_image_vlm else None,
-        frame_source=frame_source if use_image_vlm else "visual_preview",
-    )
-    if not syntax_ok:
-        review = review.model_copy(
-            update={
-                "approved": False,
-                "issues": [syntax_err, *review.issues],
-                "revision_instructions": f"Fix invalid Python ({syntax_err}).",
+    def _run_review(rev: int) -> Any:
+        nonlocal frame_path, frame_source
+        _ensure_preview_frame(rev)
+        syntax_ok, syntax_err = validate_manim_code(code)
+        use_image_vlm = frame_source == "manim_preview"
+        result = review_scene(
+            client,
+            scene=scene,
+            code=code,
+            frame_path=frame_path if use_image_vlm else None,
+            frame_source=frame_source if use_image_vlm else "visual_preview",
+        )
+        if not syntax_ok:
+            result = result.model_copy(
+                update={
+                    "approved": False,
+                    "issues": [syntax_err, *result.issues],
+                    "revision_instructions": f"Fix invalid Python ({syntax_err}).",
+                }
+            )
+        saved = store.save_vlm_review(
+            job_id,
+            scene.id,
+            revision=rev,
+            review=result.model_dump(),
+            frame_path=frame_path,
+            frame_source=frame_source,
+        )
+        if saved.get("frame_url"):
+            frame_urls.append(saved["frame_url"])
+        reviews_log.append(
+            {
+                **result.model_dump(),
+                "revision": rev,
+                "frame_source": frame_source,
+                "frame_url": saved.get("frame_url"),
+                "review_mode": (
+                    "image_vlm" if frame_source == "manim_preview" else "code_only"
+                ),
             }
         )
+        _emit(
+            on_event,
+            PipelineEventType.scene_vlm,
+            f"Scene check for {scene.id}"
+            + (
+                f" · clarity {result.clarity_score:.0%}"
+                if hasattr(result, "clarity_score")
+                else ""
+            )
+            + (f" · r{rev}" if rev else ""),
+            data={
+                **result.model_dump(),
+                "scene_id": scene.id,
+                "job_id": job_id,
+                "frame_url": saved.get("frame_url"),
+                "frame_source": frame_source,
+                "revision": rev,
+            },
+            job_id=job_id,
+        )
+        return result
 
-    saved = store.save_vlm_review(
-        job_id,
-        scene.id,
-        revision=0,
-        review=review.model_dump(),
-        frame_path=frame_path,
-        frame_source=frame_source,
-    )
-    approved = review.approved
-    issues = review.issues
-    if saved.get("frame_url"):
-        frame_urls.append(saved["frame_url"])
-    reviews_log.append(
-        {
-            **review.model_dump(),
-            "revision": 0,
-            "frame_source": frame_source,
-            "frame_url": saved.get("frame_url"),
-            "review_mode": (
-                "image_vlm" if frame_source == "manim_preview" else "code_only"
-            ),
-        }
-    )
-    _emit(
-        on_event,
-        PipelineEventType.scene_vlm,
-        f"Scene check for {scene.id}"
-        + (
-            f" · clarity {review.clarity_score:.0%}"
-            if hasattr(review, "clarity_score")
-            else ""
-        ),
-        data={
-            **review.model_dump(),
-            "scene_id": scene.id,
-            "job_id": job_id,
-            "frame_url": saved.get("frame_url"),
-            "frame_source": frame_source,
-            "revision": 0,
-        },
-        job_id=job_id,
-    )
+    review = _run_review(0)
+
+    # Auto-revise cluttered / rejected scenes (shares MAX_SCENE_REVISIONS budget).
+    while (
+        settings.enable_auto_vlm_revise
+        and revision_count < settings.max_scene_revisions
+        and _needs_visual_revision(
+            review, clarity_threshold=settings.vlm_clarity_threshold
+        )
+    ):
+        revision_count += 1
+        rev_instructions = _revision_instructions_from_review(review)
+        _emit(
+            on_event,
+            PipelineEventType.scene_revise,
+            f"Auto-revising {scene.id} for clarity (attempt {revision_count})…",
+            data={
+                "scene_id": scene.id,
+                "job_id": job_id,
+                "revision": revision_count,
+                "clarity_score": getattr(review, "clarity_score", None),
+            },
+            job_id=job_id,
+        )
+        code = revise_scene_code(
+            client,
+            code=code,
+            scene=scene,
+            revision_instructions=rev_instructions,
+            target_duration_seconds=target_duration,
+        )
+        store.save_code(job_id, scene.id, code, revision=revision_count)
+
+        if not skip_render:
+            prev_video, prev_frame, prev_source = (
+                video_path,
+                frame_path,
+                frame_source,
+            )
+            video_path, frame_path, render_log = render_scene(
+                code,
+                work_dir=work_dir / "render" / scene.id,
+                resolution=resolution,
+                scene_id=f"{scene.id}_r{revision_count}",
+            )
+            if frame_path:
+                frame_source = "manim_preview"
+            elif video_path is None:
+                # Render broke after a visual revise — try one render-focused fix
+                # if budget remains, else keep the last playable clip.
+                preview_note = render_log
+                if revision_count < settings.max_scene_revisions:
+                    revision_count += 1
+                    code = revise_scene_code(
+                        client,
+                        code=code,
+                        scene=scene,
+                        revision_instructions=(
+                            "Manim render failed after a clarity fix. "
+                            f"Error:\n{(render_log or '')[-500:]}\n"
+                            "Fix so it renders; keep layout sparse and non-overlapping."
+                        ),
+                        target_duration_seconds=target_duration,
+                    )
+                    store.save_code(
+                        job_id, scene.id, code, revision=revision_count
+                    )
+                    video_path, frame_path, render_log = render_scene(
+                        code,
+                        work_dir=work_dir / "render" / scene.id,
+                        resolution=resolution,
+                        scene_id=f"{scene.id}_r{revision_count}",
+                    )
+                    if frame_path:
+                        frame_source = "manim_preview"
+                    preview_note = None if video_path else render_log
+                if video_path is None and prev_video:
+                    video_path, frame_path, frame_source = (
+                        prev_video,
+                        prev_frame,
+                        prev_source,
+                    )
+
+        review = _run_review(revision_count)
+
+    approved = bool(getattr(review, "approved", False))
+    issues = list(getattr(review, "issues", None) or [])
 
     # Mux narration immediately so the UI can play a finished clip per scene
     # (don't wait for the whole pipeline / final compose).
@@ -441,16 +568,26 @@ def _compose_and_finish(
     on_event: Optional[EventCallback],
 ) -> GenerateResult:
     settings = get_settings()
-    debug = {
-        "notes": "Automated VLM revisions disabled (human-in-the-loop review active)",
-        "scene_fixes": [],
-    }
+    revised = [
+        a.scene_id
+        for a in artifacts
+        if a.revision_count > 0
+    ]
+    unapproved = [a.scene_id for a in artifacts if not a.vlm_approved]
+    if settings.enable_auto_vlm_revise:
+        notes = (
+            f"Auto VLM revise enabled (clarity < {settings.vlm_clarity_threshold:.0%}). "
+            f"Scenes revised: {', '.join(revised) or 'none'}. "
+            f"Still unapproved: {', '.join(unapproved) or 'none'}."
+        )
+    else:
+        notes = "Automated VLM revisions disabled (ENABLE_AUTO_VLM_REVISE=false)."
+    debug = {"notes": notes, "scene_fixes": [], "revised_scenes": revised}
     store.save_final_debug(job_id, debug)
-    notes = str(debug.get("notes", ""))
     _emit(
         on_event,
         PipelineEventType.final_debug,
-        "Automated VLM revision pass skipped (human review mode active)",
+        notes,
         data={**debug, "job_id": job_id},
         job_id=job_id,
     )
@@ -548,6 +685,48 @@ def _compose_and_finish(
     return result
 
 
+def _plan_previous_context(plan: ScenePlan, index: int) -> str:
+    """Build continuity context from the plan (safe for parallel scene starts)."""
+    parts: list[str] = []
+    for scene in plan.scenes[:index]:
+        desc = (scene.visual_description or "")[:180]
+        parts.append(f"- {scene.id}: {scene.title} — {desc}")
+    return "\n".join(parts)
+
+
+def _load_existing_scene_artifact(
+    job_id: str, scene: SceneSection
+) -> Optional[SceneArtifact]:
+    """Reuse a finished scene so resume/reconnect does not burn tokens again."""
+    sdir = store.scene_dir(job_id, scene.id)
+    code_path = sdir / "code_final.py"
+    vo = sdir / "scene_vo.mp4"
+    raw = sdir / "scene.mp4"
+    video_path = vo if vo.exists() else (raw if raw.exists() else None)
+    if not code_path.exists() or video_path is None:
+        return None
+    frame_url = None
+    for frame in sorted(sdir.glob("vlm_r*_frame.*"), reverse=True):
+        frame_url = f"/api/jobs/{job_id}/file/scenes/{scene.id}/{frame.name}"
+        break
+    video_url = f"/api/jobs/{job_id}/file/scenes/{scene.id}/{video_path.name}"
+    return SceneArtifact(
+        scene_id=scene.id,
+        title=scene.title,
+        narration=scene.narration,
+        code=code_path.read_text(encoding="utf-8"),
+        revision_count=0,
+        vlm_approved=True,
+        vlm_issues=[],
+        video_path=str(video_path),
+        video_url=video_url,
+        preview_note="Reused existing scene artifact",
+        audio_path=str(sdir / "audio.mp3") if (sdir / "audio.mp3").exists() else None,
+        vlm_frame_urls=[frame_url] if frame_url else [],
+        artifact_dir=str(sdir),
+    )
+
+
 def _run_scenes_loop(
     *,
     client: OpenRouterClient,
@@ -559,39 +738,99 @@ def _run_scenes_loop(
     prompt: str,
     on_event: Optional[EventCallback],
 ) -> GenerateResult:
+    settings = get_settings()
     work_dir = store.job_dir(job_id)
-    artifacts: list[SceneArtifact] = []
-    previous_context = ""
+    total = len(plan.scenes)
+    results: dict[int, SceneArtifact] = {}
+    to_run: list[tuple[int, SceneSection]] = []
 
-    def _flush_usage() -> None:
+    for index, scene in enumerate(plan.scenes):
+        existing = None if skip_render else _load_existing_scene_artifact(job_id, scene)
+        if existing is not None:
+            results[index] = existing
+            _emit(
+                on_event,
+                PipelineEventType.scene_done,
+                f"Reusing finished {scene.id}",
+                data={
+                    "scene_id": scene.id,
+                    "title": scene.title,
+                    "job_id": job_id,
+                    "video_url": existing.video_url,
+                    "frame_url": (
+                        existing.vlm_frame_urls[-1]
+                        if existing.vlm_frame_urls
+                        else None
+                    ),
+                    "vlm_approved": existing.vlm_approved,
+                    "revision_count": existing.revision_count,
+                    "reused": True,
+                },
+                job_id=job_id,
+            )
+        else:
+            to_run.append((index, scene))
+
+    def _flush_client(c: OpenRouterClient) -> None:
         if not user_id:
             return
         db.flush_client_usage(
             user_id=user_id,
             job_id=job_id,
-            usage_log=client.drain_usage_log(),
+            usage_log=c.drain_usage_log(),
         )
 
-    for index, scene in enumerate(plan.scenes):
-        artifact = _process_one_scene(
-            client=client,
+    def _run_one(index: int, scene: SceneSection) -> tuple[int, SceneArtifact]:
+        # Own client per worker — usage_log is not thread-safe.
+        scene_client = OpenRouterClient(settings)
+        try:
+            artifact = _process_one_scene(
+                client=scene_client,
+                job_id=job_id,
+                work_dir=work_dir,
+                plan=plan,
+                scene=scene,
+                index=index,
+                total=total,
+                previous_context=_plan_previous_context(plan, index),
+                resolution=resolution,
+                skip_render=skip_render,
+                on_event=on_event,
+            )
+            return index, artifact
+        finally:
+            _flush_client(scene_client)
+
+    workers = max(1, min(settings.scene_parallelism, len(to_run) or 1))
+    if to_run:
+        _emit(
+            on_event,
+            PipelineEventType.status,
+            f"Generating {len(to_run)} scene(s) with parallelism={workers}…",
+            data={
+                "job_id": job_id,
+                "scene_parallelism": workers,
+                "pending": [s.id for _, s in to_run],
+                "reused": [plan.scenes[i].id for i in sorted(results)],
+            },
             job_id=job_id,
-            work_dir=work_dir,
-            plan=plan,
-            scene=scene,
-            index=index,
-            total=len(plan.scenes),
-            previous_context=previous_context,
-            resolution=resolution,
-            skip_render=skip_render,
-            on_event=on_event,
         )
-        artifacts.append(artifact)
-        previous_context += (
-            f"\n- {scene.id}: {scene.title} — {scene.visual_description[:180]}"
-        )
-        _flush_usage()
 
+    if len(to_run) <= 1 or workers == 1:
+        for index, scene in to_run:
+            idx, artifact = _run_one(index, scene)
+            results[idx] = artifact
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(_run_one, index, scene) for index, scene in to_run
+            ]
+            for fut in as_completed(futures):
+                idx, artifact = fut.result()
+                results[idx] = artifact
+
+    _flush_client(client)
+    artifacts = [results[i] for i in range(total)]
     return _compose_and_finish(
         client=client,
         job_id=job_id,
@@ -630,6 +869,8 @@ def run_pipeline(
             "vlm_model": settings.openrouter_vlm_model,
             "enable_manim_render": settings.enable_manim_render,
             "max_scene_revisions": settings.max_scene_revisions,
+            "enable_auto_vlm_revise": settings.enable_auto_vlm_revise,
+            "vlm_clarity_threshold": settings.vlm_clarity_threshold,
             "resolution": request.resolution,
             "skip_render": request.skip_render,
             "length_preset": request.length_preset,
@@ -1239,47 +1480,45 @@ def iter_continue_events(
     request: Optional[ContinueRequest] = None,
     *,
     user_id: Optional[str] = None,
+    after: Optional[int] = None,
 ) -> Iterator[str]:
-    from queue import Empty, Queue
-    from threading import Thread
+    """
+    Start (or attach to) scene generation detached from this SSE connection.
+    Clients may disconnect and reconnect via iter_job_event_stream.
+    """
+    request = request or ContinueRequest()
+    # Only stream events produced after this continue kickoff (unless attaching).
+    start_after = job_runner.event_count(job_id) if after is None else max(0, after)
 
-    q: Queue[PipelineEvent | None] = Queue()
+    def target() -> None:
+        continue_pipeline(
+            job_id, request, on_event=None, user_id=user_id
+        )
 
-    def on_event(event: PipelineEvent) -> None:
-        q.put(event)
+    started = job_runner.start_job(job_id, target)
+    yield _sse(
+        {
+            "type": PipelineEventType.status.value,
+            "message": (
+                f"Started scene generation for {job_id}"
+                if started
+                else f"Attached to in-flight job {job_id}"
+            ),
+            "data": {
+                "job_id": job_id,
+                "started": started,
+                "running": job_runner.is_running(job_id),
+                "after": start_after,
+            },
+        }
+    )
+    yield from iter_job_event_stream(job_id, after=start_after)
 
-    def worker() -> None:
-        try:
-            continue_pipeline(
-                job_id, request, on_event=on_event, user_id=user_id
-            )
-        except Exception as exc:  # noqa: BLE001
-            q.put(
-                PipelineEvent(
-                    type=PipelineEventType.error,
-                    message=str(exc),
-                    data={"error": str(exc)},
-                )
-            )
-        finally:
-            q.put(None)
 
-    Thread(target=worker, daemon=True).start()
-    while True:
-        try:
-            item = q.get(timeout=600)
-        except Empty:
-            yield _sse(
-                {
-                    "type": "error",
-                    "message": "Continue pipeline timed out",
-                    "data": None,
-                }
-            )
-            break
-        if item is None:
-            break
-        yield _sse(item.model_dump())
+def iter_job_event_stream(job_id: str, *, after: int = 0) -> Iterator[str]:
+    """Tail durable job events (works across refresh / page changes)."""
+    for ev in job_runner.iter_event_tail(job_id, after=after):
+        yield _sse(ev)
 
 
 def iter_regenerate_scene(

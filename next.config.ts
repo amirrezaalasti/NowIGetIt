@@ -40,6 +40,14 @@ const nextConfig: NextConfig = {
           destination: "http://127.0.0.1:8000/api/jobs/:jobId/continue/:path*",
         },
         {
+          source: "/api/jobs/:jobId/events/:path*",
+          destination: "http://127.0.0.1:8000/api/jobs/:jobId/events/:path*",
+        },
+        {
+          source: "/api/jobs/:jobId/status",
+          destination: "http://127.0.0.1:8000/api/jobs/:jobId/status",
+        },
+        {
           source: "/api/jobs/:jobId/plan",
           destination: "http://127.0.0.1:8000/api/jobs/:jobId/plan",
         },

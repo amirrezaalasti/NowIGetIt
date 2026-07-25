@@ -40,6 +40,9 @@ class Settings:
     tts_voice: str
     enable_manim_render: bool
     max_scene_revisions: int
+    enable_auto_vlm_revise: bool
+    vlm_clarity_threshold: float
+    scene_parallelism: int
     supabase_url: str
     supabase_service_role_key: str
     default_llm_estimate_tokens: int
@@ -69,6 +72,10 @@ def get_settings() -> Settings:
         enable_manim_render=os.getenv("ENABLE_MANIM_RENDER", "false").lower()
         in {"1", "true", "yes"},
         max_scene_revisions=int(os.getenv("MAX_SCENE_REVISIONS", "5")),
+        enable_auto_vlm_revise=os.getenv("ENABLE_AUTO_VLM_REVISE", "true").lower()
+        in {"1", "true", "yes"},
+        vlm_clarity_threshold=float(os.getenv("VLM_CLARITY_THRESHOLD", "0.55")),
+        scene_parallelism=max(1, int(os.getenv("SCENE_PARALLELISM", "3"))),
         supabase_url=(
             os.getenv("SUPABASE_URL")
             or os.getenv("NEXT_PUBLIC_SUPABASE_URL")

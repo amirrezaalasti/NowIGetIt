@@ -648,12 +648,26 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
           {job && (
             <>
               <div className="mb-6">
-                <h2 className="font-[family-name:var(--font-display)] text-2xl tracking-tight">
-                  {String(job.scene_plan?.title || selectedSummary?.title || job.job_id)}
-                </h2>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <h2 className="font-[family-name:var(--font-display)] text-2xl tracking-tight">
+                    {String(job.scene_plan?.title || selectedSummary?.title || job.job_id)}
+                  </h2>
+                  <Link
+                    href={`/?job=${encodeURIComponent(job.job_id)}`}
+                    className="shrink-0 text-sm text-[var(--accent)] underline-offset-4 hover:underline"
+                  >
+                    Open in Create
+                  </Link>
+                </div>
                 {selectedSummary?.prompt ? (
                   <p className="mt-2 line-clamp-2 text-sm text-[var(--ink-muted)]">
                     {selectedSummary.prompt}
+                  </p>
+                ) : null}
+                {job.runtime?.status && job.runtime.status !== "complete" ? (
+                  <p className="mt-2 text-xs text-[var(--ink-muted)]">
+                    Status: {job.runtime.status}
+                    {job.runtime.running ? " · generating…" : ""}
                   </p>
                 ) : null}
               </div>

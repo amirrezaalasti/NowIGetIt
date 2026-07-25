@@ -18,9 +18,10 @@ CRITICAL RULES (Manim Community / `manim`, NOT ManimGL):
 3. ALWAYS use `Text("...")` for ALL labels, titles, and mathematical equations.
    DO NOT use `MathTex`, `Tex`, or `TexText`. LaTeX/dvisvgm is not configured on the rendering host.
    For math expressions, write them in plain text inside `Text()`, e.g., `Text("E = mc²")` or `Text("dT/dt = k * ∇²T")`.
-   Prefer `font_size` ≥ 28 for body labels (titles can be larger). Do NOT build words from
+   Prefer `font_size` ≥ 28 for body labels (titles 36–44). Do NOT build words from
    per-letter Text() pieces, and do NOT stretch/skew Text with stretch_to_fit_width.
    Prefer FadeIn/Write on whole Text mobjects; avoid TransformMatchingShapes on long labels.
+   Keep formula Text short (≤ 40 chars). Prefer compact forms over full expansions.
 4. Axes: use `x_length` / `y_length` (not width/height). Example:
    Axes(x_range=[-3, 3, 1], y_range=[-1, 5, 1], x_length=7, y_length=5)
 5. Graphs: `axes.plot(lambda x: x**2, x_range=[-2, 2], color=YELLOW)`
@@ -28,8 +29,17 @@ CRITICAL RULES (Manim Community / `manim`, NOT ManimGL):
 6. Map coords with `axes.c2p(x, y)` / `axes.i2gp(x, graph)`.
 7. No hallucinated methods (.bounce, .jump, .shimmer, Wait() as a mobject).
 8. Use `.animate` for property animations.
-9. Fit content on screen; titles with `to_edge(UP)`.
-10. Keep the scene simple and complete.
+9. LAYOUT (critical — overlapping/cut-off text is a hard failure):
+   - Titles: `to_edge(UP, buff=0.35)`. Keep ≥0.3 margin from all frame edges.
+   - Never place text on top of other text, arrows, or busy diagram paths.
+   - Use VGroup(...).arrange(...) / next_to(..., buff≥0.35) — avoid stacked absolute coords.
+   - At most ONE formula on screen at a time; put it in a reserved zone (usually bottom)
+     with buff≥0.4 from the diagram.
+   - Short labels only (≤3 words). Do NOT dump narration or bitstreams onto the frame.
+   - Progressive reveal: FadeOut previous labels/formulas before showing the next dense beat.
+   - After building a VGroup, if width > 12 or height > 6.5, scale it down to fit.
+   - Boxes must fully contain their labels (font_size 22–28 inside boxes; never clip).
+10. Keep the scene simple and complete — prefer fewer, clearer objects.
 11. Use plain `Scene` only — NOT MovingCameraScene / ThreeDScene.
 12. Do NOT use add_fixed_in_frame_mobjects, AlwaysRedraw, TOP_RIGHT, or camera.frame.
     `always_redraw` is OK. Prefer ValueTracker + updaters for continuous motion.
@@ -53,7 +63,7 @@ def generate_scene_code(
     target_duration_seconds: Optional[float] = None,
     creative_direction: str = "",
 ) -> str:
-    templates = retrieve_templates(scene, limit=2)
+    templates = retrieve_templates(scene, limit=3)
     template_block = format_templates_for_prompt(templates)
     duration = target_duration_seconds or scene.duration_seconds
     # Budget: leave a tiny final hold; distribute the rest across beats
@@ -151,7 +161,9 @@ Current code (may be broken — rewrite fully if needed):
 """
     raw = client.chat(
         system=MANIM_SYSTEM
-        + "\nWhen revising, rewrite the FULL file. Never output checklists or rule audits.",
+        + "\nWhen revising, rewrite the FULL file. Never output checklists or rule audits."
+        + "\nPriority fixes: remove overlaps, stop text clipping, shorten labels,"
+        + " fade prior elements before new ones, keep one formula zone.",
         user=user,
         temperature=0.15,
         max_tokens=8192,

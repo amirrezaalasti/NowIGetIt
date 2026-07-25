@@ -10,7 +10,7 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const secret = process.env.AUTH_SECRET;
+  const secret = process.env.AUTH_SECRET?.trim();
   if (!secret) {
     return NextResponse.json(
       { error: "AUTH_SECRET is not configured" },

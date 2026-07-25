@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
+_EVENT_LOCK = threading.Lock()
 
 
 def artifacts_root() -> Path:
@@ -49,8 +51,10 @@ def write_json(path: Path, data: Any) -> str:
 
 def append_event(job_id: str, event: dict[str, Any]) -> None:
     path = job_dir(job_id) / "events.jsonl"
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    line = json.dumps(event, ensure_ascii=False) + "\n"
+    with _EVENT_LOCK:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
 
 
 def init_job(

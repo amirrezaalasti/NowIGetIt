@@ -28,11 +28,28 @@ Rules:
 - Narration: clear spoken English for TTS. Match duration_seconds to spoken length
   (~2.5 words/sec). Prefer progressive reveal: introduce → build intuition → summarize.
 - Visuals: concrete Manim-friendly elements (shapes, graphs, equations as Text, arrows, labels).
+
+DENSITY / LAYOUT (critical — prevents messy overlapping frames):
+- ONE primary visual idea per scene. Never pack a full multi-gate / multi-module
+  system (e.g. all LSTM gates, full transformer stack) into a single scene.
+- Split complex architectures across scenes: overview → component A → component B → …
+- Per scene: at most 1 formula OR 1 dense diagram focus — not both fighting for space.
+- Per animation beat: introduce at most 3 new on-screen labels/objects; fade or clear
+  previous labels before the next dense beat when needed.
+- Prefer short on-screen labels (≤3 words). Put long explanations in narration only.
+- visual_description must name spatial zones (e.g. "title top; gate box center;
+  one equation bottom") so codegen has a layout plan.
+- animation_beats should say "clear previous labels" / "fade out prior formula"
+  when advancing.
+
 - Pick ONE visual_device per scene from:
   number_line | unit_circle | before_after | particle_flow | equation_reveal |
-  axes_graph | lattice_grid | morph_transform | house_section | comparison_split
+  axes_graph | lattice_grid | morph_transform | house_section | comparison_split |
+  labeled_box_flow | gate_mechanism | annotated_diagram
+- Use labeled_box_flow / gate_mechanism / annotated_diagram for neural nets, pipelines,
+  gates, cells, and other box+arrow systems (never improvise a crowded freeform diagram).
 - style_tags: 2–4 lowercase keywords for template matching
-  (e.g. ["particles","heatmap","house"], ["axes","parabola","tangent"]).
+  (e.g. ["particles","heatmap","house"], ["gate","sigmoid","lstm"], ["boxes","pipeline"]).
 - visual_identity: one sentence describing the overall look (metaphor + mood).
 - palette: object with background, accent, text, highlight as hex colors.
   Prefer a distinctive non-default palette (avoid generic purple). Dark educational

@@ -2,17 +2,23 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { AuthMedia } from "@/components/AuthMedia";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import {
   ensureApiToken,
   fetchHealth,
+  fetchJob,
+  getStoredActiveJobId,
+  setStoredActiveJobId,
   streamContinue,
   streamGenerate,
+  streamJobEvents,
   streamRegenerateScene,
   updateJobPlan,
   type Audience,
+  type JobDetail,
   type LengthPreset,
   type PipelineEvent,
   type ScenePlanDraft,
@@ -137,6 +143,7 @@ function sceneStatusTone(status?: string, approved?: boolean) {
 
 export function Generator() {
   const { status: authStatus } = useSession();
+  const searchParams = useSearchParams();
   const [prompt, setPrompt] = useState("");
   const [lengthPreset, setLengthPreset] = useState<LengthPreset>("standard");
   const [audience, setAudience] = useState<Audience>("general");
@@ -157,9 +164,21 @@ export function Generator() {
   );
   const [promptFocused, setPromptFocused] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  const [restoring, setRestoring] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
+  const eventsLenRef = useRef(0);
+  const didInitialRestoreRef = useRef(false);
   const signedIn = authStatus === "authenticated";
+  const urlJobId = searchParams.get("job");
+
+  useEffect(() => {
+    eventsLenRef.current = events.length;
+  }, [events.length]);
+
+  useEffect(() => {
+    if (jobId) setStoredActiveJobId(jobId);
+  }, [jobId]);
 
   useEffect(() => {
     fetchHealth()
@@ -218,10 +237,15 @@ export function Generator() {
   const showExamples = promptFocused || !prompt.trim();
 
   function applyPipelineEvent(event: PipelineEvent) {
-    setEvents((prev) => [...prev, event]);
+    setEvents((prev) => {
+      const next = [...prev, event];
+      eventsLenRef.current = next.length;
+      return next;
+    });
     setLiveMessage(event.message);
     if (event.data?.job_id && typeof event.data.job_id === "string") {
       setJobId(event.data.job_id);
+      setStoredActiveJobId(event.data.job_id);
     }
     if (
       (event.type === "plan" || event.type === "plan_ready") &&
@@ -383,7 +407,188 @@ export function Generator() {
     }
   }
 
+  function hydrateFromJob(job: JobDetail) {
+    const planData = (job.scene_plan || {}) as Record<string, unknown>;
+    if (planData.title || Array.isArray(planData.scenes)) {
+      const plan = planFromEvent(planData);
+      setPlanTitle(plan.title);
+      setEditingPlan(plan);
+      const previews = plan.scenes.map((s) => {
+        const art = job.scenes.find((x) => x.scene_id === s.id);
+        const lastReview = art?.vlm_reviews?.[art.vlm_reviews.length - 1];
+        const frameUrl =
+          typeof lastReview?.frame_url === "string"
+            ? lastReview.frame_url
+            : undefined;
+        return {
+          id: s.id,
+          title: s.title,
+          narration: s.narration,
+          visualDescription: s.visual_description,
+          beats: s.animation_beats,
+          visualDevice: s.visual_device,
+          duration: s.duration_seconds,
+          videoUrl: art?.video_url,
+          frameUrl,
+          approved:
+            typeof lastReview?.approved === "boolean"
+              ? lastReview.approved
+              : undefined,
+          clarity:
+            typeof lastReview?.clarity_score === "number"
+              ? lastReview.clarity_score
+              : undefined,
+          status: art?.video_url
+            ? "done"
+            : art?.code_final
+              ? "building"
+              : "queued",
+        } satisfies ScenePreview;
+      });
+      setScenes(previews);
+    }
+    if (typeof job.meta?.prompt === "string" && job.meta.prompt) {
+      setPrompt(job.meta.prompt);
+    }
+    if (job.final_video_url) setFinalVideoUrl(job.final_video_url);
+    if (job.final_debug && typeof job.final_debug.notes === "string") {
+      setFinalNotes(job.final_debug.notes);
+    }
+    const replay = (job.events || []).map(
+      (e) =>
+        ({
+          type: String(e.type || "status"),
+          message: String(e.message || ""),
+          data: (e.data as Record<string, unknown>) || null,
+        }) satisfies PipelineEvent,
+    );
+    setEvents(replay);
+    eventsLenRef.current = replay.length;
+    setJobId(job.job_id);
+    setStoredActiveJobId(job.job_id);
+  }
+
+  async function attachToJobStream(activeJobId: string, after: number) {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setRunning(true);
+    setLiveMessage("Reconnected — catching up on progress…");
+    try {
+      await streamJobEvents(activeJobId, applyPipelineEvent, {
+        after,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        setError((err as Error).message);
+      }
+    } finally {
+      if (abortRef.current === controller) {
+        setRunning(false);
+      }
+    }
+  }
+
+  async function resumeOrAttach(job: JobDetail) {
+    const runtime = job.runtime;
+    const status = runtime?.status || "unknown";
+    const after = runtime?.event_count ?? (job.events?.length || 0);
+
+    if (status === "awaiting_plan") {
+      setAwaitingPlan(true);
+      setRunning(false);
+      setLiveMessage("Storyboard ready — confirm to generate video");
+      return;
+    }
+    if (status === "complete") {
+      setAwaitingPlan(false);
+      setRunning(false);
+      setLiveMessage("Restored finished explanation");
+      return;
+    }
+    if (status === "running" || runtime?.running) {
+      setAwaitingPlan(false);
+      await attachToJobStream(job.job_id, Math.max(0, after - 0));
+      // Re-fetch in case stream ended before complete event arrived
+      try {
+        const fresh = await fetchJob(job.job_id);
+        hydrateFromJob(fresh);
+        if (fresh.runtime?.status === "interrupted") {
+          setLiveMessage("Resuming interrupted generation…");
+          await streamContinue(job.job_id, applyPipelineEvent, undefined);
+        }
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    if (status === "interrupted") {
+      setAwaitingPlan(false);
+      setRunning(true);
+      setLiveMessage("Resuming interrupted generation…");
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        await streamContinue(
+          job.job_id,
+          applyPipelineEvent,
+          controller.signal,
+        );
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          setError((err as Error).message);
+        }
+      } finally {
+        if (abortRef.current === controller) setRunning(false);
+      }
+      return;
+    }
+    setRunning(false);
+  }
+
+  // Restore active job after refresh, or when opened via /?job=…
+  useEffect(() => {
+    if (authStatus === "loading") return;
+    if (!signedIn) {
+      setRestoring(false);
+      return;
+    }
+    const restoreId =
+      urlJobId ||
+      (!didInitialRestoreRef.current ? getStoredActiveJobId() : null);
+    didInitialRestoreRef.current = true;
+    if (!restoreId) {
+      setRestoring(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        await ensureApiToken();
+        const job = await fetchJob(restoreId);
+        if (cancelled) return;
+        hydrateFromJob(job);
+        setRestoring(false);
+        await resumeOrAttach(job);
+      } catch {
+        if (!cancelled) {
+          setStoredActiveJobId(null);
+          setRestoring(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      // Drop this UI subscription only — backend job keeps running.
+      abortRef.current?.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial restore + URL job changes
+  }, [authStatus, signedIn, urlJobId]);
+
   function resetToCompose() {
+    // Stop watching this job in the UI, but leave the backend job running.
     abortRef.current?.abort();
     setRunning(false);
     setAwaitingPlan(false);
@@ -394,6 +599,7 @@ export function Generator() {
     setFinalNotes(null);
     setFinalVideoUrl(null);
     setJobId(null);
+    setStoredActiveJobId(null);
     setError(null);
     setLiveMessage("");
     setRegenDirection({});
@@ -401,11 +607,14 @@ export function Generator() {
   }
 
   async function onGenerate() {
-    if (!prompt.trim() || running) return;
+    if (!prompt.trim() || running || restoring) return;
     if (!signedIn) {
       window.location.href = "/login";
       return;
     }
+    // Detach UI from any previous job without cancelling it on the server.
+    abortRef.current?.abort();
+    setStoredActiveJobId(null);
     setRunning(true);
     setAwaitingPlan(false);
     setEditingPlan(null);
@@ -418,7 +627,6 @@ export function Generator() {
     setJobId(null);
     setLiveMessage("Planning storyboard…");
     setLogOpen(false);
-    abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -440,7 +648,9 @@ export function Generator() {
         setError((err as Error).message);
       }
     } finally {
-      setRunning(false);
+      if (abortRef.current === controller) {
+        setRunning(false);
+      }
     }
   }
 
@@ -818,14 +1028,16 @@ export function Generator() {
                     type="button"
                     onClick={() => abortRef.current?.abort()}
                     className="text-sm text-[var(--ink-muted)] underline-offset-4 hover:underline"
+                    title="Stop updating this page — generation keeps running in the background"
                   >
-                    Cancel
+                    Stop watching
                   </button>
                 )}
                 <button
                   type="button"
                   onClick={resetToCompose}
                   className="rounded-md border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] transition hover:border-[var(--accent)] hover:text-[var(--ink)]"
+                  title="Start something new — the previous job keeps generating and stays in your library"
                 >
                   New explanation
                 </button>

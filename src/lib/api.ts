@@ -22,6 +22,16 @@ export type HumanComment = {
   created_at: string;
 };
 
+export type JobRuntimeStatus = {
+  job_id: string;
+  status: "complete" | "running" | "awaiting_plan" | "interrupted" | "unknown" | string;
+  running: boolean;
+  event_count: number;
+  has_result: boolean;
+  has_final_video: boolean;
+  error?: string | null;
+};
+
 export type JobDetail = {
   job_id: string;
   meta?: Record<string, unknown> | null;
@@ -40,7 +50,29 @@ export type JobDetail = {
   }>;
   events?: Array<Record<string, unknown>>;
   urls?: Record<string, string>;
+  runtime?: JobRuntimeStatus;
 };
+
+const ACTIVE_JOB_KEY = "nowigetit:activeJobId";
+
+export function getStoredActiveJobId(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return sessionStorage.getItem(ACTIVE_JOB_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredActiveJobId(jobId: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (jobId) sessionStorage.setItem(ACTIVE_JOB_KEY, jobId);
+    else sessionStorage.removeItem(ACTIVE_JOB_KEY);
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
 
 type TokenCache = { token: string; expiresAt: number };
 
@@ -309,6 +341,42 @@ export async function fetchJob(jobId: string): Promise<JobDetail> {
   });
   if (!res.ok) throw new Error(`Job not found: ${jobId}`);
   return res.json();
+}
+
+export async function fetchJobStatus(jobId: string): Promise<JobRuntimeStatus> {
+  const res = await fetch(`${apiBase()}/api/jobs/${jobId}/status`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) throw new Error(`Job status unavailable: ${jobId}`);
+  return res.json();
+}
+
+export async function streamJobEvents(
+  jobId: string,
+  onEvent: (event: PipelineEvent) => void,
+  opts?: { after?: number; signal?: AbortSignal },
+): Promise<void> {
+  const after = opts?.after ?? 0;
+  try {
+    const res = await fetch(
+      `${apiBase()}/api/jobs/${jobId}/events/stream?after=${after}`,
+      {
+        method: "GET",
+        headers: await authHeaders({ Accept: "text/event-stream" }),
+        signal: opts?.signal,
+        cache: "no-store",
+      },
+    );
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `Event stream failed (${res.status})`);
+    }
+    await readSseStream(res, onEvent);
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Job events");
+  }
 }
 
 export type LengthPreset = "short" | "standard" | "deep";

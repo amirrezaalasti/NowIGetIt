@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { AppHeader } from "@/components/AppHeader";
 import { Generator } from "@/components/Generator";
 
@@ -7,7 +8,15 @@ export default function Home() {
       <div className="pointer-events-none absolute inset-0 grid-haze" aria-hidden />
       <AppHeader />
       <div className="relative z-10 flex flex-1 flex-col">
-        <Generator />
+        <Suspense
+          fallback={
+            <div className="px-6 py-16 text-sm text-[var(--ink-muted)]">
+              Loading…
+            </div>
+          }
+        >
+          <Generator />
+        </Suspense>
       </div>
     </main>
   );

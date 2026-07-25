@@ -171,6 +171,86 @@ self.play(Create(walls), Create(roof), run_time=1.2)
 self.play(FadeIn(interior), run_time=1.0)
 """.strip(),
     ),
+    ManimTemplate(
+        id="labeled_box_flow",
+        title="Horizontal labeled boxes with arrows (pipeline)",
+        tags=("boxes", "pipeline", "flow", "network", "layers", "lstm", "transformer"),
+        devices=("labeled_box_flow",),
+        snippet="""
+# Pattern: 3 short-labeled boxes in a row — never crowd formulas on the arrows
+title = Text("Data Flow", font_size=36).to_edge(UP, buff=0.35)
+boxes = VGroup()
+labels = ["Input", "Process", "Output"]
+for name in labels:
+    box = RoundedRectangle(width=2.4, height=1.4, corner_radius=0.12, color=TEAL)
+    lab = Text(name, font_size=26)
+    boxes.add(VGroup(box, lab))
+boxes.arrange(RIGHT, buff=1.1)
+arrows = VGroup(
+    Arrow(boxes[0].get_right(), boxes[1].get_left(), buff=0.12, color=GREY_B),
+    Arrow(boxes[1].get_right(), boxes[2].get_left(), buff=0.12, color=GREY_B),
+)
+group = VGroup(boxes, arrows).move_to(ORIGIN)
+self.play(Write(title), run_time=0.6)
+self.play(LaggedStart(*[FadeIn(b) for b in boxes], lag_ratio=0.2), run_time=1.2)
+self.play(LaggedStart(*[GrowArrow(a) for a in arrows], lag_ratio=0.2), run_time=0.8)
+# Optional single caption zone BELOW — never overlay on arrows
+caption = Text("one step at a time", font_size=28).next_to(group, DOWN, buff=0.55)
+self.play(FadeIn(caption), run_time=0.6)
+""".strip(),
+    ),
+    ManimTemplate(
+        id="gate_mechanism",
+        title="Single gate / cell box with progressive internals",
+        tags=("gate", "sigmoid", "tanh", "lstm", "cell", "memory", "forget", "input"),
+        devices=("gate_mechanism",),
+        snippet="""
+# Pattern: ONE gate box; reveal internals then ONE formula in a bottom zone
+title = Text("Forget Gate", font_size=36).to_edge(UP, buff=0.35)
+gate = RoundedRectangle(width=4.2, height=2.6, corner_radius=0.15, color=ORANGE)
+gate.move_to(ORIGIN + UP * 0.2)
+gate_label = Text("Forget Gate", font_size=24).next_to(gate, UP, buff=0.15)
+sigma = Text("σ", font_size=40).move_to(gate.get_center() + LEFT * 0.9)
+tanh_t = Text("tanh", font_size=28).move_to(gate.get_center() + RIGHT * 0.8)
+# Inputs from left — short labels only
+h_in = Text("h(t-1)", font_size=24).next_to(gate, LEFT, buff=0.9).shift(UP * 0.5)
+x_in = Text("x(t)", font_size=24).next_to(gate, LEFT, buff=0.9).shift(DOWN * 0.5)
+a1 = Arrow(h_in.get_right(), gate.get_left() + UP * 0.4, buff=0.1, color=TEAL)
+a2 = Arrow(x_in.get_right(), gate.get_left() + DOWN * 0.4, buff=0.1, color=TEAL)
+self.play(Write(title), Create(gate), Write(gate_label), run_time=1.0)
+self.play(FadeIn(h_in), FadeIn(x_in), GrowArrow(a1), GrowArrow(a2), run_time=1.0)
+self.play(Write(sigma), Write(tanh_t), run_time=0.8)
+# Clear busy labels before showing formula (prevents overlap)
+self.play(FadeOut(h_in), FadeOut(x_in), FadeOut(a1), FadeOut(a2), run_time=0.4)
+formula = Text("f(t) = σ(W · [h, x] + b)", font_size=30)
+formula.to_edge(DOWN, buff=0.55)
+self.play(Write(formula), run_time=1.0)
+""".strip(),
+    ),
+    ManimTemplate(
+        id="annotated_diagram",
+        title="Diagram zone + reserved formula/caption zone",
+        tags=("annotated", "diagram", "zones", "callout", "architecture"),
+        devices=("annotated_diagram",),
+        snippet="""
+# Pattern: fixed layout zones — diagram center, one annotation bottom (never overlap)
+title = Text("Cell State Path", font_size=36).to_edge(UP, buff=0.35)
+diagram = VGroup(
+    Line(LEFT * 4, RIGHT * 4, color=TEAL),
+    RoundedRectangle(width=2.2, height=1.3, corner_radius=0.12, color=ORANGE),
+)
+diagram[1].move_to(ORIGIN)
+diag_lab = Text("Update", font_size=26).move_to(diagram[1].get_center())
+diagram_group = VGroup(diagram, diag_lab).shift(UP * 0.35)
+# Reserved bottom band for exactly one explanation line
+note = Text("cell state flows left → right", font_size=28).to_edge(DOWN, buff=0.55)
+self.play(Write(title), Create(diagram[0]), Create(diagram[1]), Write(diag_lab), run_time=1.4)
+self.play(FadeIn(note), run_time=0.7)
+# Next beat: replace note instead of stacking
+note2 = Text("gates scale what is kept", font_size=28).to_edge(DOWN, buff=0.55)
+self.play(FadeOut(note), FadeIn(note2), run_time=0.7)
+""".strip(),
+    ),
 ]
 
 
@@ -206,12 +286,23 @@ def retrieve_templates(scene: SceneSection, *, limit: int = 2) -> list[ManimTemp
     if scored:
         return [t for _, t in scored[:limit]]
 
-    # Fallback: axes_graph or equation_reveal from narration cues
+    # Fallback: pick from narration cues when scorer finds nothing
+    by_id = {t.id: t for t in TEMPLATES}
+    if any(
+        w in blob
+        for w in ("gate", "lstm", "sigmoid", "tanh", "forget", "cell state")
+    ):
+        return [by_id["gate_mechanism"], by_id["annotated_diagram"]]
+    if any(
+        w in blob
+        for w in ("pipeline", "layer", "network", "transformer", "encoder", "boxes")
+    ):
+        return [by_id["labeled_box_flow"]]
     if any(w in blob for w in ("graph", "plot", "curve", "parabola", "axes")):
-        return [TEMPLATES[0]]
+        return [by_id["axes_parabola"]]
     if any(w in blob for w in ("equation", "formula", "equals")):
-        return [TEMPLATES[1]]
-    return [TEMPLATES[0]]
+        return [by_id["equation_reveal"]]
+    return [by_id["annotated_diagram"]]
 
 
 def format_templates_for_prompt(templates: list[ManimTemplate]) -> str:
