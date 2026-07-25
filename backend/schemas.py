@@ -12,6 +12,23 @@ class GenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=3, max_length=32000)
     resolution: str = Field(default="720p", pattern="^(480p|720p|1080p)$")
     skip_render: bool = False
+    # short ≈ 60s intuition · standard ≈ 90s · deep ≈ 3 min
+    length_preset: str = Field(
+        default="standard", pattern="^(short|standard|deep)$"
+    )
+    # hs | undergrad | general — steers metaphor depth and jargon
+    audience: str = Field(
+        default="general", pattern="^(hs|undergrad|general)$"
+    )
+    # If true, stop after planning so the UI can edit the storyboard
+    plan_only: bool = False
+
+
+class ContinueRequest(BaseModel):
+    resolution: Optional[str] = Field(
+        default=None, pattern="^(480p|720p|1080p)$"
+    )
+    skip_render: bool = False
 
 
 class SceneSection(BaseModel):
@@ -26,13 +43,39 @@ class SceneSection(BaseModel):
     animation_beats: list[str] = Field(default_factory=list)
     duration_seconds: float = Field(default=8.0, ge=2.0, le=60.0)
     camera_notes: str = ""
+    # Pedagogical visual device, e.g. number_line, equation_reveal, particle_flow
+    visual_device: str = ""
+    # Keyword tags used for Manim template retrieval
+    style_tags: list[str] = Field(default_factory=list)
 
 
 class ScenePlan(BaseModel):
     title: str
     concept_summary: str
     style_notes: str = ""
+    # Visual identity: palette + metaphor direction for consistent look
+    visual_identity: str = ""
+    palette: dict[str, str] = Field(
+        default_factory=dict,
+        description="Named colors e.g. background, accent, text, highlight",
+    )
     scenes: list[SceneSection]
+
+
+class UpdatePlanRequest(BaseModel):
+    plan: ScenePlan
+
+
+class RegenerateSceneRequest(BaseModel):
+    """Regenerate one scene from its plan section (optionally edited)."""
+
+    direction: str = Field(
+        default="",
+        max_length=500,
+        description="Optional creative direction, e.g. 'more visual, less text'",
+    )
+    section: Optional[SceneSection] = None
+    skip_render: bool = False
 
 
 class VlmReview(BaseModel):
@@ -40,6 +83,9 @@ class VlmReview(BaseModel):
     issues: list[str] = Field(default_factory=list)
     revision_instructions: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Teacher-style scores (0–1); optional for backward compatibility
+    clarity_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    misconception_risk: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class SceneCommentRequest(BaseModel):
@@ -61,6 +107,7 @@ class SceneComment(BaseModel):
 class PipelineEventType(str, Enum):
     status = "status"
     plan = "plan"
+    plan_ready = "plan_ready"
     scene_start = "scene_start"
     scene_code = "scene_code"
     scene_render = "scene_render"
@@ -108,3 +155,4 @@ class GenerateResult(BaseModel):
     job_id: str = ""
     artifact_url: Optional[str] = None
     scene_plan_url: Optional[str] = None
+    awaiting_plan_confirm: bool = False

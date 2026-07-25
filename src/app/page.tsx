@@ -1,21 +1,22 @@
+import { Suspense } from "react";
+import { AppHeader } from "@/components/AppHeader";
 import { Generator } from "@/components/Generator";
 
 export default function Home() {
   return (
-    <main className="relative flex flex-1 flex-col overflow-hidden bg-atmosphere">
+    <main className="relative flex flex-1 flex-col overflow-x-hidden bg-atmosphere">
       <div className="pointer-events-none absolute inset-0 grid-haze" aria-hidden />
-
-      <header className="relative z-10 mx-auto w-full max-w-3xl px-6 pt-16 sm:pt-24">
-        <p className="animate-rise font-[family-name:var(--font-display)] text-5xl tracking-tight text-[var(--ink)] sm:text-7xl">
-          NowIGetIt
-        </p>
-        <h1 className="animate-rise-delay mt-5 max-w-xl text-xl leading-snug text-[var(--ink-muted)] sm:text-2xl">
-          Prompt in. Scene plan, visual QA, voice — until the idea clicks.
-        </h1>
-      </header>
-
-      <div className="relative z-10">
-        <Generator />
+      <AppHeader />
+      <div className="relative z-10 flex flex-1 flex-col">
+        <Suspense
+          fallback={
+            <div className="px-6 py-16 text-sm text-[var(--ink-muted)]">
+              Loading…
+            </div>
+          }
+        >
+          <Generator />
+        </Suspense>
       </div>
     </main>
   );

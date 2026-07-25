@@ -2,7 +2,16 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "api/index.py": {
-      "maxDuration": 300
+      "maxDuration": 300,
+      "memory": 1024
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/api/health", "destination": "/api/index" },
+    { "source": "/api/me", "destination": "/api/index" },
+    { "source": "/api/generate", "destination": "/api/index" },
+    { "source": "/api/generate/:path*", "destination": "/api/index" },
+    { "source": "/api/jobs", "destination": "/api/index" },
+    { "source": "/api/jobs/:path*", "destination": "/api/index" }
+  ]
 }

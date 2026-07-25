@@ -3,18 +3,31 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
-ARTIFACTS_ROOT = ROOT / "artifacts"
+_EVENT_LOCK = threading.Lock()
 
 
 def artifacts_root() -> Path:
-    ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
-    return ARTIFACTS_ROOT
+    """
+    Local: repo/artifacts. On Vercel the deploy FS is read-only, so use /tmp.
+    Note: /tmp is ephemeral per instance — durable ownership/usage lives in Supabase.
+    """
+    override = (os.getenv("ARTIFACTS_ROOT") or "").strip()
+    if override:
+        root = Path(override)
+    elif os.getenv("VERCEL"):
+        root = Path("/tmp/nowigetit/artifacts")
+    else:
+        root = ROOT / "artifacts"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def job_dir(job_id: str) -> Path:
@@ -38,11 +51,21 @@ def write_json(path: Path, data: Any) -> str:
 
 def append_event(job_id: str, event: dict[str, Any]) -> None:
     path = job_dir(job_id) / "events.jsonl"
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    line = json.dumps(event, ensure_ascii=False) + "\n"
+    with _EVENT_LOCK:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
 
 
-def init_job(job_id: str, *, prompt: str, settings_snapshot: dict[str, Any]) -> Path:
+def init_job(
+    job_id: str,
+    *,
+    prompt: str,
+    settings_snapshot: dict[str, Any],
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    user_name: Optional[str] = None,
+) -> Path:
     root = job_dir(job_id)
     write_json(
         root / "meta.json",
@@ -51,9 +74,35 @@ def init_job(job_id: str, *, prompt: str, settings_snapshot: dict[str, Any]) -> 
             "prompt": prompt,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "settings": settings_snapshot,
+            "user_id": user_id,
+            "user_email": user_email,
+            "user_name": user_name,
         },
     )
     return root
+
+
+def job_owner_id(job_id: str) -> Optional[str]:
+    meta_path = artifacts_root() / job_id / "meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    owner = meta.get("user_id")
+    return owner if isinstance(owner, str) and owner else None
+
+
+def assert_job_owner(job_id: str, user_id: str) -> None:
+    """Raise FileNotFoundError if missing, PermissionError if not owned by user."""
+    root = artifacts_root() / job_id
+    if not root.exists() or not (root / "meta.json").exists():
+        raise FileNotFoundError(job_id)
+    owner = job_owner_id(job_id)
+    # Legacy jobs without owner are inaccessible once auth is on
+    if owner != user_id:
+        raise PermissionError(job_id)
 
 
 def save_scene_plan(job_id: str, plan: dict[str, Any]) -> str:
@@ -115,16 +164,54 @@ def save_final_debug(job_id: str, data: dict[str, Any]) -> str:
     return write_json(job_dir(job_id) / "final_debug.json", data)
 
 
+def _faststart_copy(src: Path, dest: Path) -> bool:
+    """Remux mp4 with moov at the front so browsers can play while downloading."""
+    if not shutil.which("ffmpeg"):
+        shutil.copy2(src, dest)
+        return dest.exists()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a temp file then replace — avoids serving a half-written mp4.
+    tmp = dest.with_suffix(".tmp.mp4")
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(src),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(tmp),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(dest)
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if tmp.exists():
+        tmp.unlink(missing_ok=True)
+    shutil.copy2(src, dest)
+    return dest.exists()
+
+
 def publish_scene_video(
     job_id: str,
     scene_id: str,
     video_path: Optional[str],
 ) -> Optional[str]:
-    """Copy rendered video into the scene artifact folder for HTTP serving."""
+    """Publish a web-playable scene.mp4 (faststart) into the artifact folder."""
     if not video_path or not Path(video_path).exists():
         return None
     dest = scene_dir(job_id, scene_id) / "scene.mp4"
-    shutil.copy2(video_path, dest)
+    if not _faststart_copy(Path(video_path), dest):
+        return None
     return f"/api/jobs/{job_id}/file/scenes/{scene_id}/scene.mp4"
 
 
@@ -132,7 +219,7 @@ def save_result(job_id: str, data: dict[str, Any]) -> str:
     return write_json(job_dir(job_id) / "result.json", data)
 
 
-def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
+def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[str, Any]]:
     root = artifacts_root()
     jobs: list[dict[str, Any]] = []
     for path in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -145,6 +232,8 @@ def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 pass
+        if user_id is not None and meta.get("user_id") != user_id:
+            continue
         plan_path = path / "scene_plan.json"
         title = None
         if plan_path.exists():
@@ -159,6 +248,7 @@ def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
                 "prompt": meta.get("prompt"),
                 "created_at": meta.get("created_at"),
                 "has_result": (path / "result.json").exists(),
+                "user_id": meta.get("user_id"),
             }
         )
         if len(jobs) >= limit:

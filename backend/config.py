@@ -6,12 +6,24 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 # Load repo-root .env for local uvicorn (Next.js loads this itself; Python does not).
 _ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_ROOT / ".env")
-load_dotenv(_ROOT / ".env.local", override=True)
+
+
+def _load_env_files() -> None:
+    """Load .env then .env.local, but never let empty local values wipe .env."""
+    load_dotenv(_ROOT / ".env")
+    local_path = _ROOT / ".env.local"
+    if not local_path.exists():
+        return
+    for key, value in dotenv_values(local_path).items():
+        if key and value is not None and str(value).strip():
+            os.environ[key] = str(value)
+
+
+_load_env_files()
 
 
 @dataclass(frozen=True)
@@ -28,6 +40,14 @@ class Settings:
     tts_voice: str
     enable_manim_render: bool
     max_scene_revisions: int
+    enable_auto_vlm_revise: bool
+    vlm_clarity_threshold: float
+    scene_parallelism: int
+    supabase_url: str
+    supabase_service_role_key: str
+    default_llm_estimate_tokens: int
+    render_worker_url: str
+    render_worker_secret: str
 
 
 def get_settings() -> Settings:
@@ -51,5 +71,20 @@ def get_settings() -> Settings:
         tts_voice=os.getenv("TTS_VOICE", "alloy"),
         enable_manim_render=os.getenv("ENABLE_MANIM_RENDER", "false").lower()
         in {"1", "true", "yes"},
-        max_scene_revisions=int(os.getenv("MAX_SCENE_REVISIONS", "2")),
+        max_scene_revisions=int(os.getenv("MAX_SCENE_REVISIONS", "5")),
+        enable_auto_vlm_revise=os.getenv("ENABLE_AUTO_VLM_REVISE", "true").lower()
+        in {"1", "true", "yes"},
+        vlm_clarity_threshold=float(os.getenv("VLM_CLARITY_THRESHOLD", "0.55")),
+        scene_parallelism=max(1, int(os.getenv("SCENE_PARALLELISM", "3"))),
+        supabase_url=(
+            os.getenv("SUPABASE_URL")
+            or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+            or ""
+        ).strip(),
+        supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip(),
+        default_llm_estimate_tokens=int(
+            os.getenv("DEFAULT_LLM_ESTIMATE_TOKENS", "25000")
+        ),
+        render_worker_url=(os.getenv("RENDER_WORKER_URL") or "").strip().rstrip("/"),
+        render_worker_secret=(os.getenv("RENDER_WORKER_SECRET") or "").strip(),
     )

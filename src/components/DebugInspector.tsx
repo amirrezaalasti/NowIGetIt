@@ -1,10 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useSession } from "next-auth/react";
 import {
   addSceneComment,
   approveScene,
   assetUrl,
+  ensureApiToken,
   fetchJob,
   listJobs,
   streamRetouch,
@@ -200,7 +203,7 @@ function SceneVideoPlayer({
         <video
           ref={videoRef}
           key={String(videoCacheBust)}
-          className="w-full rounded-xl border border-[var(--line)] bg-black"
+          className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-video)]"
           src={videoSrc}
           controls
           playsInline
@@ -208,27 +211,27 @@ function SceneVideoPlayer({
         />
         {latestFrameUrl && (
           <div className="mt-2 rounded-xl border border-[var(--line)] overflow-hidden">
-            <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--ink-muted)] bg-black/40">
+            <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--ink-muted)] bg-[var(--surface-strong)]">
               Updated Concept Preview (Manim rendering disabled — code is revised)
             </p>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={assetUrl(latestFrameUrl)}
               alt="Retouched concept preview"
-              className="w-full object-contain bg-black/30"
+              className="w-full object-contain bg-[var(--surface-panel)]"
             />
           </div>
         )}
       </div>
 
       {/* ── Chat Thread ── */}
-      <div className="rounded-xl border border-[var(--line)] bg-[rgba(255,255,255,0.02)] flex flex-col">
-        <div className="px-4 pt-3 pb-2 border-b border-[var(--line)]">
+      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)] flex flex-col">
+        <div className="border-b border-[var(--line)] px-4 pb-2 pt-3">
           <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--ink)]">
-            Scene Feedback &amp; AI Retouch Chat
+            Scene feedback
           </h4>
-          <p className="text-[10px] text-[var(--ink-muted)] mt-0.5">
-            Describe changes below — AI will revise this scene only.
+          <p className="mt-0.5 text-[10px] text-[var(--ink-muted)]">
+            Describe changes — AI revises this scene only.
           </p>
         </div>
 
@@ -246,14 +249,14 @@ function SceneVideoPlayer({
               <div key={c.id} className="space-y-2">
                 {/* Human message bubble */}
                 <div className="flex items-end gap-2 justify-end">
-                  <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-[var(--accent)] px-3 py-2 text-xs text-black">
+                  <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-[var(--accent)] px-3 py-2 text-xs text-[var(--on-accent)]">
                     {typeof c.timestamp === "number" && (
                       <button
                         type="button"
                         onClick={() => seekTo(c.timestamp)}
                         className="mb-1 flex items-center gap-1 text-[10px] opacity-70 hover:opacity-100"
                       >
-                        ⏱ At {c.timestamp.toFixed(1)}s
+                        At {c.timestamp.toFixed(1)}s
                       </button>
                     )}
                     <p className="leading-relaxed">{c.comment}</p>
@@ -269,7 +272,7 @@ function SceneVideoPlayer({
                     <div className="shrink-0 w-6 h-6 rounded-full bg-[var(--line)] flex items-center justify-center text-[10px]">
                       AI
                     </div>
-                    <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--line)] bg-[rgba(0,0,0,0.3)] px-3 py-2 text-xs space-y-1">
+                    <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--line)] bg-[var(--surface-panel)] px-3 py-2 text-xs space-y-1">
                       {reply.steps.map((s, i) => (
                         <div
                           key={i}
@@ -311,16 +314,16 @@ function SceneVideoPlayer({
                             <button
                               type="button"
                               onClick={() => void handleApprove(c.id)}
-                              className="flex-1 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-[11px] font-semibold text-black hover:opacity-90 transition"
+                              className="flex-1 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-[11px] font-semibold text-[var(--on-accent)] hover:opacity-90 transition"
                             >
-                              ✓ Approve &amp; Update Final Video
+                              Approve &amp; update final video
                             </button>
                             <button
                               type="button"
                               onClick={() => handleReject(c.id)}
-                              className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-[11px] font-medium text-[var(--ink-muted)] hover:text-[var(--ink)] hover:border-[var(--ink)] transition"
+                              className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-[11px] font-medium text-[var(--ink-muted)] transition hover:border-[var(--ink)] hover:text-[var(--ink)]"
                             >
-                              ✗ Not quite
+                              Not quite
                             </button>
                           </div>
                         </div>
@@ -337,8 +340,8 @@ function SceneVideoPlayer({
 
                       {reply.approvalState === "approved" && (
                         <div className="mt-2 space-y-1 border-t border-[var(--line)] pt-2">
-                          <p className="text-[var(--accent)] font-semibold text-[11px]">
-                            ✓ Approved! Final video updated.
+                          <p className="text-[11px] font-semibold text-[var(--accent)]">
+                            Approved — final video updated.
                           </p>
                           {reply.approvalNote && (
                             <p className="text-[var(--ink-muted)] text-[10px] italic">{reply.approvalNote}</p>
@@ -355,7 +358,7 @@ function SceneVideoPlayer({
                       )}
 
                       {reply.error && (
-                        <p className="text-red-400 pt-0.5 text-[11px]">⚠ {reply.error}</p>
+                        <p className="pt-0.5 text-[11px] text-red-400">{reply.error}</p>
                       )}
                     </div>
                   </div>
@@ -389,7 +392,7 @@ function SceneVideoPlayer({
             }}
             placeholder="Describe what to change… (⌘↵ to send)"
             rows={2}
-            className="w-full rounded-lg border border-[var(--line)] bg-black/40 p-2 text-xs text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] resize-none"
+            className="w-full rounded-lg border border-[var(--line)] bg-[var(--surface-strong)] p-2 text-xs text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] resize-none"
           />
           <div className="flex items-center justify-between gap-2">
             <label className="flex items-center gap-1.5 text-xs text-[var(--ink-muted)] cursor-pointer">
@@ -405,9 +408,9 @@ function SceneVideoPlayer({
               type="button"
               onClick={handleSubmit}
               disabled={!newComment.trim() || submitting}
-              className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-xs font-semibold text-black transition hover:opacity-90 disabled:opacity-40"
+              className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-xs font-semibold text-[var(--on-accent)] transition hover:opacity-90 disabled:opacity-40"
             >
-              {submitting ? "Retouching…" : "Send ↵"}
+              {submitting ? "Retouching…" : "Send"}
             </button>
           </div>
         </div>
@@ -427,24 +430,31 @@ type Props = {
 const POLL_MS = 1500;
 
 export function DebugInspector({ activeJobId, live = false }: Props) {
+  const { status: authStatus } = useSession();
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [job, setJob] = useState<JobDetail | null>(null);
-  const [tab, setTab] = useState<"plan" | "scenes" | "events">("scenes");
+  const [tab, setTab] = useState<"scenes" | "advanced">("scenes");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const hasLoadedRef = useRef(false);
   const loadedForIdRef = useRef<string | null>(null);
+  const signedIn = authStatus === "authenticated";
 
   const refreshJobs = useCallback(async () => {
+    if (!signedIn) {
+      setJobs([]);
+      return;
+    }
     try {
+      await ensureApiToken();
       const list = await listJobs();
       setJobs(list);
     } catch {
-      /* API may be offline */
+      /* API may be offline or session expired */
     }
-  }, []);
+  }, [signedIn]);
 
   const bumpRefresh = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -459,7 +469,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
   }, [activeJobId]);
 
   useEffect(() => {
-    if (!selectedId) {
+    if (!selectedId || !signedIn) {
       setJob(null);
       hasLoadedRef.current = false;
       loadedForIdRef.current = null;
@@ -476,7 +486,8 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
     if (!silent) setLoading(true);
     setError(null);
 
-    fetchJob(selectedId)
+    void ensureApiToken()
+      .then(() => fetchJob(selectedId))
       .then((detail) => {
         if (!cancelled) {
           setJob(detail);
@@ -493,7 +504,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, refreshKey]);
+  }, [selectedId, refreshKey, signedIn]);
 
   // Live-poll artifacts while generation is running for the selected job
   useEffect(() => {
@@ -517,21 +528,50 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
     bumpRefresh();
   }
 
+  const selectedSummary = useMemo(
+    () => jobs.find((j) => j.job_id === selectedId) || null,
+    [jobs, selectedId],
+  );
+
+  if (!signedIn) {
+    return (
+      <section className="relative mx-auto flex w-full max-w-xl flex-1 flex-col justify-center px-6 pb-28 pt-4 text-center">
+        <h1 className="font-[family-name:var(--font-display)] text-3xl tracking-tight text-[var(--ink)]">
+          Your library
+        </h1>
+        <p className="mx-auto mt-3 max-w-md text-sm text-[var(--ink-muted)]">
+          Sign in to revisit past explanations, download videos, and retouch
+          individual scenes.
+        </p>
+        <Link
+          href="/login?callbackUrl=/library"
+          className="mt-8 inline-flex self-center rounded-full bg-[var(--accent)] px-8 py-3 text-base font-semibold text-[var(--on-accent)] transition hover:brightness-110"
+        >
+          Continue with Google
+        </Link>
+      </section>
+    );
+  }
+
   return (
-    <section className="relative mx-auto w-full max-w-3xl px-6 pb-28">
-      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+    <section className="relative mx-auto w-full max-w-4xl px-6 pb-28">
+      <div className="mb-8 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-xs uppercase tracking-[0.16em] text-[var(--ink-muted)]">
-            Debug inspector
+          <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">
+            Library
             {live && selectedId === activeJobId && (
               <span className="ml-2 normal-case tracking-normal text-[var(--accent)]">
                 · live
               </span>
             )}
           </p>
-          <h2 className="mt-1 font-[family-name:var(--font-display)] text-2xl">
-            Saved plans & VLM frames
-          </h2>
+          <h1 className="mt-1 font-[family-name:var(--font-display)] text-3xl tracking-tight">
+            Past explanations
+          </h1>
+          <p className="mt-2 max-w-lg text-sm text-[var(--ink-muted)]">
+            Open a job to watch the final video, leave scene feedback, or dig into
+            advanced artifacts.
+          </p>
         </div>
         <button
           type="button"
@@ -542,184 +582,275 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
         </button>
       </div>
 
-      <div className="mb-6 flex flex-wrap gap-2">
-        {jobs.length === 0 && (
-          <p className="text-sm text-[var(--ink-muted)]">
-            No saved jobs yet — generate once to populate{" "}
-            <code className="text-[var(--accent)]">artifacts/</code>.
+      <div className="grid gap-8 lg:grid-cols-[16rem_1fr]">
+        <aside>
+          <p className="mb-3 text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+            Jobs
           </p>
-        )}
-        {jobs.map((j) => (
-          <button
-            key={j.job_id}
-            type="button"
-            onClick={() => setSelectedId(j.job_id)}
-            className={`rounded-full border px-3 py-1.5 text-left text-xs transition ${
-              selectedId === j.job_id
-                ? "border-[var(--accent)] text-[var(--ink)]"
-                : "border-[var(--line)] text-[var(--ink-muted)] hover:text-[var(--ink)]"
-            }`}
-          >
-            <span className="font-medium">{j.title || j.job_id}</span>
-            <span className="ml-2 opacity-60">{j.job_id.slice(0, 6)}</span>
-          </button>
-        ))}
-      </div>
-
-      {error && (
-        <p className="mb-4 text-sm text-red-200">{error}</p>
-      )}
-      {loading && (
-        <p className="mb-4 text-sm text-[var(--ink-muted)]">Loading job…</p>
-      )}
-
-      {job && (
-        <>
-          {(job.final_video_url || job.urls?.final_video) && (
-            <div className="mb-8">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <p className="text-sm text-[var(--ink)]">
-                  Final video <span className="text-[var(--ink-muted)]">(with audio)</span>
-                </p>
-                <a
-                  href={assetUrl(job.final_video_url || job.urls?.final_video)}
-                  download
-                  className="text-sm text-[var(--accent)] underline-offset-4 hover:underline"
-                >
-                  Download
-                </a>
-              </div>
-              <video
-                key={job.final_video_url || job.urls?.final_video}
-                className="w-full rounded-2xl border border-[var(--line)] bg-black"
-                src={assetUrl(job.final_video_url || job.urls?.final_video)}
-                controls
-                playsInline
-                preload="metadata"
-              />
+          {jobs.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-6 text-sm text-[var(--ink-muted)]">
+              Nothing here yet.{" "}
+              <Link
+                href="/"
+                className="text-[var(--accent)] underline-offset-4 hover:underline"
+              >
+                Create an explanation
+              </Link>{" "}
+              and it will show up here.
             </div>
+          ) : (
+            <ul className="space-y-1">
+              {jobs.map((j) => {
+                const active = selectedId === j.job_id;
+                return (
+                  <li key={j.job_id}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedId(j.job_id);
+                        setTab("scenes");
+                      }}
+                      className={`w-full rounded-lg px-3 py-2.5 text-left transition ${
+                        active
+                          ? "bg-[var(--surface)] text-[var(--ink)]"
+                          : "text-[var(--ink-muted)] hover:bg-[var(--surface)]/60 hover:text-[var(--ink)]"
+                      }`}
+                    >
+                      <span className="block truncate text-sm font-medium">
+                        {j.title || "Untitled"}
+                      </span>
+                      <span className="mt-0.5 block truncate font-mono text-[10px] opacity-60">
+                        {j.job_id.slice(0, 10)}
+                        {j.has_result ? " · ready" : ""}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </aside>
+
+        <div className="min-w-0">
+          {error && (
+            <p className="mb-4 text-sm text-[var(--danger-ink)]">{error}</p>
+          )}
+          {loading && (
+            <p className="mb-4 text-sm text-[var(--ink-muted)]">Loading job…</p>
           )}
 
-          <div className="mb-4 flex gap-4 text-sm">
-            {(
-              [
-                ["scenes", "Scenes & frames"],
-                ["plan", "Scene JSON"],
-                ["events", "Event log"],
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setTab(id)}
-                className={`border-b pb-1 transition ${
-                  tab === id
-                    ? "border-[var(--accent)] text-[var(--ink)]"
-                    : "border-transparent text-[var(--ink-muted)]"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-            {job.urls?.scene_plan && (
-              <a
-                href={assetUrl(job.urls.scene_plan)}
-                target="_blank"
-                rel="noreferrer"
-                className="ml-auto text-[var(--accent)] underline-offset-4 hover:underline"
-              >
-                Open scene_plan.json
-              </a>
-            )}
-          </div>
-
-          {tab === "plan" && (
-            <pre className="max-h-[32rem] overflow-auto rounded-2xl border border-[var(--line)] bg-[rgba(0,0,0,0.3)] p-4 text-xs leading-relaxed text-[var(--ink-muted)]">
-              {JSON.stringify(job.scene_plan, null, 2)}
-            </pre>
+          {!selectedId && jobs.length > 0 && (
+            <p className="text-sm text-[var(--ink-muted)]">
+              Select a job from the list to open it.
+            </p>
           )}
 
-          {tab === "events" && (
-            <pre className="max-h-[32rem] overflow-auto rounded-2xl border border-[var(--line)] bg-[rgba(0,0,0,0.3)] p-4 text-xs leading-relaxed text-[var(--ink-muted)]">
-              {JSON.stringify(job.events, null, 2)}
-            </pre>
-          )}
-
-          {tab === "scenes" && (
-            <div className="space-y-8">
-              {job.scenes.map((scene) => (
-                <article
-                  key={scene.scene_id}
-                  className="border-t border-[var(--line)] pt-6"
-                >
-                  <h3 className="text-lg font-medium">
-                    {String(scene.section?.title || scene.scene_id)}
-                  </h3>
-                  <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                    {String(scene.section?.visual_description || "")}
+          {job && (
+            <>
+              <div className="mb-6">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <h2 className="font-[family-name:var(--font-display)] text-2xl tracking-tight">
+                    {String(job.scene_plan?.title || selectedSummary?.title || job.job_id)}
+                  </h2>
+                  <Link
+                    href={`/?job=${encodeURIComponent(job.job_id)}`}
+                    className="shrink-0 text-sm text-[var(--accent)] underline-offset-4 hover:underline"
+                  >
+                    Open in Create
+                  </Link>
+                </div>
+                {selectedSummary?.prompt ? (
+                  <p className="mt-2 line-clamp-2 text-sm text-[var(--ink-muted)]">
+                    {selectedSummary.prompt}
                   </p>
+                ) : null}
+                {job.runtime?.status && job.runtime.status !== "complete" ? (
+                  <p className="mt-2 text-xs text-[var(--ink-muted)]">
+                    Status: {job.runtime.status}
+                    {job.runtime.running ? " · generating…" : ""}
+                  </p>
+                ) : null}
+              </div>
 
-                  {scene.video_url && (
-                    <SceneVideoPlayer
-                      jobId={job.job_id}
-                      sceneId={scene.scene_id}
-                      videoUrl={assetUrl(scene.video_url)}
-                      initialComments={scene.human_comments || []}
-                      onRefresh={bumpRefresh}
-                    />
+              {(job.final_video_url || job.urls?.final_video) && (
+                <div className="mb-10">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <p className="text-sm text-[var(--ink)]">Final video</p>
+                    <a
+                      href={assetUrl(job.final_video_url || job.urls?.final_video)}
+                      download
+                      className="text-sm text-[var(--accent)] underline-offset-4 hover:underline"
+                    >
+                      Download
+                    </a>
+                  </div>
+                  <video
+                    key={job.final_video_url || job.urls?.final_video}
+                    className="w-full rounded-2xl border border-[var(--line)] bg-[var(--surface-video)]"
+                    src={assetUrl(job.final_video_url || job.urls?.final_video)}
+                    controls
+                    playsInline
+                    preload="metadata"
+                  />
+                </div>
+              )}
+
+              <div className="mb-6 flex gap-4 border-b border-[var(--line)] text-sm">
+                <button
+                  type="button"
+                  onClick={() => setTab("scenes")}
+                  className={`border-b-2 pb-2 transition ${
+                    tab === "scenes"
+                      ? "border-[var(--accent)] text-[var(--ink)]"
+                      : "border-transparent text-[var(--ink-muted)]"
+                  }`}
+                >
+                  Scenes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTab("advanced")}
+                  className={`border-b-2 pb-2 transition ${
+                    tab === "advanced"
+                      ? "border-[var(--accent)] text-[var(--ink)]"
+                      : "border-transparent text-[var(--ink-muted)]"
+                  }`}
+                >
+                  Advanced
+                </button>
+              </div>
+
+              {tab === "scenes" && (
+                <div className="space-y-8">
+                  {job.scenes.length === 0 && (
+                    <p className="text-sm text-[var(--ink-muted)]">
+                      No scenes recorded for this job yet.
+                    </p>
+                  )}
+                  {job.scenes.map((scene) => (
+                    <article
+                      key={scene.scene_id}
+                      className="border-t border-[var(--line)] pt-6 first:border-t-0 first:pt-0"
+                    >
+                      <h3 className="text-lg font-medium">
+                        {String(scene.section?.title || scene.scene_id)}
+                      </h3>
+                      <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                        {String(scene.section?.visual_description || "")}
+                      </p>
+
+                      {scene.video_url && (
+                        <SceneVideoPlayer
+                          jobId={job.job_id}
+                          sceneId={scene.scene_id}
+                          videoUrl={assetUrl(scene.video_url)}
+                          initialComments={scene.human_comments || []}
+                          onRefresh={bumpRefresh}
+                        />
+                      )}
+
+                      {(scene.vlm_reviews || []).length > 0 && (
+                        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                          {(scene.vlm_reviews || []).map((review, idx) => (
+                            <div
+                              key={`${scene.scene_id}-r${idx}`}
+                              className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--surface)]"
+                            >
+                              {typeof review.frame_url === "string" &&
+                                review.frame_url && (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img
+                                    src={assetUrl(review.frame_url)}
+                                    alt={`Frame preview ${idx}`}
+                                    className="aspect-video w-full bg-[var(--surface-strong)] object-cover"
+                                  />
+                                )}
+                              <div className="p-3 text-xs text-[var(--ink-muted)]">
+                                Concept frame ·{" "}
+                                {String(
+                                  review.review_mode ||
+                                    review.frame_source ||
+                                    "preview",
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+
+              {tab === "advanced" && (
+                <div className="space-y-6">
+                  {job.urls?.scene_plan && (
+                    <a
+                      href={assetUrl(job.urls.scene_plan)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-block text-sm text-[var(--accent)] underline-offset-4 hover:underline"
+                    >
+                      Open scene_plan.json
+                    </a>
                   )}
 
-                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                    {(scene.vlm_reviews || []).map((review, idx) => (
-                      <div
-                        key={`${scene.scene_id}-r${idx}`}
-                        className="overflow-hidden rounded-xl border border-[var(--line)] bg-[rgba(255,255,255,0.02)]"
-                      >
-                        {typeof review.frame_url === "string" && review.frame_url && (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={assetUrl(review.frame_url)}
-                            alt={`Frame preview ${idx}`}
-                            className="aspect-video w-full object-cover bg-black/40"
-                          />
-                        )}
-                        <div className="space-y-2 p-3 text-xs">
-                          <p className="text-[var(--ink-muted)]">
-                            Initial Concept Frame ·{" "}
-                            {String(review.review_mode || review.frame_source || "preview")}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <details open className="group">
+                    <summary className="cursor-pointer text-sm text-[var(--ink)]">
+                      Scene plan JSON
+                    </summary>
+                    <pre className="mt-3 max-h-[24rem] overflow-auto rounded-xl border border-[var(--line)] bg-[var(--surface-panel)] p-4 text-xs leading-relaxed text-[var(--ink-muted)]">
+                      {JSON.stringify(job.scene_plan, null, 2)}
+                    </pre>
+                  </details>
 
-                  {scene.code_final && (
-                    <details className="mt-4">
-                      <summary className="cursor-pointer text-sm text-[var(--ink-muted)]">
+                  <details className="group">
+                    <summary className="cursor-pointer text-sm text-[var(--ink)]">
+                      Event log
+                    </summary>
+                    <pre className="mt-3 max-h-[24rem] overflow-auto rounded-xl border border-[var(--line)] bg-[var(--surface-panel)] p-4 text-xs leading-relaxed text-[var(--ink-muted)]">
+                      {JSON.stringify(job.events, null, 2)}
+                    </pre>
+                  </details>
+
+                  {job.scenes.some((s) => s.code_final) && (
+                    <details className="group">
+                      <summary className="cursor-pointer text-sm text-[var(--ink)]">
                         Generated Manim code
                       </summary>
-                      <pre className="mt-2 max-h-64 overflow-auto rounded-xl border border-[var(--line)] bg-black/30 p-3 text-[11px] text-[var(--ink-muted)]">
-                        {scene.code_final}
+                      <div className="mt-3 space-y-4">
+                        {job.scenes.map((scene) =>
+                          scene.code_final ? (
+                            <div key={scene.scene_id}>
+                              <p className="mb-2 text-xs text-[var(--ink-muted)]">
+                                {String(scene.section?.title || scene.scene_id)}
+                              </p>
+                              <pre className="max-h-64 overflow-auto rounded-xl border border-[var(--line)] bg-[var(--surface-panel)] p-3 text-[11px] text-[var(--ink-muted)]">
+                                {scene.code_final}
+                              </pre>
+                            </div>
+                          ) : null,
+                        )}
+                      </div>
+                    </details>
+                  )}
+
+                  {job.final_debug && (
+                    <details className="group">
+                      <summary className="cursor-pointer text-sm text-[var(--ink)]">
+                        Final debug
+                      </summary>
+                      <pre className="mt-3 max-h-[24rem] overflow-auto rounded-xl border border-[var(--line)] bg-[var(--surface-panel)] p-4 text-xs text-[var(--ink-muted)]">
+                        {JSON.stringify(job.final_debug, null, 2)}
                       </pre>
                     </details>
                   )}
-                </article>
-              ))}
-
-              {job.final_debug && (
-                <div className="rounded-xl border border-[var(--line)] p-4 text-sm">
-                  <p className="text-xs uppercase tracking-[0.14em] text-[var(--ink-muted)]">
-                    Final debug
-                  </p>
-                  <pre className="mt-2 overflow-auto text-xs text-[var(--ink-muted)]">
-                    {JSON.stringify(job.final_debug, null, 2)}
-                  </pre>
                 </div>
               )}
-            </div>
+            </>
           )}
-        </>
-      )}
+        </div>
+      </div>
     </section>
   );
 }

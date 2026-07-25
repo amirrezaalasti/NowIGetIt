@@ -5,6 +5,57 @@ from __future__ import annotations
 import ast
 import re
 
+# Pango lays out Text() at the given font_size in pixels; small sizes get
+# uneven letter advances (broken kerning). Render at a safe size, then scale.
+# See: https://github.com/ManimCommunity/manim/issues/2844
+_TEXT_KERNING_MARKER = "# _NOWIGETIT_TEXT_KERNING_SHIM"
+_TEXT_KERNING_MIN_SIZE = 48.0
+_TEXT_KERNING_SHIM = f"""{_TEXT_KERNING_MARKER}
+_ManimText = Text
+_ManimMarkupText = MarkupText
+_ManimParagraph = Paragraph
+_TEXT_KERNING_MIN = {_TEXT_KERNING_MIN_SIZE}
+
+def _kerning_safe_text(factory, text, args, kwargs):
+    # width/height stretch the SVG and ruin letter spacing
+    kwargs.pop("width", None)
+    kwargs.pop("height", None)
+    kwargs.setdefault("disable_ligatures", True)
+    font_size = kwargs.get("font_size", 48)
+    try:
+        size = float(font_size)
+    except (TypeError, ValueError):
+        return factory(text, *args, **kwargs)
+    internal = max(size, _TEXT_KERNING_MIN)
+    kwargs["font_size"] = internal
+    mob = factory(text, *args, **kwargs)
+    if internal != size:
+        mob.scale(size / internal)
+    return mob
+
+def Text(text, *args, **kwargs):
+    return _kerning_safe_text(_ManimText, text, args, kwargs)
+
+def MarkupText(text, *args, **kwargs):
+    return _kerning_safe_text(_ManimMarkupText, text, args, kwargs)
+
+def Paragraph(*text, **kwargs):
+    kwargs.pop("width", None)
+    kwargs.pop("height", None)
+    kwargs.setdefault("disable_ligatures", True)
+    font_size = kwargs.get("font_size", 48)
+    try:
+        size = float(font_size)
+    except (TypeError, ValueError):
+        return _ManimParagraph(*text, **kwargs)
+    internal = max(size, _TEXT_KERNING_MIN)
+    kwargs["font_size"] = internal
+    mob = _ManimParagraph(*text, **kwargs)
+    if internal != size:
+        mob.scale(size / internal)
+    return mob
+"""
+
 
 def validate_manim_code(code: str) -> tuple[bool, str]:
     """Return (ok, error). Rejects truncated / commentary-polluted outputs."""
@@ -23,6 +74,18 @@ def validate_manim_code(code: str) -> tuple[bool, str]:
     except SyntaxError as exc:
         return False, f"SyntaxError: {exc.msg} (line {exc.lineno})"
     return True, ""
+
+
+def _inject_text_kerning_shim(code: str) -> str:
+    """Shadow Text/MarkupText/Paragraph with kerning-safe wrappers."""
+    if _TEXT_KERNING_MARKER in code:
+        return code
+    shim = _TEXT_KERNING_SHIM.strip() + "\n"
+    match = re.search(r"^from manim import \*[ \t]*$", code, flags=re.M)
+    if match:
+        insert_at = match.end()
+        return code[:insert_at] + "\n" + shim + code[insert_at:]
+    return shim + "\n" + code
 
 
 def clean_manim_code(code: str) -> str:
@@ -63,7 +126,8 @@ def clean_manim_code(code: str) -> str:
     code = re.sub(r"(\bAxes\s*\([^)]*?)\bheight\s*=", r"\1y_length=", code)
     # NumberPlane width/height similarly
     code = re.sub(r"(\bNumberPlane\s*\([^)]*?)\bwidth\s*=", r"\1x_length=", code)
-    code = re.sub(r"(\bNumberPlane\s*\([^)]*?)\bheight\s*=", r"\1y_length=", code)    # Convert MathTex and Tex to Text to prevent dvisvgm / LaTeX system dependencies
+    code = re.sub(r"(\bNumberPlane\s*\([^)]*?)\bheight\s*=", r"\1y_length=", code)
+    # Convert MathTex and Tex to Text to prevent dvisvgm / LaTeX system dependencies
     code = re.sub(r"\bMathTex\s*\(", "Text(", code)
     code = re.sub(r"\bTex\s*\(", "Text(", code)
     code = re.sub(r"\bTexText\s*\(", "Text(", code)
@@ -104,6 +168,7 @@ def clean_manim_code(code: str) -> str:
     for imp in ("import numpy as np", "import math"):
         if imp not in code:
             code = imp + "\n" + code
+    code = _inject_text_kerning_shim(code)
     return code.strip()
 
 

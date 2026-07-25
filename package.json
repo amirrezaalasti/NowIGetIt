@@ -2,16 +2,19 @@
   "name": "nowigetit",
   "version": "0.1.0",
   "private": true,
+  "license": "UNLICENSED",
+  "author": "Amirreza Alasti <amirrezaalasti@gmail.com>",
   "scripts": {
     "dev": "next dev",
     "dev:api": ".venv/bin/uvicorn api.index:app --reload --host 127.0.0.1 --port 8000",
-    "dev:all": "npm run dev:api & npm run dev",
+    "dev:all": "npx --yes concurrently -k -n api,web -c cyan,magenta \"npm run dev:api\" \"npm run dev\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
     "next": "16.2.11",
+    "next-auth": "^5.0.0-beta.32",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },

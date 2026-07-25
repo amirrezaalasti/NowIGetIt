@@ -1,13 +1,17 @@
-"""Local Manim Community Edition rendering + end-frame extraction."""
+"""Local Manim Community Edition rendering + optional Railway remote worker."""
 
 from __future__ import annotations
 
+import base64
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
+
+import httpx
 
 from backend.code_utils import clean_manim_code, extract_scene_name
 from backend.config import get_settings
@@ -21,25 +25,132 @@ def render_scene(
     scene_id: str = "scene",
 ) -> tuple[Optional[str], Optional[str], str]:
     """
-    Render a Manim Community scene when ENABLE_MANIM_RENDER=true.
+    Render a Manim Community scene.
+
+    Prefer RENDER_WORKER_URL (Railway) when set; otherwise local Manim when
+    ENABLE_MANIM_RENDER=true.
 
     Returns (video_path, frame_path, log).
-    Preview frame is taken from near the END of the clip (final hold),
-    not the first second — that was causing empty/title-only VLM frames.
     """
     settings = get_settings()
+    # Avoid recursion inside the Railway worker container itself.
+    worker_mode = os.getenv("RENDER_WORKER_MODE", "").lower() in {"1", "true", "yes"}
+    remote_log = ""
+    if settings.render_worker_url and not worker_mode:
+        video, frame, remote_log = _render_scene_remote(
+            code,
+            work_dir=work_dir,
+            resolution=resolution,
+            scene_id=scene_id,
+            worker_url=settings.render_worker_url,
+            worker_secret=settings.render_worker_secret,
+        )
+        if video:
+            return video, frame, remote_log
+        # Wrong/stale worker URL (e.g. HTTP 404) or transient failure → try local.
+        remote_log = (
+            f"Remote worker failed; falling back to local Manim.\n{remote_log}"
+        )
+
     if not settings.enable_manim_render:
         return (
             None,
             None,
-            "Manim render disabled (ENABLE_MANIM_RENDER=false).",
+            remote_log
+            or "Manim render disabled (set ENABLE_MANIM_RENDER=true or RENDER_WORKER_URL).",
         )
 
     try:
         import manim  # noqa: F401
     except ImportError:
-        return None, None, "manim (Community Edition) not installed; skipping render."
+        return (
+            None,
+            None,
+            (remote_log + "\n" if remote_log else "")
+            + "manim (Community Edition) not installed; skipping render.",
+        )
 
+    video, frame, local_log = _render_scene_local(
+        code,
+        work_dir=work_dir,
+        resolution=resolution,
+        scene_id=scene_id,
+    )
+    if remote_log:
+        local_log = f"{remote_log}\n--- local ---\n{local_log}"
+    return video, frame, local_log
+
+
+def _render_scene_remote(
+    code: str,
+    *,
+    work_dir: Path,
+    resolution: str,
+    scene_id: str,
+    worker_url: str,
+    worker_secret: str,
+) -> tuple[Optional[str], Optional[str], str]:
+    # Ensure Text kerning shim + other normalizations ship with the payload.
+    code = clean_manim_code(code)
+    headers = {"Content-Type": "application/json"}
+    if worker_secret:
+        headers["Authorization"] = f"Bearer {worker_secret}"
+
+    try:
+        with httpx.Client(timeout=httpx.Timeout(360.0, connect=30.0)) as client:
+            res = client.post(
+                f"{worker_url}/render",
+                headers=headers,
+                json={
+                    "code": code,
+                    "resolution": resolution,
+                    "scene_id": scene_id,
+                },
+            )
+    except Exception as exc:  # noqa: BLE001
+        return None, None, f"Render worker request failed: {exc}"
+
+    if res.status_code >= 400:
+        detail = res.text[:2000]
+        return None, None, f"Render worker HTTP {res.status_code}: {detail}"
+
+    try:
+        payload = res.json()
+    except Exception as exc:  # noqa: BLE001
+        return None, None, f"Render worker returned non-JSON: {exc}"
+
+    log = str(payload.get("log") or "")
+    if not payload.get("ok"):
+        return None, None, str(payload.get("error") or log or "Remote render failed")
+
+    video_b64 = payload.get("video_base64")
+    if not video_b64:
+        return None, None, f"Remote render missing video.\n{log[-2000:]}"
+
+    out_dir = Path(work_dir).resolve() / scene_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    video_path = out_dir / f"{scene_id}.mp4"
+    video_path.write_bytes(base64.b64decode(video_b64))
+
+    frame_path: Optional[str] = None
+    frame_b64 = payload.get("frame_base64")
+    if frame_b64:
+        frame_file = out_dir / "preview.png"
+        frame_file.write_bytes(base64.b64decode(frame_b64))
+        frame_path = str(frame_file)
+    else:
+        frame_path = _extract_preview_frame(str(video_path), out_dir / "preview.png")
+
+    return str(video_path), frame_path, log[-2500:]
+
+
+def _render_scene_local(
+    code: str,
+    *,
+    work_dir: Path,
+    resolution: str,
+    scene_id: str,
+) -> tuple[Optional[str], Optional[str], str]:
     code = clean_manim_code(code)
     scene_dir = Path(work_dir).resolve() / scene_id
     scene_dir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +210,6 @@ def _extract_preview_frame(video_path: str, frame_path: Path) -> Optional[str]:
     if not shutil.which("ffmpeg"):
         return None
     frame_path = Path(frame_path)
-    # Prefer end-of-file seek (final hold / last beat).
     attempts = [
         [
             "ffmpeg",

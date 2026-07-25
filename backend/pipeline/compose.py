@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 
-def _probe_duration(path: Path) -> float:
+def probe_duration(path: Path) -> float:
+    """Return media duration in seconds, or 0 if unknown."""
     if not path.exists() or not shutil.which("ffprobe"):
         return 0.0
     try:
@@ -32,6 +33,13 @@ def _probe_duration(path: Path) -> float:
         return 0.0
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return str(a) == str(b)
+
+
 def mux_scene_audio(
     video_path: str,
     audio_path: Optional[str],
@@ -53,14 +61,30 @@ def mux_scene_audio(
         return None
 
     if not audio_path or not Path(audio_path).exists():
+        if _same_file(video, output_path):
+            return str(output_path)
         shutil.copy2(video, output_path)
         return str(output_path)
 
     audio = Path(audio_path)
-    v_dur = _probe_duration(video)
-    a_dur = _probe_duration(audio)
+    v_dur = probe_duration(video)
+    a_dur = probe_duration(audio)
     # Small pad so endings aren't clipped
     target = max(v_dur, a_dur) + 0.15
+
+    # Avoid ffmpeg/copy writing onto the same inode (re-mux / continue paths).
+    write_path = output_path
+    if _same_file(video, output_path):
+        write_path = output_path.with_name(output_path.stem + ".mux.tmp.mp4")
+
+    def _finalize() -> Optional[str]:
+        if write_path == output_path:
+            return str(output_path) if output_path.exists() else None
+        if not write_path.exists() or write_path.stat().st_size <= 0:
+            write_path.unlink(missing_ok=True)
+            return None
+        write_path.replace(output_path)
+        return str(output_path)
 
     # Freeze last frame to cover narration; pad/trim audio to the same length.
     cmd = [
@@ -93,12 +117,14 @@ def mux_scene_audio(
         "192k",
         "-movflags",
         "+faststart",
-        str(output_path),
+        str(write_path),
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
-            return str(output_path)
+        if proc.returncode == 0 and write_path.exists() and write_path.stat().st_size > 0:
+            done = _finalize()
+            if done:
+                return done
         # Fallback: basic mux (may truncate longer stream)
         proc2 = subprocess.run(
             [
@@ -119,16 +145,23 @@ def mux_scene_audio(
                 "-map",
                 "1:a:0",
                 "-shortest",
-                str(output_path),
+                str(write_path),
             ],
             capture_output=True,
             timeout=120,
         )
-        if proc2.returncode == 0 and output_path.exists():
-            return str(output_path)
+        if proc2.returncode == 0 and write_path.exists():
+            done = _finalize()
+            if done:
+                return done
     except Exception:  # noqa: BLE001
         pass
+    finally:
+        if write_path != output_path:
+            write_path.unlink(missing_ok=True)
 
+    if _same_file(video, output_path):
+        return str(output_path)
     shutil.copy2(video, output_path)
     return str(output_path)
 
@@ -147,6 +180,8 @@ def compose_final_video(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if len(existing) == 1:
+        if _same_file(existing[0], output_path):
+            return str(output_path)
         shutil.copy2(existing[0], output_path)
         return str(output_path)
 
@@ -246,6 +281,8 @@ def compose_final_video(
     if proc.returncode == 0 and output_path.exists():
         return str(output_path)
 
+    if _same_file(existing[0], output_path):
+        return str(output_path)
     shutil.copy2(existing[0], output_path)
     return str(output_path) if output_path.exists() else None
 

@@ -31,6 +31,29 @@ class OpenRouterClient:
         )
         self.model = self.settings.openrouter_model
         self.vlm_model = self.settings.openrouter_vlm_model
+        self.usage_log: list[dict[str, Any]] = []
+
+    def _track_usage(self, response: Any, *, model: str, kind: str) -> None:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return
+        tokens_in = int(getattr(usage, "prompt_tokens", 0) or 0)
+        tokens_out = int(getattr(usage, "completion_tokens", 0) or 0)
+        if tokens_in <= 0 and tokens_out <= 0:
+            return
+        self.usage_log.append(
+            {
+                "kind": kind,
+                "model": model,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+            }
+        )
+
+    def drain_usage_log(self) -> list[dict[str, Any]]:
+        entries = list(self.usage_log)
+        self.usage_log.clear()
+        return entries
 
     def chat(
         self,
@@ -46,8 +69,9 @@ class OpenRouterClient:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
+        resolved_model = model or self.model
         kwargs: dict[str, Any] = {
-            "model": model or self.model,
+            "model": resolved_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -56,6 +80,8 @@ class OpenRouterClient:
             kwargs["response_format"] = {"type": "json_object"}
 
         response = self.client.chat.completions.create(**kwargs)
+        kind = "vlm" if resolved_model == self.vlm_model else "llm"
+        self._track_usage(response, model=resolved_model, kind=kind)
         content = response.choices[0].message.content or ""
         return content.strip()
 
@@ -188,10 +214,19 @@ def repair_llm_json(text: str) -> str:
             i += 2
             continue
 
-        # \b \f \n \r \t — valid JSON, but often LaTeX (\frac, \theta, \beta…)
-        # If more letters follow the escape char, treat as literal LaTeX.
+        # \b \f \n \r \t — valid JSON escapes, but models often mean literal text
+        # (e.g. identifiers like C_t written as C\t after a bad escape, or LaTeX
+        # \theta / \frac). Prefer escaping the backslash whenever the following
+        # chars look like a word/identifier rather than a real control char.
         if nxt in "bfnrt":
-            if i + 2 < n and text[i + 2].isalpha():
+            # Real JSON control escapes are almost never followed by alnum/_ .
+            if i + 2 < n and (text[i + 2].isalnum() or text[i + 2] in "_("):
+                out.append("\\\\")
+                out.append(nxt)
+                i += 2
+                continue
+            # Lone \t / \n mid-sentence before punctuation → treat as literal.
+            if i + 2 < n and text[i + 2] in "')]},.":
                 out.append("\\\\")
                 out.append(nxt)
                 i += 2
@@ -239,6 +274,58 @@ def extract_first_json_object(text: str) -> str | None:
     return None
 
 
+def salvage_truncated_json(text: str) -> str | None:
+    """
+    Close JSON cut off mid-response (unterminated strings / missing ] }).
+
+    Common with VLMs that hit max_tokens while writing revision_instructions.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    s = repair_llm_json(text[start:])
+    # Drop a dangling backslash at EOF (incomplete escape).
+    if s.endswith("\\") and not s.endswith("\\\\"):
+        s = s[:-1]
+
+    in_string = False
+    escape = False
+    stack: list[str] = []
+
+    for ch in s:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in "}]":
+            if stack and stack[-1] == ch:
+                stack.pop()
+
+    if not stack and not in_string:
+        return s
+
+    out = s
+    if in_string:
+        if out.endswith("\\"):
+            out = out[:-1]
+        out += '"'
+    out = re.sub(r",\s*$", "", out)
+    while stack:
+        out += stack.pop()
+    return out
+
+
 def _loads_object(text: str) -> dict[str, Any]:
     """Parse a JSON object, ignoring trailing junk after the first value."""
     decoder = json.JSONDecoder()
@@ -263,6 +350,9 @@ def parse_json_object(text: str) -> dict[str, Any]:
     match = re.search(r"\{[\s\S]*\}", cleaned)
     if match:
         candidates.append(match.group(0))
+    salvaged = salvage_truncated_json(cleaned)
+    if salvaged:
+        candidates.append(salvaged)
 
     last_error: Exception | None = None
     seen: set[str] = set()
