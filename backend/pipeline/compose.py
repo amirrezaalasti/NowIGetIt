@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 
-def _probe_duration(path: Path) -> float:
+def probe_duration(path: Path) -> float:
+    """Return media duration in seconds, or 0 if unknown."""
     if not path.exists() or not shutil.which("ffprobe"):
         return 0.0
     try:
@@ -57,8 +58,8 @@ def mux_scene_audio(
         return str(output_path)
 
     audio = Path(audio_path)
-    v_dur = _probe_duration(video)
-    a_dur = _probe_duration(audio)
+    v_dur = probe_duration(video)
+    a_dur = probe_duration(audio)
     # Small pad so endings aren't clipped
     target = max(v_dur, a_dur) + 0.15
 

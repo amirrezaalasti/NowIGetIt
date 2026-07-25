@@ -74,6 +74,8 @@ def _render_scene_remote(
     worker_url: str,
     worker_secret: str,
 ) -> tuple[Optional[str], Optional[str], str]:
+    # Ensure Text kerning shim + other normalizations ship with the payload.
+    code = clean_manim_code(code)
     headers = {"Content-Type": "application/json"}
     if worker_secret:
         headers["Authorization"] = f"Bearer {worker_secret}"

@@ -160,16 +160,54 @@ def save_final_debug(job_id: str, data: dict[str, Any]) -> str:
     return write_json(job_dir(job_id) / "final_debug.json", data)
 
 
+def _faststart_copy(src: Path, dest: Path) -> bool:
+    """Remux mp4 with moov at the front so browsers can play while downloading."""
+    if not shutil.which("ffmpeg"):
+        shutil.copy2(src, dest)
+        return dest.exists()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a temp file then replace — avoids serving a half-written mp4.
+    tmp = dest.with_suffix(".tmp.mp4")
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(src),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(tmp),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(dest)
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if tmp.exists():
+        tmp.unlink(missing_ok=True)
+    shutil.copy2(src, dest)
+    return dest.exists()
+
+
 def publish_scene_video(
     job_id: str,
     scene_id: str,
     video_path: Optional[str],
 ) -> Optional[str]:
-    """Copy rendered video into the scene artifact folder for HTTP serving."""
+    """Publish a web-playable scene.mp4 (faststart) into the artifact folder."""
     if not video_path or not Path(video_path).exists():
         return None
     dest = scene_dir(job_id, scene_id) / "scene.mp4"
-    shutil.copy2(video_path, dest)
+    if not _faststart_copy(Path(video_path), dest):
+        return None
     return f"/api/jobs/{job_id}/file/scenes/{scene_id}/scene.mp4"
 
 

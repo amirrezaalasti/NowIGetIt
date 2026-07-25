@@ -20,12 +20,18 @@ Reject only for real code problems:
 - scene clearly misses core visual beats from the brief
 - dangerous/incomplete expressions cut mid-line
 
+Also score teaching quality (0–1):
+- clarity_score: how clearly the code would teach the concept
+- misconception_risk: how likely a learner is to walk away confused
+
 Return JSON:
 {
   "approved": boolean,
   "issues": [string],
   "revision_instructions": string,
-  "confidence": number
+  "confidence": number,
+  "clarity_score": number,
+  "misconception_risk": number
 }
 """
 
@@ -34,14 +40,21 @@ A REAL rendered preview frame is attached (not a text storyboard).
 Compare the frame + code against the intended scene description.
 
 Approve only if the frame clearly shows the intended concept.
-Flag: missing objects, clutter/overlap, wrong math, illegible text, empty frame, off-brief.
+Flag: missing objects, clutter/overlap, wrong math, illegible text, uneven/broken
+letter spacing inside words, empty frame, off-brief.
+
+Also score teaching quality (0–1):
+- clarity_score: how clearly the frame teaches the concept
+- misconception_risk: how likely a learner is to walk away confused
 
 Return JSON:
 {
   "approved": boolean,
   "issues": [string],
   "revision_instructions": string,
-  "confidence": number
+  "confidence": number,
+  "clarity_score": number,
+  "misconception_risk": number
 }
 """
 

@@ -21,11 +21,22 @@ from backend.auth import CurrentUser, MediaUser, auth_is_configured
 from backend.config import get_settings
 from backend.pipeline.orchestrator import (
     approve_scene,
+    iter_continue_events,
     iter_pipeline_events,
+    iter_regenerate_scene,
     iter_retouch_scene,
     run_pipeline,
+    update_scene_plan,
 )
-from backend.schemas import GenerateRequest, GenerateResult, SceneComment, SceneCommentRequest
+from backend.schemas import (
+    ContinueRequest,
+    GenerateRequest,
+    GenerateResult,
+    RegenerateSceneRequest,
+    SceneComment,
+    SceneCommentRequest,
+    UpdatePlanRequest,
+)
 
 
 def _quota_http(exc: db.QuotaExceededError) -> HTTPException:
@@ -193,6 +204,85 @@ def get_job(job_id: str, user: CurrentUser) -> dict:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
 
 
+@app.put("/api/jobs/{job_id}/plan")
+def put_scene_plan(
+    job_id: str, body: UpdatePlanRequest, user: CurrentUser
+) -> dict:
+    """Save an edited storyboard before continuing generation."""
+    _require_job_owner(job_id, user.id)
+    plan = update_scene_plan(job_id, body.plan)
+    return {"ok": True, "job_id": job_id, "plan": plan.model_dump()}
+
+
+@app.post("/api/jobs/{job_id}/continue/stream")
+def continue_stream(
+    job_id: str,
+    user: CurrentUser,
+    body: ContinueRequest = ContinueRequest(),
+) -> StreamingResponse:
+    """SSE: continue a plan_only job after the user confirms the storyboard."""
+    _require_job_owner(job_id, user.id)
+    try:
+        db.assert_within_quotas(user.id, need_tokens=20_000)
+    except db.QuotaExceededError as exc:
+        raise _quota_http(exc) from exc
+
+    def event_stream():
+        try:
+            for chunk in iter_continue_events(
+                job_id, body, user_id=user.id
+            ):
+                yield chunk
+        except db.QuotaExceededError as exc:
+            import json
+
+            yield f"data: {json.dumps({'type': 'error', 'message': exc.detail, 'data': {'code': exc.code}})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_id}/regenerate/stream")
+def regenerate_scene_stream(
+    job_id: str,
+    scene_id: str,
+    user: CurrentUser,
+    body: RegenerateSceneRequest = RegenerateSceneRequest(),
+) -> StreamingResponse:
+    """SSE: regenerate one scene from its plan section (optionally with direction)."""
+    _require_job_owner(job_id, user.id)
+    try:
+        db.assert_within_quotas(user.id, need_tokens=8_000)
+    except db.QuotaExceededError as exc:
+        raise _quota_http(exc) from exc
+
+    def event_stream():
+        try:
+            for chunk in iter_regenerate_scene(job_id, scene_id, body):
+                yield chunk
+        except db.QuotaExceededError as exc:
+            import json
+
+            yield f"data: {json.dumps({'type': 'error', 'message': exc.detail, 'data': {'code': exc.code}})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/api/jobs/{job_id}/scenes/{scene_id}/comments")
 def get_scene_comments(job_id: str, scene_id: str, user: CurrentUser) -> dict:
     _require_job_owner(job_id, user.id)
@@ -276,7 +366,17 @@ def get_job_file(job_id: str, file_path: str, user: MediaUser) -> FileResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     media_type, _ = mimetypes.guess_type(str(path))
-    return FileResponse(path, media_type=media_type or "application/octet-stream")
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=60",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+    }
+    return FileResponse(
+        path,
+        media_type=media_type or "application/octet-stream",
+        headers=headers,
+    )
 
 
 @app.get("/")

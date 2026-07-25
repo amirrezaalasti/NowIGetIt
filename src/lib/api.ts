@@ -50,6 +50,11 @@ function apiBase(): string {
   return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "";
 }
 
+/** Public alias for media loaders (AuthMedia). */
+export function apiBasePath(): string {
+  return apiBase();
+}
+
 export function clearApiToken() {
   tokenCache = null;
 }
@@ -197,9 +202,13 @@ export async function fetchHealth(): Promise<{
   auth_configured?: boolean;
   supabase_configured?: boolean;
 }> {
-  const res = await fetch(`${apiBase()}/api/health`, { cache: "no-store" });
-  if (!res.ok) throw new Error("API health check failed");
-  return res.json();
+  try {
+    const res = await fetch(`${apiBase()}/api/health`, { cache: "no-store" });
+    if (!res.ok) throw new Error("API health check failed");
+    return res.json();
+  } catch (err) {
+    throw friendlyFetchError(err, "Health check");
+  }
 }
 
 export type UsageSnapshot = {
@@ -254,29 +263,59 @@ export async function fetchJob(jobId: string): Promise<JobDetail> {
   return res.json();
 }
 
-export async function streamGenerate(
-  prompt: string,
-  onEvent: (event: PipelineEvent) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const res = await fetch(`${apiBase()}/api/generate/stream`, {
-    method: "POST",
-    headers: await authHeaders({
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    }),
-    body: JSON.stringify({ prompt, skip_render: false }),
-    signal,
-    cache: "no-store",
-  });
+export type LengthPreset = "short" | "standard" | "deep";
+export type Audience = "hs" | "undergrad" | "general";
 
-  if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(detail || `Generate failed (${res.status})`);
+export type SceneSectionDraft = {
+  id: string;
+  title: string;
+  narration: string;
+  visual_description: string;
+  animation_beats: string[];
+  duration_seconds: number;
+  camera_notes?: string;
+  visual_device?: string;
+  style_tags?: string[];
+};
+
+export type ScenePlanDraft = {
+  title: string;
+  concept_summary: string;
+  style_notes?: string;
+  visual_identity?: string;
+  palette?: Record<string, string>;
+  scenes: SceneSectionDraft[];
+};
+
+export type GenerateOptions = {
+  prompt: string;
+  resolution?: "480p" | "720p" | "1080p";
+  skip_render?: boolean;
+  length_preset?: LengthPreset;
+  audience?: Audience;
+  plan_only?: boolean;
+};
+
+function friendlyFetchError(err: unknown, action: string): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (
+    msg === "Failed to fetch" ||
+    msg.includes("NetworkError") ||
+    msg.includes("Load failed")
+  ) {
+    const base = apiBase() || "(same-origin / Next rewrite)";
+    return new Error(
+      `${action}: cannot reach API at ${base}. Start it with npm run dev:api (or npm run dev:all).`,
+    );
   }
+  return err instanceof Error ? err : new Error(msg);
+}
 
+async function readSseStream(
+  res: Response,
+  onEvent: (event: PipelineEvent) => void,
+): Promise<void> {
   if (!res.body) throw new Error("No response stream");
-
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -285,8 +324,6 @@ export async function streamGenerate(
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-
-    // SSE frames are separated by blank lines
     const parts = buffer.split("\n\n");
     buffer = parts.pop() || "";
     for (const part of parts) {
@@ -301,7 +338,6 @@ export async function streamGenerate(
     }
   }
 
-  // Flush trailing frame if present
   const trailing = buffer
     .split("\n")
     .map((l) => l.trim())
@@ -309,4 +345,121 @@ export async function streamGenerate(
   if (trailing) {
     onEvent(JSON.parse(trailing.replace(/^data:\s*/, "")) as PipelineEvent);
   }
+}
+
+export async function streamGenerate(
+  options: GenerateOptions | string,
+  onEvent: (event: PipelineEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const opts: GenerateOptions =
+    typeof options === "string" ? { prompt: options } : options;
+  try {
+    const res = await fetch(`${apiBase()}/api/generate/stream`, {
+      method: "POST",
+      headers: await authHeaders({
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      }),
+      body: JSON.stringify({
+        prompt: opts.prompt,
+        skip_render: opts.skip_render ?? false,
+        resolution: opts.resolution ?? "720p",
+        length_preset: opts.length_preset ?? "standard",
+        audience: opts.audience ?? "general",
+        plan_only: opts.plan_only ?? true,
+      }),
+      signal,
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `Generate failed (${res.status})`);
+    }
+    await readSseStream(res, onEvent);
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Generate");
+  }
+}
+
+export async function updateJobPlan(
+  jobId: string,
+  plan: ScenePlanDraft,
+): Promise<void> {
+  const res = await fetch(`${apiBase()}/api/jobs/${jobId}/plan`, {
+    method: "PUT",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ plan }),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || "Failed to save plan");
+  }
+}
+
+export async function streamContinue(
+  jobId: string,
+  onEvent: (event: PipelineEvent) => void,
+  signal?: AbortSignal,
+  opts?: { resolution?: string; skip_render?: boolean },
+): Promise<void> {
+  try {
+    const res = await fetch(`${apiBase()}/api/jobs/${jobId}/continue/stream`, {
+      method: "POST",
+      headers: await authHeaders({
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      }),
+      body: JSON.stringify({
+        resolution: opts?.resolution ?? "720p",
+        skip_render: opts?.skip_render ?? false,
+      }),
+      signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `Continue failed (${res.status})`);
+    }
+    await readSseStream(res, onEvent);
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Continue");
+  }
+}
+
+export async function streamRegenerateScene(
+  jobId: string,
+  sceneId: string,
+  onEvent: (event: PipelineEvent) => void,
+  opts?: {
+    direction?: string;
+    section?: SceneSectionDraft;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  const res = await fetch(
+    `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/regenerate/stream`,
+    {
+      method: "POST",
+      headers: await authHeaders({
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      }),
+      body: JSON.stringify({
+        direction: opts?.direction ?? "",
+        section: opts?.section,
+        skip_render: false,
+      }),
+      signal: opts?.signal,
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Regenerate failed (${res.status})`);
+  }
+  await readSseStream(res, onEvent);
 }

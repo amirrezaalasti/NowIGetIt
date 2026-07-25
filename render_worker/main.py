@@ -18,8 +18,9 @@ if str(ROOT) not in sys.path:
 
 # Force-enable local Manim inside the worker container.
 os.environ.setdefault("ENABLE_MANIM_RENDER", "true")
-
-from backend.pipeline.renderer import render_scene  # noqa: E402
+os.environ.setdefault("RENDER_WORKER_MODE", "true")
+# Never call ourselves as a remote worker.
+os.environ.pop("RENDER_WORKER_URL", None)
 
 app = FastAPI(title="NowIGetIt Render Worker", version="0.1.0")
 
@@ -68,6 +69,7 @@ def health() -> dict:
         "manim_version": manim_version,
         "ffmpeg": bool(__import__("shutil").which("ffmpeg")),
         "enable_manim_render": os.getenv("ENABLE_MANIM_RENDER", ""),
+        "render_worker_mode": os.getenv("RENDER_WORKER_MODE", ""),
     }
 
 
@@ -77,6 +79,9 @@ def render(
     authorization: str | None = Header(default=None),
 ) -> RenderResponse:
     _check_secret(authorization)
+
+    # Lazy import so /health can pass before Manim/renderer load.
+    from backend.pipeline.renderer import render_scene
 
     work = Path(tempfile.mkdtemp(prefix="nig-render-"))
     try:
@@ -103,7 +108,6 @@ def render(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        # Best-effort cleanup; /tmp is fine if this fails.
         try:
             import shutil
 
