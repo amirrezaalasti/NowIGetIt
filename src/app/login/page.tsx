@@ -38,7 +38,7 @@ export default async function LoginPage({
 
         {ready ? (
           <form
-            className="mt-10"
+            className="mt-10 w-full"
             action={async () => {
               "use server";
               await signIn("google", { redirectTo: callbackUrl });

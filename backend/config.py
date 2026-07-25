@@ -68,7 +68,7 @@ def get_settings() -> Settings:
         tts_voice=os.getenv("TTS_VOICE", "alloy"),
         enable_manim_render=os.getenv("ENABLE_MANIM_RENDER", "false").lower()
         in {"1", "true", "yes"},
-        max_scene_revisions=int(os.getenv("MAX_SCENE_REVISIONS", "2")),
+        max_scene_revisions=int(os.getenv("MAX_SCENE_REVISIONS", "5")),
         supabase_url=(
             os.getenv("SUPABASE_URL")
             or os.getenv("NEXT_PUBLIC_SUPABASE_URL")

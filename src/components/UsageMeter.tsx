@@ -32,7 +32,7 @@ function Bar({ used, limit, label }: { used: number; limit: number; label: strin
               : `${used} / ${limit}`}
         </span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-[rgba(255,255,255,0.08)]">
+      <div className="h-1.5 overflow-hidden rounded-full bg-[var(--surface-strong)]">
         <div
           className="h-full rounded-full transition-all"
           style={{
@@ -45,7 +45,12 @@ function Bar({ used, limit, label }: { used: number; limit: number; label: strin
   );
 }
 
-export function UsageMeter() {
+type Props = {
+  /** Compact bars for the account menu (default). */
+  variant?: "menu" | "inline";
+};
+
+export function UsageMeter({ variant = "menu" }: Props) {
   const { status } = useSession();
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +70,7 @@ export function UsageMeter() {
           setError(
             me.supabase_configured
               ? null
-              : "Supabase not configured on API (set SUPABASE_SERVICE_ROLE_KEY)",
+              : "Supabase not configured on API",
           );
         }
       } catch (err) {
@@ -80,15 +85,17 @@ export function UsageMeter() {
   if (status !== "authenticated") return null;
 
   if (error && !usage) {
+    return <p className="text-xs text-[var(--ink-muted)]">{error}</p>;
+  }
+
+  if (!usage) {
     return (
-      <p className="text-xs text-[var(--ink-muted)]">{error}</p>
+      <p className="text-xs text-[var(--ink-muted)]">Loading usage…</p>
     );
   }
 
-  if (!usage) return null;
-
   return (
-    <div className="w-full max-w-xs space-y-2.5 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-3">
+    <div className={variant === "inline" ? "w-full max-w-xs space-y-2.5" : "space-y-2.5"}>
       <p className="text-[10px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
         This month
       </p>

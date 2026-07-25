@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getApiToken, apiBasePath } from "@/lib/api";
+import { getApiToken, mediaUrl } from "@/lib/api";
 
 type Props = {
   src: string | null | undefined;
@@ -12,9 +12,9 @@ type Props = {
 };
 
 /**
- * Load protected job media via Authorization header into a blob URL.
- * Avoids <video src> hanging on cross-origin query-token requests while
- * the API is busy rendering the next scene.
+ * Play protected job media via same-origin Next.js file route.
+ * That serves from disk in the Node process, so clips keep playing while
+ * Python/Manim is busy rendering the next scene.
  */
 export function AuthMedia({
   src,
@@ -23,83 +23,65 @@ export function AuthMedia({
   className,
   alt = "",
 }: Props) {
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [playUrl, setPlayUrl] = useState<string | null>(null);
   const [posterUrl, setPosterUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    let objectUrl: string | null = null;
 
-    async function load() {
+    async function prepare() {
       if (!src) {
-        setBlobUrl(null);
+        setPlayUrl(null);
+        setReady(false);
         return;
       }
-      setLoading(true);
+      setReady(false);
       setError(null);
       try {
-        const token = await getApiToken();
-        const url = src.startsWith("http") ? src : `${apiBasePath()}${src}`;
-        const res = await fetch(url, {
-          headers: { Authorization: `Bearer ${token}` },
-          cache: "no-store",
-        });
-        if (!res.ok) throw new Error(`Media ${res.status}`);
-        const blob = await res.blob();
+        await getApiToken();
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setBlobUrl(objectUrl);
+        // Cache-bust so a freshly published scene.mp4 is picked up.
+        const url = mediaUrl(src, Date.now());
+        if (!url) throw new Error("Missing media token");
+        setPlayUrl(url);
+        setReady(true);
       } catch (err) {
         if (!cancelled) {
           setError((err as Error).message || "Failed to load media");
-          setBlobUrl(null);
+          setPlayUrl(null);
+          setReady(false);
         }
-      } finally {
-        if (!cancelled) setLoading(false);
       }
     }
 
-    void load();
+    void prepare();
     return () => {
       cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [src]);
 
   useEffect(() => {
     let cancelled = false;
-    let objectUrl: string | null = null;
 
-    async function loadPoster() {
+    async function preparePoster() {
       if (!poster) {
         setPosterUrl(null);
         return;
       }
       try {
-        const token = await getApiToken();
-        const url = poster.startsWith("http")
-          ? poster
-          : `${apiBasePath()}${poster}`;
-        const res = await fetch(url, {
-          headers: { Authorization: `Bearer ${token}` },
-          cache: "no-store",
-        });
-        if (!res.ok) return;
-        const blob = await res.blob();
+        await getApiToken();
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setPosterUrl(objectUrl);
+        setPosterUrl(mediaUrl(poster) || null);
       } catch {
-        /* poster is optional */
+        /* optional */
       }
     }
 
-    void loadPoster();
+    void preparePoster();
     return () => {
       cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [poster]);
 
@@ -115,7 +97,7 @@ export function AuthMedia({
         </div>
       );
     }
-    if (!blobUrl) {
+    if (!playUrl || !ready) {
       return (
         <div
           className={`flex aspect-video items-center justify-center bg-[var(--surface-video)] ${className || ""}`}
@@ -125,20 +107,22 @@ export function AuthMedia({
       );
     }
     // eslint-disable-next-line @next/next/no-img-element
-    return <img src={blobUrl} alt={alt} className={className} />;
+    return <img src={playUrl} alt={alt} className={className} />;
   }
 
   return (
-    <div className={`relative overflow-hidden bg-[var(--surface-video)] ${className || ""}`}>
-      {blobUrl ? (
+    <div
+      className={`relative overflow-hidden bg-[var(--surface-video)] ${className || ""}`}
+    >
+      {playUrl && ready ? (
         <video
-          key={blobUrl}
+          key={playUrl}
           className="aspect-video w-full"
-          src={blobUrl}
+          src={playUrl}
           poster={posterUrl || undefined}
           controls
           playsInline
-          preload="auto"
+          preload="metadata"
         />
       ) : (
         <div className="flex aspect-video flex-col items-center justify-center gap-2">
@@ -150,15 +134,17 @@ export function AuthMedia({
               className="absolute inset-0 h-full w-full object-contain opacity-50"
             />
           ) : null}
-          {loading ? (
+          {error ? (
+            <span className="relative px-4 text-center text-sm text-white/70">
+              {error}
+            </span>
+          ) : (
             <>
               <span className="relative h-7 w-7 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
-              <span className="relative text-xs text-white/70">Loading clip…</span>
+              <span className="relative text-xs text-white/70">
+                Loading clip…
+              </span>
             </>
-          ) : (
-            <span className="relative px-4 text-center text-sm text-white/70">
-              {error || "No video for this scene"}
-            </span>
           )}
         </div>
       )}

@@ -25,9 +25,23 @@ const nextConfig: NextConfig = {
           source: "/api/jobs",
           destination: "http://127.0.0.1:8000/api/jobs",
         },
+        // NOTE: /api/jobs/:jobId/file/* is handled by the Next.js App Router
+        // (serves artifacts from disk so video isn't blocked by Manim on :8000).
         {
-          source: "/api/jobs/:path*",
-          destination: "http://127.0.0.1:8000/api/jobs/:path*",
+          source: "/api/jobs/:jobId",
+          destination: "http://127.0.0.1:8000/api/jobs/:jobId",
+        },
+        {
+          source: "/api/jobs/:jobId/scenes/:path*",
+          destination: "http://127.0.0.1:8000/api/jobs/:jobId/scenes/:path*",
+        },
+        {
+          source: "/api/jobs/:jobId/continue/:path*",
+          destination: "http://127.0.0.1:8000/api/jobs/:jobId/continue/:path*",
+        },
+        {
+          source: "/api/jobs/:jobId/plan",
+          destination: "http://127.0.0.1:8000/api/jobs/:jobId/plan",
         },
         {
           source: "/api/me",

@@ -50,9 +50,40 @@ function apiBase(): string {
   return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "";
 }
 
-/** Public alias for media loaders (AuthMedia). */
+/** Public alias for API origin (non-media calls). */
 export function apiBasePath(): string {
   return apiBase();
+}
+
+/**
+ * Same-origin URL for job media files.
+ * Served by Next.js from disk so playback is not blocked by Manim on :8000.
+ */
+export function mediaUrl(
+  path: string | null | undefined,
+  cacheBust?: number | string,
+): string {
+  if (!path) return "";
+  let pathname = path;
+  if (path.startsWith("http://") || path.startsWith("https://")) {
+    try {
+      const u = new URL(path);
+      pathname = u.pathname;
+    } catch {
+      return "";
+    }
+  }
+  if (!pathname.startsWith("/")) pathname = `/${pathname}`;
+
+  const params = new URLSearchParams();
+  if (tokenCache?.token) {
+    params.set("access_token", tokenCache.token);
+  }
+  if (cacheBust !== undefined) {
+    params.set("cb", String(cacheBust));
+  }
+  const q = params.toString();
+  return q ? `${pathname}?${q}` : pathname;
 }
 
 export function clearApiToken() {
@@ -85,6 +116,20 @@ async function authHeaders(
 
 export function assetUrl(path: string | null | undefined): string {
   if (!path) return "";
+  // Job files: always same-origin (Next disk serve) — never hit busy :8000.
+  const pathname =
+    path.startsWith("http://") || path.startsWith("https://")
+      ? (() => {
+          try {
+            return new URL(path).pathname;
+          } catch {
+            return path;
+          }
+        })()
+      : path;
+  if (pathname.includes("/api/jobs/") && pathname.includes("/file/")) {
+    return mediaUrl(pathname);
+  }
   const base = path.startsWith("http") ? path : `${apiBase()}${path}`;
   if (!tokenCache?.token) return base;
   const sep = base.includes("?") ? "&" : "?";

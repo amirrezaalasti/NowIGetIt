@@ -125,6 +125,16 @@ body {
   animation: pulse-line 1.6s ease-in-out infinite;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .animate-rise-delay,
+  .animate-rise-delay-2,
+  .grid-haze,
+  .progress-dot {
+    animation: none !important;
+  }
+}
+
 /* Theme-aware brand marks (data-theme set on <html>) */
 .brand-logo-light {
   display: none;
