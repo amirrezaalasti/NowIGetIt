@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Iterator
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 from backend import artifacts as store
 from backend.code_utils import validate_manim_code
@@ -25,6 +26,8 @@ from backend.schemas import (
     PipelineEvent,
     PipelineEventType,
     SceneArtifact,
+    ScenePlan,
+    SceneSection,
 )
 
 EventCallback = Callable[[PipelineEvent], None]
@@ -163,170 +166,152 @@ def run_pipeline(
             job_id=job_id,
         )
 
-        revision_count = 0
+        # Single pass execution (automated revision deactivated in favor of human scene feedback)
+        sdir = store.scene_dir(job_id, scene.id)
         video_path = None
         video_url = None
-        preview_note = None
-        approved = False
-        issues: list[str] = []
+        frame_path = None
+        frame_source = "none"
         frame_urls: list[str] = []
         reviews_log: list[dict] = []
+        revision_count = 0
 
-        while True:
-            frame_path = None
-            frame_source = "none"
-
-            if not request.skip_render:
+        if not request.skip_render:
+            video_path, frame_path, render_log = render_scene(
+                code,
+                work_dir=work_dir / "render",
+                resolution=request.resolution,
+                scene_id=f"{scene.id}_r{revision_count}",
+            )
+            
+            while not video_path and revision_count < settings.max_scene_revisions:
+                revision_count += 1
+                _emit(
+                    on_event,
+                    PipelineEventType.status,
+                    f"Render failed, revising code for {scene.id} (attempt {revision_count})…",
+                    data={"scene_id": scene.id, "job_id": job_id},
+                    job_id=job_id,
+                )
+                
+                rev_instructions = f"Manim render failed with error:\n{render_log[-500:] if render_log else 'Unknown error'}\nPlease fix the code so it renders successfully."
+                code = revise_scene_code(
+                    client,
+                    code=code,
+                    scene=scene,
+                    revision_instructions=rev_instructions,
+                )
+                store.save_code(job_id, scene.id, code, revision=revision_count)
+                
                 video_path, frame_path, render_log = render_scene(
                     code,
                     work_dir=work_dir / "render",
                     resolution=request.resolution,
                     scene_id=f"{scene.id}_r{revision_count}",
                 )
-                preview_note = None if video_path else render_log
-                if frame_path:
-                    frame_source = "manim_preview"
-                if video_path:
-                    video_url = store.publish_scene_video(
-                        job_id, scene.id, video_path
-                    )
-                _emit(
-                    on_event,
-                    PipelineEventType.scene_render,
-                    f"Render step for {scene.id}"
-                    + (" · video ready" if video_url else " · render failed"),
-                    data={
-                        "scene_id": scene.id,
-                        "video_url": video_url,
-                        "ok": bool(video_path),
-                        "note": preview_note,
-                        "job_id": job_id,
-                    },
-                    job_id=job_id,
-                )
-            else:
-                preview_note = "Render skipped by request."
 
-            # When Manim isn't available, draw a real concept still (not a text card).
-            # Keep a plan card alongside for the written brief.
-            if not frame_path:
-                sdir = store.scene_dir(job_id, scene.id)
-                create_storyboard_frame(
-                    scene,
-                    output_path=sdir / f"vlm_r{revision_count}_plan_card.png",
+            preview_note = None if video_path else render_log
+            if frame_path:
+                frame_source = "manim_preview"
+            if video_path:
+                video_url = store.publish_scene_video(
+                    job_id, scene.id, video_path
                 )
-                frame_path = create_visual_preview(
-                    scene,
-                    output_path=sdir / f"vlm_r{revision_count}_preview.png",
-                )
-                frame_source = "visual_preview"
-
-            # Local syntax gate before / alongside model review
-            syntax_ok, syntax_err = validate_manim_code(code)
-            # Image VLM for Manim frames; code-only for matplotlib previews / plan cards
-            use_image_vlm = frame_source == "manim_preview"
-            review = review_scene(
-                client,
-                scene=scene,
-                code=code,
-                frame_path=frame_path if use_image_vlm else None,
-                frame_source=frame_source if use_image_vlm else "visual_preview",
+            _emit(
+                on_event,
+                PipelineEventType.scene_render,
+                f"Render step for {scene.id}"
+                + (" · video ready" if video_url else " · render failed"),
+                data={
+                    "scene_id": scene.id,
+                    "video_url": video_url,
+                    "ok": bool(video_path),
+                    "note": preview_note,
+                    "job_id": job_id,
+                },
+                job_id=job_id,
             )
-            if not syntax_ok:
-                review = review.model_copy(
-                    update={
-                        "approved": False,
-                        "issues": [syntax_err, *review.issues],
-                        "revision_instructions": (
-                            f"Fix invalid Python ({syntax_err}). "
-                            "Rewrite a complete valid Manim Community Scene covering the beats."
-                        ),
-                    }
-                )
+        else:
+            preview_note = "Render skipped by request."
 
-            saved = store.save_vlm_review(
-                job_id,
-                scene.id,
-                revision=revision_count,
-                review=review.model_dump(),
-                frame_path=frame_path,
-                frame_source=frame_source,
+        if not frame_path:
+            sdir = store.scene_dir(job_id, scene.id)
+            create_storyboard_frame(
+                scene,
+                output_path=sdir / "vlm_r0_plan_card.png",
             )
-            approved = review.approved
-            issues = review.issues
-            if saved.get("frame_url"):
-                frame_urls.append(saved["frame_url"])
-            reviews_log.append(
-                {
-                    **review.model_dump(),
-                    "revision": revision_count,
-                    "frame_source": frame_source,
-                    "frame_url": saved.get("frame_url"),
-                    "review_mode": (
-                        "image_vlm"
-                        if frame_source == "manim_preview"
-                        else "code_only"
-                    ),
+            frame_path = create_visual_preview(
+                scene,
+                output_path=sdir / "vlm_r0_preview.png",
+            )
+            frame_source = "visual_preview"
+
+        syntax_ok, syntax_err = validate_manim_code(code)
+        use_image_vlm = frame_source == "manim_preview"
+        review = review_scene(
+            client,
+            scene=scene,
+            code=code,
+            frame_path=frame_path if use_image_vlm else None,
+            frame_source=frame_source if use_image_vlm else "visual_preview",
+        )
+        if not syntax_ok:
+            review = review.model_copy(
+                update={
+                    "approved": False,
+                    "issues": [syntax_err, *review.issues],
+                    "revision_instructions": f"Fix invalid Python ({syntax_err}).",
                 }
             )
-            mode = "image VLM" if frame_source == "manim_preview" else "code review"
-            _emit(
-                on_event,
-                PipelineEventType.scene_vlm,
-                f"{mode} for {scene.id}: "
-                f"{'approved' if approved else 'needs revision'}",
-                data={
-                    **review.model_dump(),
-                    "scene_id": scene.id,
-                    "job_id": job_id,
-                    "frame_url": saved.get("frame_url"),
-                    "frame_source": frame_source,
-                    "revision": revision_count,
-                    "review_mode": (
-                        "image_vlm"
-                        if frame_source == "manim_preview"
-                        else "code_only"
-                    ),
-                },
-                job_id=job_id,
-            )
 
-            if approved or revision_count >= settings.max_scene_revisions:
-                break
-
-            revision_count += 1
-            _emit(
-                on_event,
-                PipelineEventType.scene_revise,
-                f"Revising {scene.id} (attempt {revision_count})",
-                data={
-                    "scene_id": scene.id,
-                    "instructions": review.revision_instructions,
-                    "job_id": job_id,
-                },
-                job_id=job_id,
-            )
-            previous_code = code
-            candidate = revise_scene_code(
-                client,
-                code=code,
-                scene=scene,
-                revision_instructions=review.revision_instructions,
-                # Don't feed "Manim disabled" as a render error — it causes bad revisions.
-                render_error=""
-                if frame_source in {"storyboard", "visual_preview"}
-                else (preview_note or ""),
-            )
-            cand_ok, _ = validate_manim_code(candidate)
-            # Keep prior code if the model returns garbage / truncated junk
-            code = candidate if cand_ok else previous_code
-            store.save_code(job_id, scene.id, code, revision=revision_count)
+        saved = store.save_vlm_review(
+            job_id,
+            scene.id,
+            revision=0,
+            review=review.model_dump(),
+            frame_path=frame_path,
+            frame_source=frame_source,
+        )
+        approved = review.approved
+        issues = review.issues
+        if saved.get("frame_url"):
+            frame_urls.append(saved["frame_url"])
+        reviews_log.append(
+            {
+                **review.model_dump(),
+                "revision": 0,
+                "frame_source": frame_source,
+                "frame_url": saved.get("frame_url"),
+                "review_mode": (
+                    "image_vlm"
+                    if frame_source == "manim_preview"
+                    else "code_only"
+                ),
+            }
+        )
+        _emit(
+            on_event,
+            PipelineEventType.scene_vlm,
+            f"Initial scene check for {scene.id}",
+            data={
+                **review.model_dump(),
+                "scene_id": scene.id,
+                "job_id": job_id,
+                "frame_url": saved.get("frame_url"),
+                "frame_source": frame_source,
+                "revision": 0,
+            },
+            job_id=job_id,
+        )
 
         audio_path, audio_skipped = synthesize_narration(
             scene.narration,
             work_dir / "audio" / f"{scene.id}.mp3",
             settings=settings,
         )
+        if audio_path and Path(audio_path).exists():
+            import shutil
+            shutil.copy2(audio_path, sdir / "audio.mp3")
         _emit(
             on_event,
             PipelineEventType.scene_tts,
@@ -391,51 +376,17 @@ def run_pipeline(
         )
         for a in artifacts
     )
-    debug = final_debug_pass(
-        client,
-        plan_json=plan.model_dump_json(indent=2),
-        scene_summaries=scene_summaries,
-    )
+    # Automated VLM revisions disabled in favor of human review
+    debug = {"notes": "Automated VLM revisions disabled (human-in-the-loop review active)", "scene_fixes": []}
     store.save_final_debug(job_id, debug)
     notes = str(debug.get("notes", ""))
     _emit(
         on_event,
         PipelineEventType.final_debug,
-        "Final debug pass complete",
+        "Automated VLM revision pass skipped (human review mode active)",
         data={**debug, "job_id": job_id},
         job_id=job_id,
     )
-
-    for fix in debug.get("scene_fixes") or []:
-        scene_id = fix.get("scene_id")
-        instructions = fix.get("instructions") or ""
-        if not scene_id or not instructions:
-            continue
-        # Ignore pixel/render asks when we never rendered
-        lowered = instructions.lower()
-        if not settings.enable_manim_render and any(
-            k in lowered
-            for k in ("render", "frame", "pixel", "inspection overlay", "storyboard")
-        ):
-            continue
-        match = next((a for a in artifacts if a.scene_id == scene_id), None)
-        plan_scene = next((s for s in plan.scenes if s.id == scene_id), None)
-        if not match or not plan_scene:
-            continue
-        candidate = revise_scene_code(
-            client,
-            code=match.code,
-            scene=plan_scene,
-            revision_instructions=instructions,
-        )
-        ok, _ = validate_manim_code(candidate)
-        if not ok:
-            continue
-        match.code = candidate
-        match.revision_count += 1
-        store.save_code(
-            job_id, scene_id, match.code, revision=match.revision_count
-        )
 
     # Mux narration onto each scene clip, then stitch into final.mp4
     _emit(
@@ -508,6 +459,220 @@ def run_pipeline(
     return result
 
 
+def retouch_scene(job_id: str, scene_id: str, human_instructions: str, timestamp: Optional[float] = None, on_event: Optional[Any] = None) -> dict[str, Any]:
+    """Retouch/revise ONLY a specific scene based on human feedback."""
+    settings = get_settings()
+    client = OpenRouterClient(settings=settings)
+
+    def emit(msg: str, data: Optional[dict] = None) -> None:
+        if on_event:
+            on_event(PipelineEvent(type=PipelineEventType.status, message=msg, data=data or {}))
+
+    emit(f"Loading scene data for '{scene_id}'…", {"scene_id": scene_id, "job_id": job_id})
+
+    job_data = store.load_job(job_id)
+    scenes = job_data.get("scenes") or []
+    match_scene = next((s for s in scenes if s["scene_id"] == scene_id), None)
+    if not match_scene:
+        raise ValueError(f"Scene {scene_id} not found in job {job_id}")
+
+    section_data = match_scene.get("section") or {}
+    scene_sec = SceneSection(
+        id=scene_id,
+        title=section_data.get("title", scene_id),
+        narration=section_data.get("narration", ""),
+        visual_description=section_data.get("visual_description", ""),
+        animation_beats=section_data.get("animation_beats", []),
+    )
+
+    current_code = match_scene.get("code_final", "")
+    rev_instructions = human_instructions
+    if timestamp is not None:
+        rev_instructions = f"[At timestamp {timestamp:.1f}s]: {human_instructions}"
+
+    emit(
+        f"AI is reading your feedback and revising the Manim code for '{scene_sec.title}'…",
+        {"scene_id": scene_id, "instructions": rev_instructions},
+    )
+
+    retry_count = 0
+    max_retries = settings.max_scene_revisions
+
+    new_code = revise_scene_code(
+        client,
+        code=current_code,
+        scene=scene_sec,
+        revision_instructions=rev_instructions,
+    )
+
+    ok, err = validate_manim_code(new_code)
+    while not ok and retry_count < max_retries:
+        retry_count += 1
+        emit(f"Syntax error in revised code: {err} — retrying ({retry_count}/{max_retries}).", {"error": err})
+        new_code = revise_scene_code(
+            client,
+            code=new_code,
+            scene=scene_sec,
+            revision_instructions=f"Previous revision had a syntax error:\n{err}\nPlease fix it.",
+        )
+        ok, err = validate_manim_code(new_code)
+
+    if not ok:
+        emit(f"Syntax error in revised code: {err} — aborting.", {"error": err})
+        raise ValueError(f"Generated retouched code invalid: {err}")
+
+    emit("Code revision complete. Saving new code…", {"code_chars": len(new_code)})
+
+    # Calculate next revision number
+    sdir = store.scene_dir(job_id, scene_id)
+    rev_count = len(list(sdir.glob("code_r*.py")))
+    store.save_code(job_id, scene_id, new_code, revision=rev_count)
+
+    emit(f"Rendering scene '{scene_sec.title}' (revision {rev_count})…", {"revision": rev_count})
+
+    work_dir = store.job_dir(job_id) / "work"
+    video_path, frame_path, render_log = render_scene(
+        new_code,
+        work_dir=work_dir / "render",
+        resolution="720p",
+        scene_id=f"{scene_id}_retouch_{rev_count}",
+    )
+    
+    while not video_path and retry_count < max_retries:
+        retry_count += 1
+        emit(f"Render failed, revising code for {scene_id} (attempt {retry_count}/{max_retries})…")
+        
+        rev_instructions_err = f"Manim render failed with error:\n{render_log[-500:] if render_log else 'Unknown error'}\nPlease fix the code so it renders successfully."
+        new_code = revise_scene_code(
+            client,
+            code=new_code,
+            scene=scene_sec,
+            revision_instructions=rev_instructions_err,
+        )
+        rev_count = len(list(sdir.glob("code_r*.py")))
+        store.save_code(job_id, scene_id, new_code, revision=rev_count)
+        
+        video_path, frame_path, render_log = render_scene(
+            new_code,
+            work_dir=work_dir / "render",
+            resolution="720p",
+            scene_id=f"{scene_id}_retouch_{rev_count}",
+        )
+
+    frame_source = "none"
+    if frame_path:
+        frame_source = "manim_preview"
+        emit("Render complete! Video frame captured.", {"has_video": True})
+    else:
+        log_snippet = render_log[-300:] if render_log else ""
+        emit(
+            f"Manim render failed: {log_snippet}" if render_log else "Manim render not enabled — generating concept preview…",
+            {"render_log": render_log or ""},
+        )
+        create_storyboard_frame(
+            scene_sec,
+            output_path=sdir / f"vlm_r{rev_count}_plan_card.png",
+        )
+        frame_path = create_visual_preview(
+            scene_sec,
+            output_path=sdir / f"vlm_r{rev_count}_preview.png",
+        )
+        frame_source = "visual_preview"
+
+    # Save preview frame artifact
+    saved_review = store.save_vlm_review(
+        job_id,
+        scene_id,
+        revision=rev_count,
+        review={
+            "approved": True,
+            "issues": [],
+            "revision_instructions": f"Human retouch ({human_instructions})",
+            "confidence": 1.0,
+        },
+        frame_path=frame_path,
+        frame_source=frame_source,
+    )
+
+    video_url = None
+    if video_path:
+        # Check if existing audio file exists for this scene
+        audio_file = sdir / "audio.mp3"
+        if not audio_file.exists():
+            audio_file = work_dir / "audio" / f"{scene_id}.mp3"
+
+        final_video_path = video_path
+        if audio_file.exists():
+            muxed_path = sdir / "scene_vo.mp4"
+            muxed = mux_scene_audio(video_path, str(audio_file), muxed_path)
+            if muxed:
+                final_video_path = str(muxed_path)
+
+        video_url = store.publish_scene_video(job_id, scene_id, final_video_path)
+
+    result = {
+        "ok": True,
+        "job_id": job_id,
+        "scene_id": scene_id,
+        "revision": rev_count,
+        "video_url": video_url,
+        "frame_url": saved_review.get("frame_url"),
+        "code": new_code,
+        "scene_title": scene_sec.title,
+    }
+
+    emit("Retouch complete! Review the concept preview and approve to update the final video.", result)
+    return result
+
+
+def iter_retouch_scene(
+    job_id: str,
+    scene_id: str,
+    human_instructions: str,
+    timestamp: Optional[float] = None,
+) -> "Iterator[str]":
+    """SSE stream of retouch progress events for a single scene."""
+    from queue import Empty, Queue
+    from threading import Thread
+
+    q: "Queue[PipelineEvent | None]" = Queue()
+
+    def on_event(event: PipelineEvent) -> None:
+        q.put(event)
+
+    def worker() -> None:
+        try:
+            retouch_scene(
+                job_id,
+                scene_id,
+                human_instructions,
+                timestamp=timestamp,
+                on_event=on_event,
+            )
+        except Exception as exc:  # noqa: BLE001
+            q.put(
+                PipelineEvent(
+                    type=PipelineEventType.error,
+                    message=str(exc),
+                    data={"error": str(exc)},
+                )
+            )
+        finally:
+            q.put(None)
+
+    Thread(target=worker, daemon=True).start()
+    while True:
+        try:
+            item = q.get(timeout=300)
+        except Empty:
+            yield _sse({"type": "error", "message": "Retouch timed out", "data": None})
+            break
+        if item is None:
+            break
+        yield _sse(item.model_dump())
+
+
+
 def iter_pipeline_events(request: GenerateRequest) -> Iterator[str]:
     """SSE event stream that emits progress as steps complete."""
     from queue import Empty, Queue
@@ -553,3 +718,65 @@ def iter_pipeline_events(request: GenerateRequest) -> Iterator[str]:
 def _sse(payload: dict) -> str:
     """Server-Sent Event frame (flushes better through proxies than NDJSON)."""
     return f"data: {json.dumps(payload)}\n\n"
+
+
+def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
+    """
+    Called after the human approves an AI retouch.
+    Muxes the latest scene video with its audio and re-composes the final video.
+    Returns {'ok': True, 'final_video_url': '...', 'scene_video_url': '...'}.
+    """
+    job_data = store.load_job(job_id)
+    scenes = job_data.get("scenes") or []
+
+    sdir = store.scene_dir(job_id, scene_id)
+    job_dir = store.job_dir(job_id)
+
+    # Locate the latest rendered scene video (scene.mp4 published by publish_scene_video)
+    scene_video = sdir / "scene.mp4"
+    if not scene_video.exists():
+        # No render available — nothing to mux, just note it
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "scene_id": scene_id,
+            "approved": True,
+            "final_video_url": None,
+            "scene_video_url": None,
+            "note": "No rendered video available yet. Run locally with ENABLE_MANIM_RENDER=true to produce video.",
+        }
+
+    # Mux scene video with its narration audio
+    audio_p = sdir / "audio.mp3"
+    audio_str = str(audio_p) if audio_p.exists() else None
+    muxed_path = sdir / "scene_vo.mp4"
+    muxed = mux_scene_audio(str(scene_video), audio_str, muxed_path)
+
+    # Collect all scene clips (vo-muxed if available, else plain scene.mp4)
+    muxed_clips: list[str] = []
+    for s in scenes:
+        sid = s["scene_id"]
+        candidate = sdir.parent / sid / "scene_vo.mp4"
+        if not candidate.exists():
+            candidate = sdir.parent / sid / "scene.mp4"
+        if candidate.exists():
+            muxed_clips.append(str(candidate))
+
+    final_url = None
+    if muxed_clips:
+        final_out = job_dir / "final.mp4"
+        compose_final_video(muxed_clips, final_out)
+        # Expose via the job file endpoint
+        final_url = f"/api/jobs/{job_id}/file/final.mp4"
+
+    scene_video_url = f"/api/jobs/{job_id}/file/scenes/{scene_id}/scene_vo.mp4" if muxed else \
+                      f"/api/jobs/{job_id}/file/scenes/{scene_id}/scene.mp4"
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "scene_id": scene_id,
+        "approved": True,
+        "final_video_url": final_url,
+        "scene_video_url": scene_video_url,
+    }

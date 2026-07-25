@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 
 class GenerateRequest(BaseModel):
-    prompt: str = Field(..., min_length=3, max_length=4000)
+    prompt: str = Field(..., min_length=3, max_length=32000)
     resolution: str = Field(default="720p", pattern="^(480p|720p|1080p)$")
     skip_render: bool = False
 
@@ -40,6 +40,22 @@ class VlmReview(BaseModel):
     issues: list[str] = Field(default_factory=list)
     revision_instructions: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class SceneCommentRequest(BaseModel):
+    comment: str = Field(..., min_length=1, max_length=2000)
+    timestamp: Optional[float] = Field(default=None, ge=0.0)
+    author: str = "Human Reviewer"
+
+
+class SceneComment(BaseModel):
+    id: str
+    job_id: str
+    scene_id: str
+    comment: str
+    timestamp: Optional[float] = None
+    author: str
+    created_at: str
 
 
 class PipelineEventType(str, Enum):

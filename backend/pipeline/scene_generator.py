@@ -12,7 +12,9 @@ Generate a single complete Scene class for ONE educational video section.
 CRITICAL RULES (Manim Community / `manim`, NOT ManimGL):
 1. Start with: `from manim import *`
 2. Use `Create` (not ShowCreation). Use `FadeIn`, `Write`, `GrowFromCenter`.
-3. Prefer `MathTex(r"...")` for math and `Text("...")` for plain labels.
+3. ALWAYS use `Text("...")` for ALL labels, titles, and mathematical equations.
+   DO NOT use `MathTex`, `Tex`, or `TexText`. LaTeX/dvisvgm is not configured on the rendering host.
+   For math expressions, write them in plain text inside `Text()`, e.g., `Text("E = mc²")` or `Text("dT/dt = k * ∇²T")`.
 4. Axes: use `x_length` / `y_length` (not width/height). Example:
    Axes(x_range=[-3, 3, 1], y_range=[-1, 5, 1], x_length=7, y_length=5)
 5. Graphs: `axes.plot(lambda x: x**2, x_range=[-2, 2], color=YELLOW)`

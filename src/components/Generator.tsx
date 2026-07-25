@@ -38,7 +38,7 @@ export function Generator() {
   const [health, setHealth] = useState<string>("Checking API…");
   const [liveMessage, setLiveMessage] = useState<string>("");
   const abortRef = useRef<AbortController | null>(null);
-  const logEndRef = useRef<HTMLDivElement | null>(null);
+  const logContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     fetchHealth()
@@ -58,7 +58,9 @@ export function Generator() {
   }, []);
 
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
   }, [events]);
 
   const statusLabel = useMemo(() => {
@@ -382,7 +384,10 @@ export function Generator() {
               <p className="mb-2 text-xs uppercase tracking-[0.14em] text-[var(--ink-muted)]">
                 Live log
               </p>
-              <div className="max-h-[28rem] overflow-y-auto rounded-2xl border border-[var(--line)] bg-[rgba(0,0,0,0.25)] p-4 font-mono text-xs leading-relaxed text-[var(--ink-muted)]">
+              <div 
+                ref={logContainerRef}
+                className="max-h-[28rem] overflow-y-auto rounded-2xl border border-[var(--line)] bg-[rgba(0,0,0,0.25)] p-4 font-mono text-xs leading-relaxed text-[var(--ink-muted)]"
+              >
                 {events.length === 0 && (
                   <div className="opacity-60">Waiting for pipeline events…</div>
                 )}
@@ -393,7 +398,6 @@ export function Generator() {
                     {event.message}
                   </div>
                 ))}
-                <div ref={logEndRef} />
               </div>
             </div>
           </div>

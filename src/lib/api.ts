@@ -12,6 +12,16 @@ export type JobSummary = {
   has_result?: boolean;
 };
 
+export type HumanComment = {
+  id: string;
+  job_id: string;
+  scene_id: string;
+  comment: string;
+  timestamp?: number | null;
+  author: string;
+  created_at: string;
+};
+
 export type JobDetail = {
   job_id: string;
   meta?: Record<string, unknown> | null;
@@ -25,6 +35,7 @@ export type JobDetail = {
     code_final?: string;
     video_url?: string;
     vlm_reviews?: Array<Record<string, unknown>>;
+    human_comments?: HumanComment[];
     files?: string[];
   }>;
   events?: Array<Record<string, unknown>>;
@@ -39,6 +50,85 @@ export function assetUrl(path: string | null | undefined): string {
   if (!path) return "";
   if (path.startsWith("http")) return path;
   return `${apiBase()}${path}`;
+}
+
+export async function addSceneComment(
+  jobId: string,
+  sceneId: string,
+  comment: string,
+  timestamp?: number
+): Promise<HumanComment> {
+  const res = await fetch(
+    `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/comments`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ comment, timestamp }),
+    }
+  );
+  if (!res.ok) throw new Error("Failed to post comment");
+  return res.json();
+}
+
+export async function streamRetouch(
+  jobId: string,
+  sceneId: string,
+  comment: string,
+  timestamp: number | undefined,
+  onEvent: (event: PipelineEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch(
+    `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/retouch/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ comment, timestamp }),
+      signal,
+      cache: "no-store",
+    }
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Retouch failed (${res.status})`);
+  }
+  if (!res.body) throw new Error("No response stream");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? "";
+    for (const part of parts) {
+      const line = part.startsWith("data: ") ? part.slice(6) : part;
+      if (!line.trim()) continue;
+      try {
+        onEvent(JSON.parse(line) as PipelineEvent);
+      } catch {
+        /* non-JSON line */
+      }
+    }
+  }
+}
+
+export async function approveScene(
+  jobId: string,
+  sceneId: string
+): Promise<{ ok: boolean; final_video_url: string | null; scene_video_url: string | null; note?: string }> {
+  const res = await fetch(
+    `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/approve`,
+    { method: "POST", headers: { "Content-Type": "application/json" } }
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Approve failed (${res.status})`);
+  }
+  return res.json();
 }
 
 export async function fetchHealth(): Promise<{

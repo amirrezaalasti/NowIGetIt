@@ -218,6 +218,12 @@ def load_job(job_id: str) -> dict[str, Any]:
                     }
                 )
             scene["vlm_reviews"] = reviews
+            comments_file = sdir / "human_comments.json"
+            scene["human_comments"] = (
+                json.loads(comments_file.read_text(encoding="utf-8"))
+                if comments_file.exists()
+                else []
+            )
             scene["files"] = sorted(p.name for p in sdir.iterdir() if p.is_file())
             scenes.append(scene)
 
@@ -248,6 +254,48 @@ def load_job(job_id: str) -> dict[str, Any]:
         "final_video_url": urls.get("final_video"),
         "urls": urls,
     }
+
+
+def add_scene_comment(
+    job_id: str,
+    scene_id: str,
+    *,
+    comment: str,
+    timestamp: Optional[float] = None,
+    author: str = "Human Reviewer",
+) -> dict[str, Any]:
+    sdir = scene_dir(job_id, scene_id)
+    comments_file = sdir / "human_comments.json"
+    comments: list[dict[str, Any]] = []
+    if comments_file.exists():
+        try:
+            comments = json.loads(comments_file.read_text(encoding="utf-8"))
+        except Exception:
+            comments = []
+
+    comment_entry = {
+        "id": f"comment_{len(comments) + 1}_{int(datetime.now(timezone.utc).timestamp())}",
+        "job_id": job_id,
+        "scene_id": scene_id,
+        "comment": comment,
+        "timestamp": timestamp,
+        "author": author,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    comments.append(comment_entry)
+    write_json(comments_file, comments)
+    return comment_entry
+
+
+def get_scene_comments(job_id: str, scene_id: str) -> list[dict[str, Any]]:
+    sdir = scene_dir(job_id, scene_id)
+    comments_file = sdir / "human_comments.json"
+    if not comments_file.exists():
+        return []
+    try:
+        return json.loads(comments_file.read_text(encoding="utf-8"))
+    except Exception:
+        return []
 
 
 def resolve_job_file(job_id: str, relative: str) -> Path:

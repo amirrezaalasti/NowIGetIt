@@ -103,6 +103,67 @@ def get_job(job_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
 
 
+from backend.pipeline.orchestrator import iter_pipeline_events, run_pipeline, iter_retouch_scene, approve_scene
+from backend.schemas import GenerateRequest, GenerateResult, SceneCommentRequest, SceneComment
+
+
+@app.get("/api/jobs/{job_id}/scenes/{scene_id}/comments")
+def get_scene_comments(job_id: str, scene_id: str) -> dict:
+    return {"comments": store.get_scene_comments(job_id, scene_id)}
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_id}/comments", response_model=SceneComment)
+def add_scene_comment(
+    job_id: str, scene_id: str, body: SceneCommentRequest
+) -> SceneComment:
+    """Save a human comment. The frontend should then call /retouch/stream to apply it."""
+    comment_data = store.add_scene_comment(
+        job_id,
+        scene_id,
+        comment=body.comment,
+        timestamp=body.timestamp,
+        author=body.author,
+    )
+    return SceneComment(**comment_data)
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_id}/retouch/stream")
+def retouch_scene_stream(
+    job_id: str, scene_id: str, body: SceneCommentRequest
+) -> StreamingResponse:
+    """SSE stream: AI reads the comment, revises code, and re-renders the scene."""
+    def event_stream():
+        for chunk in iter_retouch_scene(
+            job_id,
+            scene_id,
+            human_instructions=body.comment,
+            timestamp=body.timestamp,
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_id}/approve")
+def approve_scene_endpoint(job_id: str, scene_id: str) -> dict:
+    """
+    Human approves the AI retouch for this scene.
+    Muxes scene audio and re-composes the final video.
+    """
+    try:
+        return approve_scene(job_id, scene_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/jobs/{job_id}/file/{file_path:path}")
 def get_job_file(job_id: str, file_path: str) -> FileResponse:
     try:

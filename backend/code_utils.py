@@ -63,7 +63,10 @@ def clean_manim_code(code: str) -> str:
     code = re.sub(r"(\bAxes\s*\([^)]*?)\bheight\s*=", r"\1y_length=", code)
     # NumberPlane width/height similarly
     code = re.sub(r"(\bNumberPlane\s*\([^)]*?)\bwidth\s*=", r"\1x_length=", code)
-    code = re.sub(r"(\bNumberPlane\s*\([^)]*?)\bheight\s*=", r"\1y_length=", code)
+    code = re.sub(r"(\bNumberPlane\s*\([^)]*?)\bheight\s*=", r"\1y_length=", code)    # Convert MathTex and Tex to Text to prevent dvisvgm / LaTeX system dependencies
+    code = re.sub(r"\bMathTex\s*\(", "Text(", code)
+    code = re.sub(r"\bTex\s*\(", "Text(", code)
+    code = re.sub(r"\bTexText\s*\(", "Text(", code)
 
     color_replacements = {
         "LIGHT_BLUE": "BLUE_A",
