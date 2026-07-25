@@ -228,7 +228,7 @@ def list_jobs(user: CurrentUser, limit: int = 50) -> dict:
 def get_job(job_id: str, user: CurrentUser) -> dict:
     _require_job_owner(job_id, user.id)
     try:
-        payload = store.load_job(job_id)
+        payload = store.load_job(job_id, user_id=user.id)
         payload["runtime"] = job_runner.job_status(job_id)
         return payload
     except FileNotFoundError as exc:
@@ -239,7 +239,7 @@ def get_job(job_id: str, user: CurrentUser) -> dict:
 def get_job_status(job_id: str, user: CurrentUser) -> dict:
     _require_job_owner(job_id, user.id)
     try:
-        store.load_job(job_id)
+        store.load_job(job_id, user_id=user.id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
     return job_runner.job_status(job_id)
@@ -264,7 +264,7 @@ async def job_events_stream(
     """SSE: attach to a job's durable event log (refresh / navigate safe)."""
     _require_job_owner(job_id, user.id)
     try:
-        await asyncio.to_thread(store.load_job, job_id)
+        await asyncio.to_thread(store.load_job, job_id, user_id=user.id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
 
