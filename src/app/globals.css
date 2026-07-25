@@ -1,0 +1,89 @@
+@import "tailwindcss";
+
+:root {
+  --bg-deep: #0c1412;
+  --bg-mid: #13201c;
+  --bg-lift: #1c2e28;
+  --ink: #e8f0ec;
+  --ink-muted: #9bb0a6;
+  --accent: #3ecf8e;
+  --accent-hot: #f0c75e;
+  --line: rgba(232, 240, 236, 0.12);
+  --glow: rgba(62, 207, 142, 0.18);
+}
+
+@theme inline {
+  --color-background: var(--bg-deep);
+  --color-foreground: var(--ink);
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+}
+
+body {
+  background: var(--bg-deep);
+  color: var(--ink);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  min-height: 100%;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-line {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+@keyframes drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2%, -3%, 0) scale(1.05);
+  }
+}
+
+.animate-rise {
+  animation: rise 0.8s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-rise-delay {
+  animation: rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.12s both;
+}
+
+.animate-rise-delay-2 {
+  animation: rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.24s both;
+}
+
+.bg-atmosphere {
+  background:
+    radial-gradient(ellipse 80% 55% at 15% 10%, var(--glow), transparent 55%),
+    radial-gradient(ellipse 60% 45% at 90% 20%, rgba(240, 199, 94, 0.12), transparent 50%),
+    linear-gradient(165deg, var(--bg-deep) 0%, var(--bg-mid) 48%, #0a1210 100%);
+}
+
+.grid-haze {
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 35%, black, transparent);
+  animation: drift 18s ease-in-out infinite alternate;
+}
+
+.progress-dot {
+  animation: pulse-line 1.6s ease-in-out infinite;
+}

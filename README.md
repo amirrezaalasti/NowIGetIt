@@ -1,114 +1,139 @@
-# ManimForge
+# NowIGetIt
 
-A Streamlit web application that generates beautiful mathematical animations from simple text prompts using ManimGL and LLMs.
+Turn a natural-language prompt into an educational video pipeline:
 
-## Features
+1. **Plan** — LLM writes a JSON multi-scene description  
+2. **Build each scene** — ManimGL code → optional render → **VLM check** → revise  
+3. **Voice** — text-to-speech for each scene’s narration  
+4. **Final debug** — model reviews the full set of scenes again  
 
-- **Natural Language to Animation**: Describe what you want to see, get a Manim animation
-- **Multiple LLM Support**: Use OpenAI GPT models or your fine-tuned DeepSeek model
-- **Export Options**: Download as GIF or PowerPoint presentation
-- **Customizable Rendering**: Adjust resolution, FPS, and quality settings
-- **Modern UI**: Clean, dark-themed interface with intuitive controls
+**Frontend:** Next.js (Vercel)  
+**Backend:** FastAPI / Python (Vercel Python runtime)  
+**Default LLM / VLM:** `google/gemini-3.6-flash` via [OpenRouter](https://openrouter.ai)
 
-## Installation
+## Project layout
 
-1. Make sure you have ManimGL installed in the parent directory (`../manim`)
+```
+├── src/                 # Next.js App Router UI
+├── api/index.py         # FastAPI entry (Vercel)
+├── backend/             # Pipeline: plan → generate → VLM → TTS → debug
+├── legacy/              # Previous Streamlit / ManimForge app
+├── pyproject.toml
+└── vercel.json
+```
 
-2. Install dependencies:
+## Pipeline details
+
+| Step | What happens |
+|------|----------------|
+| Plan | Prompt → structured `ScenePlan` JSON (title, scenes, narration, visuals) |
+| Per scene | Generate Manim code → render (local only) → Gemini VLM review → revise up to `MAX_SCENE_REVISIONS` |
+| TTS | Narration → speech audio (`TTS_*` OpenAI-compatible API; OpenRouter has no TTS) |
+| Final | Cross-scene debug pass; optional last code fixes |
+
+> **Manim on Vercel:** Serverless cannot run ManimGL/OpenGL. On Vercel the API produces the scene plan, code, VLM feedback, and TTS. Set `ENABLE_MANIM_RENDER=true` locally (with `manimgl` + ffmpeg) to produce video files.
+
+## Debug artifacts
+
+Every run writes a folder under `artifacts/{job_id}/`:
+
+```
+artifacts/{job_id}/
+├── meta.json
+├── scene_plan.json          # full JSON scene description
+├── events.jsonl
+├── final_debug.json
+├── result.json
+└── scenes/{scene_id}/
+    ├── section.json
+    ├── code_r0.py … code_final.py
+    ├── vlm_r0.json          # VLM review payload
+    └── vlm_r0_frame.png     # exact frame the VLM inspected
+```
+
+When Manim is off, a **storyboard frame** is generated so the VLM still receives an image and you can inspect what it saw.
+
+Browse via the UI debug inspector, or:
+
+- `GET /api/jobs`
+- `GET /api/jobs/{job_id}`
+- `GET /api/jobs/{job_id}/file/scene_plan.json`
+- `GET /api/jobs/{job_id}/file/scenes/{scene_id}/vlm_r0_frame.png`
+
+## Local development
+
+### 1. Env
+
 ```bash
-cd manim_generator
+cp .env.example .env.local
+# also export the same vars for the API process, or:
+cp .env.example .env
+```
+
+Required:
+
+- `OPENROUTER_API_KEY`
+
+Optional:
+
+- `TTS_API_KEY` / `TTS_BASE_URL` / `TTS_MODEL` / `TTS_VOICE`
+- `ENABLE_MANIM_RENDER=true` for local video output
+
+### 2. Python API (Python 3.12 + Manim)
+
+```bash
+# Prefer Homebrew Python 3.12 — Manim does not support 3.14 yet
+/opt/homebrew/bin/python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -U pip setuptools==70.3.0 wheel
 pip install -r requirements.txt
+
+# macOS system deps (if missing):
+# brew install ffmpeg cairo pango pkg-config glew
+
+# Enable local video rendering in .env:
+# ENABLE_MANIM_RENDER=true
+
+npm run dev:api
 ```
 
-3. For GIF conversion, ensure you have either:
-   - `imageio` with `imageio-ffmpeg` (installed via requirements.txt)
-   - OR `ffmpeg` installed on your system
-
-## Usage
-
-### Running the App
+### 3. Next.js
 
 ```bash
-cd manim_generator
-streamlit run app.py
+npm install
+npm run dev
 ```
 
-This will open the app in your browser at `http://localhost:8501`
+Open [http://localhost:3000](http://localhost:3000). In development, Next rewrites `/api/*` to `http://127.0.0.1:8000` when `NEXT_PUBLIC_API_BASE_URL` is unset.
 
-### Using OpenAI
+## Deploy on Vercel
 
-1. Select "OpenAI" as the LLM Provider in the sidebar
-2. Enter your OpenAI API key
-3. Choose a model (gpt-4o-mini recommended for speed)
-4. Enter your prompt and generate!
+Deploy this repo as one Vercel project (Next.js + `api/index.py`):
 
-### Using Fine-tuned DeepSeek (Local)
+1. Set env vars in the Vercel project: `OPENROUTER_API_KEY`, optional `TTS_*`, `OPENROUTER_MODEL=google/gemini-3.6-flash`
+2. Leave `NEXT_PUBLIC_API_BASE_URL` empty in production (same-origin `/api`)
+3. `maxDuration` for the Python function is `300`s in `vercel.json` (raise on Pro if needed)
 
-1. First, train your model using `../llm_finetune/finetune_deepseek.ipynb`
-2. Select "DeepSeek (Local)" in the sidebar
-3. Enter the path to your fine-tuned model
-4. Generate animations locally without API costs
+Alternatively, deploy **frontend** and **API** as two Vercel projects and point `NEXT_PUBLIC_API_BASE_URL` at the FastAPI deployment URL.
 
-## Example Prompts
+## API
 
-- "Show gradient descent on a parabola with a dot moving to the minimum"
-- "Visualize the Pythagorean theorem with squares on each side of a triangle"
-- "Create a sine wave being drawn with a rotating vector"
-- "Demonstrate matrix multiplication with animated vectors"
-- "Show the relationship between sine and cosine functions"
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Config / readiness |
+| POST | `/api/generate` | Full pipeline → JSON result |
+| POST | `/api/generate/stream` | NDJSON live progress events |
 
-## Project Structure
+Example body:
 
-```
-manim_generator/
-├── app.py              # Main Streamlit application
-├── code_generator.py   # LLM code generation module
-├── manim_renderer.py   # Manim rendering utilities
-├── ppt_creator.py      # PowerPoint creation
-├── requirements.txt    # Python dependencies
-├── README.md           # This file
-└── temp/               # Temporary files (auto-created)
+```json
+{
+  "prompt": "Explain gradient descent on a parabola",
+  "resolution": "720p",
+  "skip_render": false
+}
 ```
 
-## Configuration Options
+## Legacy
 
-### LLM Settings
-- **Provider**: OpenAI or DeepSeek (local)
-- **Model**: GPT-4o-mini, GPT-4o, or GPT-4-turbo (OpenAI)
-
-### Output Format
-- **GIF**: Animated GIF for embedding in presentations or sharing
-- **PowerPoint**: PPTX file with the animation embedded
-
-### Render Settings
-- **Resolution**: 480p, 720p, or 1080p
-- **FPS**: 15-60 frames per second
-- **Quality**: Low, medium, or high (affects render time)
-
-## Notes
-
-- **Rendering Time**: Depending on complexity, rendering can take 1-5 minutes
-- **PowerPoint GIFs**: GIFs will animate during slideshow mode in PowerPoint
-- **GPU Recommended**: For local DeepSeek inference, a GPU with 16GB+ VRAM is recommended
-
-## Troubleshooting
-
-### "No video file generated"
-- Check if ManimGL is properly installed
-- Ensure the generated code has a valid Scene class
-- Check the logs in the "View Logs" expander
-
-### "OpenAI API error"
-- Verify your API key is correct
-- Check your OpenAI account has credits
-- Ensure you have access to the selected model
-
-### "DeepSeek model not found"
-- Run the fine-tuning notebook first
-- Verify the model path is correct
-- Check if the adapter files exist
-
-## License
-
-MIT License
-
+The previous Streamlit app lives under `legacy/` for reference.
