@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
-import tempfile
+import wave
 from pathlib import Path
 from typing import Optional
 
@@ -24,18 +22,6 @@ def _is_gemini_tts(model: str) -> bool:
     return "gemini" in m and "tts" in m
 
 
-def _ffmpeg_exe() -> Optional[str]:
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
-    try:
-        import imageio_ffmpeg
-
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        return None
-
-
 def _parse_pcm_params(content_type: str | None) -> tuple[int, int]:
     """Parse sample rate / channels from audio/pcm;rate=24000;channels=1."""
     rate, channels = 24000, 1
@@ -50,39 +36,33 @@ def _parse_pcm_params(content_type: str | None) -> tuple[int, int]:
     return rate, channels
 
 
-def _pcm_to_mp3(
-    pcm_path: Path,
-    mp3_path: Path,
+def pcm_to_wav(
+    pcm_bytes: bytes,
+    wav_path: Path,
     *,
     sample_rate: int = 24000,
     channels: int = 1,
+    sample_width: int = 2,
 ) -> None:
-    ffmpeg = _ffmpeg_exe()
-    if not ffmpeg:
-        raise RuntimeError(
-            "ffmpeg is required to convert Gemini TTS PCM audio to MP3"
-        )
-    result = subprocess.run(
-        [
-            ffmpeg,
-            "-y",
-            "-f",
-            "s16le",
-            "-ar",
-            str(sample_rate),
-            "-ac",
-            str(channels),
-            "-i",
-            str(pcm_path),
-            str(mp3_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg PCM→MP3 failed: {result.stderr[-500:] or result.stdout[-500:]}"
-        )
+    """Wrap raw s16le PCM in a WAV container (stdlib — works on Vercel)."""
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+
+
+def wav_duration_seconds(wav_path: Path) -> float:
+    """Duration from WAV header; 0 if unreadable."""
+    try:
+        with wave.open(str(wav_path), "rb") as wf:
+            rate = wf.getframerate()
+            if rate <= 0:
+                return 0.0
+            return wf.getnframes() / float(rate)
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _speech_url(base_url: str) -> str:
@@ -101,12 +81,12 @@ def synthesize_narration(
 
     Returns (audio_path or None, skipped).
     Uses OpenRouter's OpenAI-compatible /audio/speech endpoint (default: Gemini TTS).
-    Gemini TTS only supports PCM; we convert that to MP3 for the pipeline.
 
-    Uses httpx (not the OpenAI SDK) so Gemini voice names like "Kore" are not
-    rejected by OpenAI's voice enum validation.
+    Gemini TTS only supports PCM. We wrap that as WAV with the stdlib (no ffmpeg),
+    so this works on Vercel. Non-Gemini models that return MP3 keep the .mp3 path.
     """
     settings = settings or get_settings()
+    output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not settings.tts_api_key or not text.strip():
@@ -148,18 +128,17 @@ def synthesize_narration(
         )
 
     if not use_pcm:
-        output_path.write_bytes(response.content)
-        return str(output_path), False
+        # Keep caller extension when the API already returns a container format.
+        out = output_path if output_path.suffix.lower() == ".mp3" else output_path.with_suffix(".mp3")
+        out.write_bytes(response.content)
+        return str(out), False
 
     sample_rate, channels = _parse_pcm_params(response.headers.get("content-type"))
-    with tempfile.TemporaryDirectory(prefix="nigit-tts-") as tmp:
-        pcm_path = Path(tmp) / "speech.pcm"
-        pcm_path.write_bytes(response.content)
-        _pcm_to_mp3(
-            pcm_path,
-            output_path,
-            sample_rate=sample_rate,
-            channels=channels,
-        )
-
-    return str(output_path), False
+    out = output_path.with_suffix(".wav")
+    pcm_to_wav(
+        response.content,
+        out,
+        sample_rate=sample_rate,
+        channels=channels,
+    )
+    return str(out), False

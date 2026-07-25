@@ -10,7 +10,20 @@ from typing import Optional
 
 def probe_duration(path: Path) -> float:
     """Return media duration in seconds, or 0 if unknown."""
-    if not path.exists() or not shutil.which("ffprobe"):
+    path = Path(path)
+    if not path.exists():
+        return 0.0
+    # WAV works without ffprobe (Vercel / Gemini TTS path).
+    if path.suffix.lower() == ".wav":
+        try:
+            from backend.pipeline.tts import wav_duration_seconds
+
+            dur = wav_duration_seconds(path)
+            if dur > 0:
+                return dur
+        except Exception:  # noqa: BLE001
+            pass
+    if not shutil.which("ffprobe"):
         return 0.0
     try:
         proc = subprocess.run(

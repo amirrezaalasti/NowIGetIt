@@ -30,6 +30,15 @@ from backend.pipeline.tts import synthesize_narration
 from backend.pipeline.visual_preview import create_visual_preview
 from backend.pipeline.vlm_review import review_scene
 from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
+
+
+def _scene_audio_file(directory: Path) -> Optional[Path]:
+    """Prefer WAV (Gemini/Vercel) then legacy MP3."""
+    for name in ("audio.wav", "audio.mp3"):
+        path = directory / name
+        if path.exists():
+            return path
+    return None
 from backend.schemas import (
     ContinueRequest,
     GenerateRequest,
@@ -253,14 +262,16 @@ def _process_one_scene(
     sdir = store.scene_dir(job_id, scene.id)
 
     # --- TTS first so codegen can match narration length ---
+    # Gemini returns PCM→WAV (no ffmpeg); other providers may return MP3.
     audio_path, audio_skipped = synthesize_narration(
         scene.narration,
-        work_dir / "audio" / f"{scene.id}.mp3",
+        work_dir / "audio" / f"{scene.id}.wav",
         settings=settings,
         voice=voice,
     )
     if audio_path and Path(audio_path).exists():
-        shutil.copy2(audio_path, sdir / "audio.mp3")
+        dest = sdir / f"audio{Path(audio_path).suffix.lower()}"
+        shutil.copy2(audio_path, dest)
         target_duration = probe_duration(Path(audio_path)) or scene.duration_seconds
     else:
         target_duration = scene.duration_seconds
@@ -844,7 +855,9 @@ def _load_existing_scene_artifact(
         video_path=str(video_path),
         video_url=video_url,
         preview_note="Reused existing scene artifact",
-        audio_path=str(sdir / "audio.mp3") if (sdir / "audio.mp3").exists() else None,
+        audio_path=(
+            str(p) if (p := _scene_audio_file(sdir)) is not None else None
+        ),
         vlm_frame_urls=[frame_url] if frame_url else [],
         artifact_dir=str(sdir),
     )
@@ -1340,8 +1353,8 @@ def retouch_scene(
     retry_count = 0
     max_retries = settings.max_scene_revisions
     target_duration = scene_sec.duration_seconds
-    audio_file = store.scene_dir(job_id, scene_id) / "audio.mp3"
-    if audio_file.exists():
+    audio_file = _scene_audio_file(store.scene_dir(job_id, scene_id))
+    if audio_file is not None:
         target_duration = probe_duration(audio_file) or target_duration
 
     new_code = revise_scene_code(
@@ -1461,11 +1474,17 @@ def retouch_scene(
 
     video_url = None
     if video_path:
-        if not audio_file.exists():
-            audio_file = work_dir / "audio" / f"{scene_id}.mp3"
+        if audio_file is None or not audio_file.exists():
+            for candidate in (
+                work_dir / "audio" / f"{scene_id}.wav",
+                work_dir / "audio" / f"{scene_id}.mp3",
+            ):
+                if candidate.exists():
+                    audio_file = candidate
+                    break
 
         final_video_path = video_path
-        if audio_file.exists():
+        if audio_file is not None and audio_file.exists():
             muxed_path = sdir / "scene_vo.mp4"
             muxed = mux_scene_audio(video_path, str(audio_file), muxed_path)
             if muxed:
@@ -1795,8 +1814,8 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
             ),
         }
 
-    audio_p = sdir / "audio.mp3"
-    audio_str = str(audio_p) if audio_p.exists() else None
+    audio_p = _scene_audio_file(sdir)
+    audio_str = str(audio_p) if audio_p is not None else None
     muxed_path = sdir / "scene_vo.mp4"
     muxed = mux_scene_audio(str(scene_video), audio_str, muxed_path)
 
