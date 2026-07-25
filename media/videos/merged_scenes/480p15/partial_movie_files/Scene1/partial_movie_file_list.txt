@@ -1,0 +1,7 @@
+# This file is used internally by FFMPEG.
+file 'file:/Users/niloufarghandehariyoon/Nowgetit/NowIGetIt/media/videos/merged_scenes/480p15/partial_movie_files/Scene1/2498242406_736414799_223132457.mp4'
+file 'file:/Users/niloufarghandehariyoon/Nowgetit/NowIGetIt/media/videos/merged_scenes/480p15/partial_movie_files/Scene1/1566699879_1194311138_109146949.mp4'
+file 'file:/Users/niloufarghandehariyoon/Nowgetit/NowIGetIt/media/videos/merged_scenes/480p15/partial_movie_files/Scene1/1566699879_2671185049_286850188.mp4'
+file 'file:/Users/niloufarghandehariyoon/Nowgetit/NowIGetIt/media/videos/merged_scenes/480p15/partial_movie_files/Scene1/1566699879_2800925497_4231720469.mp4'
+file 'file:/Users/niloufarghandehariyoon/Nowgetit/NowIGetIt/media/videos/merged_scenes/480p15/partial_movie_files/Scene1/1566699879_1770107853_1738558055.mp4'
+file 'file:/Users/niloufarghandehariyoon/Nowgetit/NowIGetIt/media/videos/merged_scenes/480p15/partial_movie_files/Scene1/1566699879_4247107814_2623646188.mp4'

@@ -9,7 +9,7 @@ PLANNER_SYSTEM = """You are an expert educational animation director.
 Given a learner's prompt, produce a JSON scene plan for a short explanatory video.
 
 Rules:
-- Break the explanation into 3–5 sequential scenes (prefer 4). Keep each scene simple
+- Break the explanation into an appropriate number of sequential scenes based on the complexity of the user's prompt. Keep each scene simple
   enough to implement in one short Manim class — one clear visual idea per scene.
 - Each scene must include: id, title, narration (spoken voiceover), visual_description,
   animation_beats (short list), duration_seconds, camera_notes.
