@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   assetUrl,
   fetchJob,
@@ -11,15 +11,22 @@ import {
 
 type Props = {
   activeJobId: string | null;
+  /** True while the generate SSE stream is in progress — polls job detail live. */
+  live?: boolean;
 };
 
-export function DebugInspector({ activeJobId }: Props) {
+const POLL_MS = 1500;
+
+export function DebugInspector({ activeJobId, live = false }: Props) {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [job, setJob] = useState<JobDetail | null>(null);
   const [tab, setTab] = useState<"plan" | "scenes" | "events">("scenes");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const hasLoadedRef = useRef(false);
+  const loadedForIdRef = useRef<string | null>(null);
 
   const refreshJobs = useCallback(async () => {
     try {
@@ -28,6 +35,10 @@ export function DebugInspector({ activeJobId }: Props) {
     } catch {
       /* API may be offline */
     }
+  }, []);
+
+  const bumpRefresh = useCallback(() => {
+    setRefreshKey((k) => k + 1);
   }, []);
 
   useEffect(() => {
@@ -41,14 +52,27 @@ export function DebugInspector({ activeJobId }: Props) {
   useEffect(() => {
     if (!selectedId) {
       setJob(null);
+      hasLoadedRef.current = false;
+      loadedForIdRef.current = null;
       return;
     }
+
+    if (loadedForIdRef.current !== selectedId) {
+      hasLoadedRef.current = false;
+      loadedForIdRef.current = selectedId;
+    }
+
     let cancelled = false;
-    setLoading(true);
+    const silent = hasLoadedRef.current;
+    if (!silent) setLoading(true);
     setError(null);
+
     fetchJob(selectedId)
       .then((detail) => {
-        if (!cancelled) setJob(detail);
+        if (!cancelled) {
+          setJob(detail);
+          hasLoadedRef.current = true;
+        }
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -56,10 +80,33 @@ export function DebugInspector({ activeJobId }: Props) {
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
+
     return () => {
       cancelled = true;
     };
-  }, [selectedId]);
+  }, [selectedId, refreshKey]);
+
+  // Live-poll artifacts while generation is running for the selected job
+  useEffect(() => {
+    if (!live || !selectedId || selectedId !== activeJobId) return;
+    const id = window.setInterval(bumpRefresh, POLL_MS);
+    return () => window.clearInterval(id);
+  }, [live, selectedId, activeJobId, bumpRefresh]);
+
+  // One final pull when the stream ends (catch last frames / events / video)
+  const wasLiveRef = useRef(false);
+  useEffect(() => {
+    if (wasLiveRef.current && !live && selectedId) {
+      bumpRefresh();
+      void refreshJobs();
+    }
+    wasLiveRef.current = live;
+  }, [live, selectedId, bumpRefresh, refreshJobs]);
+
+  function onRefresh() {
+    void refreshJobs();
+    bumpRefresh();
+  }
 
   return (
     <section className="relative mx-auto w-full max-w-3xl px-6 pb-28">
@@ -67,6 +114,11 @@ export function DebugInspector({ activeJobId }: Props) {
         <div>
           <p className="text-xs uppercase tracking-[0.16em] text-[var(--ink-muted)]">
             Debug inspector
+            {live && selectedId === activeJobId && (
+              <span className="ml-2 normal-case tracking-normal text-[var(--accent)]">
+                · live
+              </span>
+            )}
           </p>
           <h2 className="mt-1 font-[family-name:var(--font-display)] text-2xl">
             Saved plans & VLM frames
@@ -74,10 +126,10 @@ export function DebugInspector({ activeJobId }: Props) {
         </div>
         <button
           type="button"
-          onClick={() => void refreshJobs()}
+          onClick={onRefresh}
           className="text-sm text-[var(--ink-muted)] underline-offset-4 hover:underline"
         >
-          Refresh jobs
+          Refresh
         </button>
       </div>
 

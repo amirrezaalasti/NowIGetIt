@@ -1,4 +1,4 @@
-"""OpenRouter client defaulting to Gemini 3.6 Flash."""
+"""OpenRouter client: text LLM + separate multimodal VLM."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ class OpenRouterClient:
             },
         )
         self.model = self.settings.openrouter_model
+        self.vlm_model = self.settings.openrouter_vlm_model
 
     def chat(
         self,
@@ -39,13 +40,14 @@ class OpenRouterClient:
         temperature: float = 0.4,
         max_tokens: int = 4096,
         json_mode: bool = False,
+        model: Optional[str] = None,
     ) -> str:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
         kwargs: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -64,6 +66,7 @@ class OpenRouterClient:
         user: str | list[dict[str, Any]],
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        model: Optional[str] = None,
     ) -> dict[str, Any]:
         raw = self.chat(
             system=system,
@@ -71,6 +74,7 @@ class OpenRouterClient:
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=True,
+            model=model,
         )
         return parse_json_object(raw)
 
@@ -85,6 +89,7 @@ class OpenRouterClient:
         max_tokens: int = 2048,
         json_mode: bool = True,
     ) -> dict[str, Any] | str:
+        """Image review always uses OPENROUTER_VLM_MODEL (multimodal)."""
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         user_content: list[dict[str, Any]] = [
             {"type": "text", "text": prompt},
@@ -99,12 +104,14 @@ class OpenRouterClient:
                 user=user_content,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                model=self.vlm_model,
             )
         return self.chat(
             system=system,
             user=user_content,
             temperature=temperature,
             max_tokens=max_tokens,
+            model=self.vlm_model,
         )
 
 
@@ -201,6 +208,46 @@ def repair_llm_json(text: str) -> str:
     return "".join(out)
 
 
+def extract_first_json_object(text: str) -> str | None:
+    """Return the first balanced `{...}` slice, respecting JSON string escapes."""
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _loads_object(text: str) -> dict[str, Any]:
+    """Parse a JSON object, ignoring trailing junk after the first value."""
+    decoder = json.JSONDecoder()
+    data, _end = decoder.raw_decode(text.lstrip())
+    if not isinstance(data, dict):
+        raise ValueError("JSON root must be an object")
+    return data
+
+
 def parse_json_object(text: str) -> dict[str, Any]:
     """Parse a JSON object from model output, tolerating fenced markdown & LaTeX."""
     cleaned = text.strip()
@@ -209,18 +256,23 @@ def parse_json_object(text: str) -> dict[str, Any]:
         cleaned = re.sub(r"\s*```$", "", cleaned)
 
     candidates = [cleaned]
+    balanced = extract_first_json_object(cleaned)
+    if balanced:
+        candidates.append(balanced)
+    # Fallback: greedy match (may include trailing braces — raw_decode handles it)
     match = re.search(r"\{[\s\S]*\}", cleaned)
     if match:
         candidates.append(match.group(0))
 
     last_error: Exception | None = None
+    seen: set[str] = set()
     for candidate in candidates:
         for variant in (candidate, repair_llm_json(candidate)):
+            if variant in seen:
+                continue
+            seen.add(variant)
             try:
-                data = json.loads(variant)
-                if isinstance(data, dict):
-                    return data
-                raise ValueError("JSON root must be an object")
+                return _loads_object(variant)
             except (json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
                 continue

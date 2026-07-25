@@ -44,6 +44,7 @@ export function assetUrl(path: string | null | undefined): string {
 export async function fetchHealth(): Promise<{
   ok: boolean;
   model?: string;
+  vlm_model?: string;
   openrouter_configured?: boolean;
   tts_configured?: boolean;
   manim_render_enabled?: boolean;

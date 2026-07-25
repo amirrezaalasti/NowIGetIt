@@ -46,9 +46,11 @@ export function Generator() {
         const manim = h.manim_available
           ? ` · Manim ${h.manim_version || "ok"}`
           : "";
+        const short = (id?: string) =>
+          id?.includes("/") ? id.split("/").pop() : id;
         setHealth(
           h.openrouter_configured
-            ? `Ready · ${h.model || "gemini-3.6-flash"}${manim}`
+            ? `Ready · ${short(h.model) || "llm"} · VLM ${short(h.vlm_model) || "flash-lite"}${manim}`
             : "API up · set OPENROUTER_API_KEY",
         );
       })
@@ -398,7 +400,7 @@ export function Generator() {
         )}
       </section>
 
-      <DebugInspector activeJobId={jobId} />
+      <DebugInspector activeJobId={jobId} live={running} />
     </>
   );
 }

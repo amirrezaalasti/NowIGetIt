@@ -50,6 +50,7 @@ def health() -> dict:
     return {
         "ok": True,
         "model": settings.openrouter_model,
+        "vlm_model": settings.openrouter_vlm_model,
         "openrouter_configured": bool(settings.openrouter_api_key),
         "tts_configured": bool(settings.tts_api_key),
         "manim_render_enabled": settings.enable_manim_render,

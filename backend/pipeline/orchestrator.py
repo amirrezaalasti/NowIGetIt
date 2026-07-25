@@ -108,6 +108,7 @@ def run_pipeline(
         prompt=request.prompt,
         settings_snapshot={
             "model": settings.openrouter_model,
+            "vlm_model": settings.openrouter_vlm_model,
             "enable_manim_render": settings.enable_manim_render,
             "max_scene_revisions": settings.max_scene_revisions,
             "resolution": request.resolution,
