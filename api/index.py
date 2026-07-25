@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import sys
 from pathlib import Path
@@ -20,10 +21,11 @@ from backend import supabase_db as db
 from backend.auth import CurrentUser, MediaUser, auth_is_configured
 from backend.config import get_settings
 from backend import job_runner
+from backend.tts_voices import voices_for_api
 from backend.pipeline.orchestrator import (
+    aiter_continue_events,
+    aiter_job_event_stream,
     approve_scene,
-    iter_continue_events,
-    iter_job_event_stream,
     iter_pipeline_events,
     iter_regenerate_scene,
     iter_retouch_scene,
@@ -121,6 +123,9 @@ def health() -> dict:
         "vlm_model": settings.openrouter_vlm_model,
         "openrouter_configured": bool(settings.openrouter_api_key),
         "tts_configured": bool(settings.tts_api_key),
+        "tts_model": settings.tts_model,
+        "tts_voice": settings.tts_voice,
+        "tts_voices": voices_for_api(),
         "manim_render_enabled": settings.enable_manim_render,
         "manim_available": manim_available,
         "manim_version": manim_version,
@@ -134,10 +139,12 @@ def health() -> dict:
 
 
 @app.get("/api/me")
-def me(user: CurrentUser) -> dict:
+async def me(user: CurrentUser) -> dict:
     """Current user profile + monthly LLM/storage usage."""
-    _prepare_user(user)
-    usage = db.get_user_usage(user.id)
+    # Run sync Supabase I/O off the event loop so usage stays responsive
+    # even while generation SSE streams are open.
+    await asyncio.to_thread(_prepare_user, user)
+    usage = await asyncio.to_thread(db.get_user_usage, user.id)
     return {
         "user": {
             "id": user.id,
@@ -249,7 +256,7 @@ def put_scene_plan(
 
 
 @app.get("/api/jobs/{job_id}/events/stream")
-def job_events_stream(
+async def job_events_stream(
     job_id: str,
     user: CurrentUser,
     after: int = 0,
@@ -257,12 +264,12 @@ def job_events_stream(
     """SSE: attach to a job's durable event log (refresh / navigate safe)."""
     _require_job_owner(job_id, user.id)
     try:
-        store.load_job(job_id)
+        await asyncio.to_thread(store.load_job, job_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
 
-    def event_stream():
-        for chunk in iter_job_event_stream(job_id, after=max(0, after)):
+    async def event_stream():
+        async for chunk in aiter_job_event_stream(job_id, after=max(0, after)):
             yield chunk
 
     return StreamingResponse(
@@ -277,7 +284,7 @@ def job_events_stream(
 
 
 @app.post("/api/jobs/{job_id}/continue/stream")
-def continue_stream(
+async def continue_stream(
     job_id: str,
     user: CurrentUser,
     body: ContinueRequest = ContinueRequest(),
@@ -285,13 +292,13 @@ def continue_stream(
     """SSE: continue a plan_only job after the user confirms the storyboard."""
     _require_job_owner(job_id, user.id)
     try:
-        db.assert_within_quotas(user.id, need_tokens=20_000)
+        await asyncio.to_thread(db.assert_within_quotas, user.id, need_tokens=20_000)
     except db.QuotaExceededError as exc:
         raise _quota_http(exc) from exc
 
-    def event_stream():
+    async def event_stream():
         try:
-            for chunk in iter_continue_events(
+            async for chunk in aiter_continue_events(
                 job_id, body, user_id=user.id
             ):
                 yield chunk

@@ -31,7 +31,7 @@ Prompt → Plan → [Generate → Render → VLM → Revise] × N → TTS → Fi
 |------|-------------|
 | **Plan** | Prompt → structured `ScenePlan` (title, scenes, narration, visuals) |
 | **Per scene** | Manim code → render → VLM review → revise up to `MAX_SCENE_REVISIONS` |
-| **TTS** | Narration → speech (`TTS_*` OpenAI-compatible API) |
+| **TTS** | Narration → speech via OpenRouter (`google/gemini-3.1-flash-tts-preview`) |
 | **Final** | Cross-scene debug pass with optional last code fixes |
 
 **Deploy split**
@@ -77,7 +77,7 @@ cp .env.example .env
 | `OPENROUTER_API_KEY` | Yes | OpenRouter API key |
 | `OPENROUTER_MODEL` | No | Text LLM (default in `.env.example`) |
 | `OPENROUTER_VLM_MODEL` | No | Vision model for frame review |
-| `TTS_API_KEY` / `TTS_BASE_URL` / `TTS_MODEL` / `TTS_VOICE` | No | OpenAI-compatible TTS |
+| `TTS_*` | No | OpenRouter TTS (defaults to Gemini 3.1 Flash TTS / voice `Kore`; key falls back to `OPENROUTER_API_KEY`) |
 | `ENABLE_MANIM_RENDER` | No | `true` for local video output |
 | `NEXT_PUBLIC_API_BASE_URL` | No | API origin (local: `http://127.0.0.1:8000`) |
 | `AUTH_SECRET` | Yes | Shared secret for Auth.js + API JWTs (`openssl rand -hex 32`) |

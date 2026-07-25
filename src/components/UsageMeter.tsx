@@ -50,39 +50,71 @@ type Props = {
   variant?: "menu" | "inline";
 };
 
+const FETCH_TIMEOUT_MS = 12_000;
+
 export function UsageMeter({ variant = "menu" }: Props) {
   const { status } = useSession();
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (status !== "authenticated") {
       setUsage(null);
+      setError(null);
+      setLoading(false);
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+    setLoading(true);
+    setError(null);
+
     void (async () => {
       try {
         await ensureApiToken();
-        const me = await fetchMe();
-        if (!cancelled) {
-          setUsage(me.usage);
-          setError(
-            me.supabase_configured
-              ? null
-              : "Supabase not configured on API",
-          );
+        const me = await fetchMe(controller.signal);
+        if (cancelled) return;
+        if (!me.supabase_configured) {
+          setUsage(null);
+          setError("Supabase not configured on API");
+          return;
         }
+        if (!me.usage) {
+          setUsage(null);
+          setError("Usage unavailable");
+          return;
+        }
+        setUsage(me.usage);
+        setError(null);
       } catch (err) {
-        if (!cancelled) setError((err as Error).message);
+        if (cancelled) return;
+        if ((err as Error).name === "AbortError") {
+          setError("Usage timed out — API busy");
+        } else {
+          setError((err as Error).message || "Failed to load usage");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
+
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
+      controller.abort();
     };
   }, [status]);
 
   if (status !== "authenticated") return null;
+
+  if (loading && !usage) {
+    return (
+      <p className="text-xs text-[var(--ink-muted)]">Loading usage…</p>
+    );
+  }
 
   if (error && !usage) {
     return <p className="text-xs text-[var(--ink-muted)]">{error}</p>;
@@ -90,7 +122,7 @@ export function UsageMeter({ variant = "menu" }: Props) {
 
   if (!usage) {
     return (
-      <p className="text-xs text-[var(--ink-muted)]">Loading usage…</p>
+      <p className="text-xs text-[var(--ink-muted)]">Usage unavailable</p>
     );
   }
 
@@ -114,6 +146,9 @@ export function UsageMeter({ variant = "menu" }: Props) {
         used={usage.storage.bytes_used}
         limit={usage.storage.bytes_limit}
       />
+      {error ? (
+        <p className="text-[10px] text-[var(--ink-muted)]">{error}</p>
+      ) : null}
     </div>
   );
 }

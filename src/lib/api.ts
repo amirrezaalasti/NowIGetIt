@@ -267,12 +267,24 @@ export async function approveScene(
   return res.json();
 }
 
+export type TtsVoiceOption = {
+  id: string;
+  gender: string;
+  label: string;
+};
+
+export type LengthPreset = "short" | "standard" | "deep";
+export type Audience = "hs" | "undergrad" | "general";
+
 export async function fetchHealth(): Promise<{
   ok: boolean;
   model?: string;
   vlm_model?: string;
   openrouter_configured?: boolean;
   tts_configured?: boolean;
+  tts_model?: string;
+  tts_voice?: string;
+  tts_voices?: TtsVoiceOption[];
   manim_render_enabled?: boolean;
   manim_available?: boolean;
   manim_version?: string;
@@ -306,7 +318,7 @@ export type UsageSnapshot = {
   };
 };
 
-export async function fetchMe(): Promise<{
+export async function fetchMe(signal?: AbortSignal): Promise<{
   user: {
     id: string;
     email?: string | null;
@@ -316,12 +328,18 @@ export async function fetchMe(): Promise<{
   usage: UsageSnapshot | null;
   supabase_configured: boolean;
 }> {
-  const res = await fetch(`${apiBase()}/api/me`, {
-    cache: "no-store",
-    headers: await authHeaders(),
-  });
-  if (!res.ok) throw new Error("Failed to load account usage");
-  return res.json();
+  try {
+    const res = await fetch(`${apiBase()}/api/me`, {
+      cache: "no-store",
+      headers: await authHeaders(),
+      signal,
+    });
+    if (!res.ok) throw new Error("Failed to load account usage");
+    return res.json();
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Account usage");
+  }
 }
 
 export async function listJobs(): Promise<JobSummary[]> {
@@ -379,9 +397,6 @@ export async function streamJobEvents(
   }
 }
 
-export type LengthPreset = "short" | "standard" | "deep";
-export type Audience = "hs" | "undergrad" | "general";
-
 export type SceneSectionDraft = {
   id: string;
   title: string;
@@ -409,6 +424,7 @@ export type GenerateOptions = {
   skip_render?: boolean;
   length_preset?: LengthPreset;
   audience?: Audience;
+  tts_voice?: string;
   plan_only?: boolean;
 };
 
@@ -483,6 +499,7 @@ export async function streamGenerate(
         resolution: opts.resolution ?? "720p",
         length_preset: opts.length_preset ?? "standard",
         audience: opts.audience ?? "general",
+        tts_voice: opts.tts_voice ?? "Kore",
         plan_only: opts.plan_only ?? true,
       }),
       signal,
@@ -519,7 +536,7 @@ export async function streamContinue(
   jobId: string,
   onEvent: (event: PipelineEvent) => void,
   signal?: AbortSignal,
-  opts?: { resolution?: string; skip_render?: boolean },
+  opts?: { resolution?: string; skip_render?: boolean; tts_voice?: string },
 ): Promise<void> {
   try {
     const res = await fetch(`${apiBase()}/api/jobs/${jobId}/continue/stream`, {
@@ -531,6 +548,7 @@ export async function streamContinue(
       body: JSON.stringify({
         resolution: opts?.resolution ?? "720p",
         skip_render: opts?.skip_render ?? false,
+        tts_voice: opts?.tts_voice,
       }),
       signal,
       cache: "no-store",

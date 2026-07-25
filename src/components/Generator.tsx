@@ -23,7 +23,19 @@ import {
   type PipelineEvent,
   type ScenePlanDraft,
   type SceneSectionDraft,
+  type TtsVoiceOption,
 } from "@/lib/api";
+
+const DEFAULT_TTS_VOICES: TtsVoiceOption[] = [
+  { id: "Kore", gender: "Female", label: "Kore · Female" },
+  { id: "Aoede", gender: "Female", label: "Aoede · Female" },
+  { id: "Zephyr", gender: "Female", label: "Zephyr · Female" },
+  { id: "Callirrhoe", gender: "Female", label: "Callirrhoe · Female" },
+  { id: "Puck", gender: "Male", label: "Puck · Male" },
+  { id: "Charon", gender: "Male", label: "Charon · Male" },
+  { id: "Fenrir", gender: "Male", label: "Fenrir · Male" },
+  { id: "Orus", gender: "Male", label: "Orus · Male" },
+];
 
 function AutoTextarea({
   value,
@@ -147,6 +159,9 @@ export function Generator() {
   const [prompt, setPrompt] = useState("");
   const [lengthPreset, setLengthPreset] = useState<LengthPreset>("standard");
   const [audience, setAudience] = useState<Audience>("general");
+  const [ttsVoice, setTtsVoice] = useState("Kore");
+  const [ttsVoices, setTtsVoices] =
+    useState<TtsVoiceOption[]>(DEFAULT_TTS_VOICES);
   const [running, setRunning] = useState(false);
   const [awaitingPlan, setAwaitingPlan] = useState(false);
   const [editingPlan, setEditingPlan] = useState<ScenePlanDraft | null>(null);
@@ -194,6 +209,9 @@ export function Generator() {
             : h.render_worker_ok
               ? " · remote worker"
               : "";
+        if (h.tts_voices?.length) {
+          setTtsVoices(h.tts_voices);
+        }
         setHealth(
           h.openrouter_configured
             ? `Ready · ${short(h.model) || "llm"} · VLM ${short(h.vlm_model) || "flash-lite"}${manim}${worker}`
@@ -450,6 +468,14 @@ export function Generator() {
     if (typeof job.meta?.prompt === "string" && job.meta.prompt) {
       setPrompt(job.meta.prompt);
     }
+    const metaSettings = job.meta?.settings;
+    if (
+      metaSettings &&
+      typeof metaSettings === "object" &&
+      typeof (metaSettings as { tts_voice?: unknown }).tts_voice === "string"
+    ) {
+      setTtsVoice((metaSettings as { tts_voice: string }).tts_voice);
+    }
     if (job.final_video_url) setFinalVideoUrl(job.final_video_url);
     if (job.final_debug && typeof job.final_debug.notes === "string") {
       setFinalNotes(job.final_debug.notes);
@@ -637,6 +663,7 @@ export function Generator() {
           prompt: prompt.trim(),
           length_preset: lengthPreset,
           audience,
+          tts_voice: ttsVoice,
           plan_only: true,
           skip_render: false,
         },
@@ -700,7 +727,9 @@ export function Generator() {
       await updateJobPlan(jobId, editingPlan);
       setScenes((prev) => prev.map((s) => ({ ...s, status: "queued" })));
       setLiveMessage("Building scenes…");
-      await streamContinue(jobId, applyPipelineEvent, controller.signal);
+      await streamContinue(jobId, applyPipelineEvent, controller.signal, {
+        tts_voice: ttsVoice,
+      });
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         setError((err as Error).message);
@@ -819,6 +848,23 @@ export function Generator() {
                 onChange={setAudience}
                 disabled={running}
               />
+              <label className="flex min-w-[10rem] flex-col gap-1.5">
+                <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+                  Narrator
+                </span>
+                <select
+                  value={ttsVoice}
+                  onChange={(e) => setTtsVoice(e.target.value)}
+                  disabled={running}
+                  className="rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {ttsVoices.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
 
             {showExamples && (
@@ -901,6 +947,24 @@ export function Generator() {
               className="mt-8 w-full border-b border-[var(--line)] bg-transparent pb-2 font-[family-name:var(--font-display)] text-2xl text-[var(--ink)] outline-none focus:border-[var(--accent)]"
               placeholder="Video title"
             />
+
+            <label className="mt-6 flex max-w-xs flex-col gap-1.5">
+              <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+                Narrator voice
+              </span>
+              <select
+                value={ttsVoice}
+                onChange={(e) => setTtsVoice(e.target.value)}
+                disabled={running}
+                className="rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {ttsVoices.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+            </label>
 
             <ol className="mt-8 space-y-10">
               {editingPlan.scenes.map((scene, i) => (

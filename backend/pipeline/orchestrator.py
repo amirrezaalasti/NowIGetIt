@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
@@ -28,6 +29,7 @@ from backend.pipeline.storyboard import create_storyboard_frame
 from backend.pipeline.tts import synthesize_narration
 from backend.pipeline.visual_preview import create_visual_preview
 from backend.pipeline.vlm_review import review_scene
+from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
 from backend.schemas import (
     ContinueRequest,
     GenerateRequest,
@@ -158,6 +160,37 @@ def _job_resolution(job_id: str, fallback: str = "720p") -> str:
     return fallback
 
 
+def _job_tts_voice(job_id: str, fallback: Optional[str] = None) -> str:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        voice = settings.get("tts_voice")
+        if isinstance(voice, str) and voice.strip():
+            return normalize_tts_voice(voice)
+    except Exception:  # noqa: BLE001
+        pass
+    if fallback:
+        return normalize_tts_voice(fallback)
+    return normalize_tts_voice(get_settings().tts_voice, fallback=DEFAULT_TTS_VOICE)
+
+
+def _persist_job_tts_voice(job_id: str, voice: str) -> None:
+    canonical = normalize_tts_voice(voice)
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["tts_voice"] = canonical
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _load_plan(job_id: str) -> ScenePlan:
     job = store.load_job(job_id)
     plan_data = job.get("scene_plan")
@@ -197,9 +230,11 @@ def _process_one_scene(
     skip_render: bool,
     on_event: Optional[EventCallback],
     creative_direction: str = "",
+    tts_voice: Optional[str] = None,
 ) -> SceneArtifact:
     """TTS-first → codegen (timed) → render → VLM for a single scene."""
     settings = get_settings()
+    voice = tts_voice or _job_tts_voice(job_id)
     store.save_scene_section(job_id, scene.id, scene.model_dump())
     _emit(
         on_event,
@@ -216,6 +251,7 @@ def _process_one_scene(
         scene.narration,
         work_dir / "audio" / f"{scene.id}.mp3",
         settings=settings,
+        voice=voice,
     )
     if audio_path and Path(audio_path).exists():
         shutil.copy2(audio_path, sdir / "audio.mp3")
@@ -231,12 +267,13 @@ def _process_one_scene(
         on_event,
         PipelineEventType.scene_tts,
         f"TTS for {scene.id}"
-        + (" (skipped — no TTS_API_KEY)" if audio_skipped else f" · {target_duration:.1f}s"),
+        + (" (skipped — TTS not configured)" if audio_skipped else f" · {target_duration:.1f}s"),
         data={
             "scene_id": scene.id,
             "audio_path": audio_path,
             "skipped": audio_skipped,
             "target_duration": target_duration,
+            "tts_voice": voice,
             "job_id": job_id,
         },
         job_id=job_id,
@@ -737,8 +774,10 @@ def _run_scenes_loop(
     user_id: Optional[str],
     prompt: str,
     on_event: Optional[EventCallback],
+    tts_voice: Optional[str] = None,
 ) -> GenerateResult:
     settings = get_settings()
+    voice = tts_voice or _job_tts_voice(job_id)
     work_dir = store.job_dir(job_id)
     total = len(plan.scenes)
     results: dict[int, SceneArtifact] = {}
@@ -796,6 +835,7 @@ def _run_scenes_loop(
                 resolution=resolution,
                 skip_render=skip_render,
                 on_event=on_event,
+                tts_voice=voice,
             )
             return index, artifact
         finally:
@@ -812,6 +852,7 @@ def _run_scenes_loop(
                 "scene_parallelism": workers,
                 "pending": [s.id for _, s in to_run],
                 "reused": [plan.scenes[i].id for i in sorted(results)],
+                "tts_voice": voice,
             },
             job_id=job_id,
         )
@@ -875,6 +916,7 @@ def run_pipeline(
             "skip_render": request.skip_render,
             "length_preset": request.length_preset,
             "audience": request.audience,
+            "tts_voice": request.tts_voice,
             "plan_only": request.plan_only,
         },
         user_id=user_id,
@@ -939,6 +981,7 @@ def run_pipeline(
         "awaiting_confirm": request.plan_only,
         "length_preset": request.length_preset,
         "audience": request.audience,
+        "tts_voice": request.tts_voice,
     }
     _emit(
         on_event,
@@ -977,6 +1020,7 @@ def run_pipeline(
         user_id=user_id,
         prompt=request.prompt,
         on_event=on_event,
+        tts_voice=request.tts_voice,
     )
 
 
@@ -1001,6 +1045,9 @@ def continue_pipeline(
     plan = _load_plan(job_id)
     resolution = request.resolution or _job_resolution(job_id)
     skip_render = request.skip_render
+    if request.tts_voice:
+        _persist_job_tts_voice(job_id, request.tts_voice)
+    tts_voice = _job_tts_voice(job_id, fallback=request.tts_voice)
 
     if user_id:
         db.upsert_job(
@@ -1015,7 +1062,7 @@ def continue_pipeline(
         on_event,
         PipelineEventType.status,
         f"Generating {len(plan.scenes)} scenes from storyboard…",
-        data={"job_id": job_id, "title": plan.title},
+        data={"job_id": job_id, "title": plan.title, "tts_voice": tts_voice},
         job_id=job_id,
     )
     return _run_scenes_loop(
@@ -1027,6 +1074,7 @@ def continue_pipeline(
         user_id=user_id or (owner if isinstance(owner, str) else None),
         prompt=prompt,
         on_event=on_event,
+        tts_voice=tts_voice,
     )
 
 
@@ -1100,6 +1148,7 @@ def regenerate_scene(
         skip_render=request.skip_render,
         on_event=on_event,
         creative_direction=request.direction,
+        tts_voice=_job_tts_voice(job_id),
     )
 
     # Mux + refresh final if we have video
@@ -1410,12 +1459,20 @@ def iter_retouch_scene(
             q.put(None)
 
     Thread(target=worker, daemon=True).start()
+    # Short queue waits + SSE comments so Starlette's iterate_in_threadpool
+    # releases the worker between polls (long .get() timeouts wedge the API).
+    waited = 0.0
     while True:
         try:
-            item = q.get(timeout=300)
+            item = q.get(timeout=0.35)
         except Empty:
-            yield _sse({"type": "error", "message": "Retouch timed out", "data": None})
-            break
+            waited += 0.35
+            if waited >= 300:
+                yield _sse({"type": "error", "message": "Retouch timed out", "data": None})
+                break
+            yield ":\n\n"
+            continue
+        waited = 0.0
         if item is None:
             break
         yield _sse(item.model_dump())
@@ -1458,18 +1515,24 @@ def iter_pipeline_events(
             q.put(None)
 
     Thread(target=worker, daemon=True).start()
+    waited = 0.0
     while True:
         try:
-            item = q.get(timeout=600)
+            item = q.get(timeout=0.35)
         except Empty:
-            yield _sse(
-                {
-                    "type": PipelineEventType.error.value,
-                    "message": "Pipeline timed out waiting for the next event",
-                    "data": None,
-                }
-            )
-            break
+            waited += 0.35
+            if waited >= 600:
+                yield _sse(
+                    {
+                        "type": PipelineEventType.error.value,
+                        "message": "Pipeline timed out waiting for the next event",
+                        "data": None,
+                    }
+                )
+                break
+            yield ":\n\n"
+            continue
+        waited = 0.0
         if item is None:
             break
         yield _sse(item.model_dump())
@@ -1515,6 +1578,45 @@ def iter_continue_events(
     yield from iter_job_event_stream(job_id, after=start_after)
 
 
+async def aiter_continue_events(
+    job_id: str,
+    request: Optional[ContinueRequest] = None,
+    *,
+    user_id: Optional[str] = None,
+    after: Optional[int] = None,
+) -> AsyncIterator[str]:
+    """Async continue stream — job work stays on a daemon thread; SSE polls async."""
+    request = request or ContinueRequest()
+    start_after = (
+        await asyncio.to_thread(job_runner.event_count, job_id)
+        if after is None
+        else max(0, after)
+    )
+
+    def target() -> None:
+        continue_pipeline(job_id, request, on_event=None, user_id=user_id)
+
+    started = await asyncio.to_thread(job_runner.start_job, job_id, target)
+    yield _sse(
+        {
+            "type": PipelineEventType.status.value,
+            "message": (
+                f"Started scene generation for {job_id}"
+                if started
+                else f"Attached to in-flight job {job_id}"
+            ),
+            "data": {
+                "job_id": job_id,
+                "started": started,
+                "running": job_runner.is_running(job_id),
+                "after": start_after,
+            },
+        }
+    )
+    async for chunk in aiter_job_event_stream(job_id, after=start_after):
+        yield chunk
+
+
 def iter_job_event_stream(job_id: str, *, after: int = 0) -> Iterator[str]:
     """Tail durable job events (works across refresh / page changes)."""
     for ev in job_runner.iter_event_tail(job_id, after=after):
@@ -1551,17 +1653,29 @@ def iter_regenerate_scene(
             q.put(None)
 
     Thread(target=worker, daemon=True).start()
+    waited = 0.0
     while True:
         try:
-            item = q.get(timeout=400)
+            item = q.get(timeout=0.35)
         except Empty:
-            yield _sse(
-                {"type": "error", "message": "Regenerate timed out", "data": None}
-            )
-            break
+            waited += 0.35
+            if waited >= 400:
+                yield _sse(
+                    {"type": "error", "message": "Regenerate timed out", "data": None}
+                )
+                break
+            yield ":\n\n"
+            continue
+        waited = 0.0
         if item is None:
             break
         yield _sse(item.model_dump())
+
+
+async def aiter_job_event_stream(job_id: str, *, after: int = 0) -> AsyncIterator[str]:
+    """Async SSE tail — keeps the event loop free during idle polls."""
+    async for ev in job_runner.aiter_event_tail(job_id, after=after):
+        yield _sse(ev)
 
 
 def _sse(payload: dict) -> str:

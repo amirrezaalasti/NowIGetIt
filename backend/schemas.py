@@ -5,7 +5,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
 
 
 class GenerateRequest(BaseModel):
@@ -20,8 +22,15 @@ class GenerateRequest(BaseModel):
     audience: str = Field(
         default="general", pattern="^(hs|undergrad|general)$"
     )
+    # Gemini TTS narrator voice (OpenRouter google/gemini-3.1-flash-tts-preview)
+    tts_voice: str = Field(default=DEFAULT_TTS_VOICE, max_length=64)
     # If true, stop after planning so the UI can edit the storyboard
     plan_only: bool = False
+
+    @field_validator("tts_voice")
+    @classmethod
+    def _normalize_voice(cls, value: str) -> str:
+        return normalize_tts_voice(value)
 
 
 class ContinueRequest(BaseModel):
@@ -29,6 +38,14 @@ class ContinueRequest(BaseModel):
         default=None, pattern="^(480p|720p|1080p)$"
     )
     skip_render: bool = False
+    tts_voice: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("tts_voice")
+    @classmethod
+    def _normalize_voice(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        return normalize_tts_voice(value)
 
 
 class SceneSection(BaseModel):

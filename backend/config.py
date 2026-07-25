@@ -65,10 +65,17 @@ def get_settings() -> Settings:
         ),
         openrouter_site_url=os.getenv("OPENROUTER_SITE_URL", "https://nowigetit.app"),
         openrouter_app_name=os.getenv("OPENROUTER_APP_NAME", "NowIGetIt"),
-        tts_api_key=os.getenv("TTS_API_KEY", ""),
-        tts_base_url=os.getenv("TTS_BASE_URL", "https://api.openai.com/v1"),
-        tts_model=os.getenv("TTS_MODEL", "gpt-4o-mini-tts"),
-        tts_voice=os.getenv("TTS_VOICE", "alloy"),
+        # TTS defaults to OpenRouter (Gemini 3.1 Flash TTS Preview). Leave
+        # TTS_API_KEY blank to reuse OPENROUTER_API_KEY.
+        tts_api_key=(os.getenv("TTS_API_KEY") or "").strip()
+        or os.getenv("OPENROUTER_API_KEY", ""),
+        tts_base_url=os.getenv(
+            "TTS_BASE_URL", "https://openrouter.ai/api/v1"
+        ),
+        tts_model=os.getenv(
+            "TTS_MODEL", "google/gemini-3.1-flash-tts-preview"
+        ),
+        tts_voice=os.getenv("TTS_VOICE", "Kore"),
         enable_manim_render=os.getenv("ENABLE_MANIM_RENDER", "false").lower()
         in {"1", "true", "yes"},
         max_scene_revisions=int(os.getenv("MAX_SCENE_REVISIONS", "5")),
