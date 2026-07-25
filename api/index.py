@@ -95,6 +95,24 @@ def health() -> dict:
         artifacts_path = str(store.artifacts_root())
     except OSError:
         artifacts_path = "unavailable"
+    worker_ok: bool | None = None
+    worker_detail = None
+    if settings.render_worker_url:
+        try:
+            import httpx
+
+            with httpx.Client(timeout=5.0) as client:
+                wr = client.get(f"{settings.render_worker_url.rstrip('/')}/health")
+            worker_ok = wr.status_code == 200 and "nowigetit-render-worker" in wr.text
+            worker_detail = (
+                "ok"
+                if worker_ok
+                else f"unexpected response HTTP {wr.status_code} (is RENDER_WORKER_URL the Manim worker?)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            worker_ok = False
+            worker_detail = f"unreachable: {exc}"
+
     return {
         "ok": True,
         "model": settings.openrouter_model,
@@ -108,6 +126,8 @@ def health() -> dict:
         "auth_configured": auth_is_configured(),
         "supabase_configured": db.supabase_enabled(),
         "render_worker_configured": bool(settings.render_worker_url),
+        "render_worker_ok": worker_ok,
+        "render_worker_detail": worker_detail,
     }
 
 

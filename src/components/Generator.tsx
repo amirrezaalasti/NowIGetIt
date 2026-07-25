@@ -155,9 +155,15 @@ export function Generator() {
           : "";
         const short = (id?: string) =>
           id?.includes("/") ? id.split("/").pop() : id;
+        const worker =
+          h.render_worker_configured && h.render_worker_ok === false
+            ? " · worker URL invalid (using local)"
+            : h.render_worker_ok
+              ? " · remote worker"
+              : "";
         setHealth(
           h.openrouter_configured
-            ? `Ready · ${short(h.model) || "llm"} · VLM ${short(h.vlm_model) || "flash-lite"}${manim}`
+            ? `Ready · ${short(h.model) || "llm"} · VLM ${short(h.vlm_model) || "flash-lite"}${manim}${worker}`
             : "API up · set OPENROUTER_API_KEY",
         );
       })

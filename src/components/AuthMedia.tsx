@@ -103,8 +103,19 @@ export function AuthMedia({
     };
   }, [poster]);
 
+  if (!src) return null;
+
   if (kind === "image") {
-    if (!blobUrl && loading) {
+    if (error) {
+      return (
+        <div
+          className={`flex aspect-video items-center justify-center bg-[var(--surface)] text-sm text-[var(--ink-muted)] ${className || ""}`}
+        >
+          Preview unavailable
+        </div>
+      );
+    }
+    if (!blobUrl) {
       return (
         <div
           className={`flex aspect-video items-center justify-center bg-[var(--surface-video)] ${className || ""}`}
@@ -113,30 +124,13 @@ export function AuthMedia({
         </div>
       );
     }
-    if (!blobUrl) return null;
     // eslint-disable-next-line @next/next/no-img-element
     return <img src={blobUrl} alt={alt} className={className} />;
   }
 
   return (
     <div className={`relative overflow-hidden bg-[var(--surface-video)] ${className || ""}`}>
-      {(loading || !blobUrl) && (
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2">
-          {posterUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={posterUrl}
-              alt=""
-              className="absolute inset-0 h-full w-full object-contain opacity-40"
-            />
-          ) : null}
-          <span className="relative h-7 w-7 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
-          <span className="relative text-xs text-white/70">
-            {error ? error : "Loading clip…"}
-          </span>
-        </div>
-      )}
-      {blobUrl && (
+      {blobUrl ? (
         <video
           key={blobUrl}
           className="aspect-video w-full"
@@ -146,9 +140,27 @@ export function AuthMedia({
           playsInline
           preload="auto"
         />
-      )}
-      {!blobUrl && !loading && (
-        <div className="aspect-video w-full" />
+      ) : (
+        <div className="flex aspect-video flex-col items-center justify-center gap-2">
+          {posterUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={posterUrl}
+              alt=""
+              className="absolute inset-0 h-full w-full object-contain opacity-50"
+            />
+          ) : null}
+          {loading ? (
+            <>
+              <span className="relative h-7 w-7 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
+              <span className="relative text-xs text-white/70">Loading clip…</span>
+            </>
+          ) : (
+            <span className="relative px-4 text-center text-sm text-white/70">
+              {error || "No video for this scene"}
+            </span>
+          )}
+        </div>
       )}
     </div>
   );

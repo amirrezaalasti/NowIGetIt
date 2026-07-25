@@ -201,6 +201,9 @@ export async function fetchHealth(): Promise<{
   manim_version?: string;
   auth_configured?: boolean;
   supabase_configured?: boolean;
+  render_worker_configured?: boolean;
+  render_worker_ok?: boolean | null;
+  render_worker_detail?: string | null;
 }> {
   try {
     const res = await fetch(`${apiBase()}/api/health`, { cache: "no-store" });

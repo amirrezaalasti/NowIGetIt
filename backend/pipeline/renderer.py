@@ -35,8 +35,9 @@ def render_scene(
     settings = get_settings()
     # Avoid recursion inside the Railway worker container itself.
     worker_mode = os.getenv("RENDER_WORKER_MODE", "").lower() in {"1", "true", "yes"}
+    remote_log = ""
     if settings.render_worker_url and not worker_mode:
-        return _render_scene_remote(
+        video, frame, remote_log = _render_scene_remote(
             code,
             work_dir=work_dir,
             resolution=resolution,
@@ -44,25 +45,40 @@ def render_scene(
             worker_url=settings.render_worker_url,
             worker_secret=settings.render_worker_secret,
         )
+        if video:
+            return video, frame, remote_log
+        # Wrong/stale worker URL (e.g. HTTP 404) or transient failure → try local.
+        remote_log = (
+            f"Remote worker failed; falling back to local Manim.\n{remote_log}"
+        )
 
     if not settings.enable_manim_render:
         return (
             None,
             None,
-            "Manim render disabled (set ENABLE_MANIM_RENDER=true or RENDER_WORKER_URL).",
+            remote_log
+            or "Manim render disabled (set ENABLE_MANIM_RENDER=true or RENDER_WORKER_URL).",
         )
 
     try:
         import manim  # noqa: F401
     except ImportError:
-        return None, None, "manim (Community Edition) not installed; skipping render."
+        return (
+            None,
+            None,
+            (remote_log + "\n" if remote_log else "")
+            + "manim (Community Edition) not installed; skipping render.",
+        )
 
-    return _render_scene_local(
+    video, frame, local_log = _render_scene_local(
         code,
         work_dir=work_dir,
         resolution=resolution,
         scene_id=scene_id,
     )
+    if remote_log:
+        local_log = f"{remote_log}\n--- local ---\n{local_log}"
+    return video, frame, local_log
 
 
 def _render_scene_remote(

@@ -245,6 +245,21 @@ def _process_one_scene(
         )
 
         while not video_path and revision_count < settings.max_scene_revisions:
+            # Don't burn LLM revisions on infra failures (bad worker URL, manim missing).
+            infra = (render_log or "").lower()
+            if any(
+                marker in infra
+                for marker in (
+                    "http 404",
+                    "http 401",
+                    "http 502",
+                    "http 503",
+                    "not installed",
+                    "render disabled",
+                    "request failed",
+                )
+            ):
+                break
             revision_count += 1
             _emit(
                 on_event,
