@@ -43,6 +43,8 @@ class Settings:
     supabase_url: str
     supabase_service_role_key: str
     default_llm_estimate_tokens: int
+    render_worker_url: str
+    render_worker_secret: str
 
 
 def get_settings() -> Settings:
@@ -76,4 +78,6 @@ def get_settings() -> Settings:
         default_llm_estimate_tokens=int(
             os.getenv("DEFAULT_LLM_ESTIMATE_TOKENS", "25000")
         ),
+        render_worker_url=(os.getenv("RENDER_WORKER_URL") or "").strip().rstrip("/"),
+        render_worker_secret=(os.getenv("RENDER_WORKER_SECRET") or "").strip(),
     )

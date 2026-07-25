@@ -30,22 +30,29 @@ Prompt → Plan → [Generate → Render → VLM → Revise] × N → TTS → Fi
 | Step | Description |
 |------|-------------|
 | **Plan** | Prompt → structured `ScenePlan` (title, scenes, narration, visuals) |
-| **Per scene** | Manim code → render (local) → VLM review → revise up to `MAX_SCENE_REVISIONS` |
+| **Per scene** | Manim code → render → VLM review → revise up to `MAX_SCENE_REVISIONS` |
 | **TTS** | Narration → speech (`TTS_*` OpenAI-compatible API) |
 | **Final** | Cross-scene debug pass with optional last code fixes |
 
-> **Note:** Serverless cannot run ManimGL/OpenGL. On Vercel the API produces the plan, code, VLM feedback, and TTS. Set `ENABLE_MANIM_RENDER=true` locally (with `manimgl` + ffmpeg) for video files.
+**Deploy split**
+- **Vercel** — Next.js UI + FastAPI orchestration (plan, codegen, VLM, TTS, quotas)
+- **Railway** — Manim Community Edition render worker (`Dockerfile.railway`, `POST /render`)
+- **Local** — set `ENABLE_MANIM_RENDER=true` to render in-process (no Railway needed)
 
-**Stack:** Next.js (frontend) · FastAPI / Python (backend) · OpenRouter (LLM + VLM) · ManimGL (local render)
+Set `RENDER_WORKER_URL` + `RENDER_WORKER_SECRET` on Vercel to offload Manim to Railway.
+
+**Stack:** Next.js · FastAPI · OpenRouter · Manim CE (Railway/local) · Supabase
 
 ## Project layout
 
 ```
-├── src/                 # Next.js App Router UI
-├── api/index.py         # FastAPI entry (Vercel)
-├── backend/             # Pipeline: plan → generate → VLM → TTS → debug
-├── legacy/              # Previous Streamlit / ManimForge app
-├── pyproject.toml
+├── src/                    # Next.js App Router UI
+├── api/index.py            # FastAPI entry (Vercel)
+├── render_worker/          # Manim HTTP worker (Railway)
+├── backend/                # Pipeline: plan → generate → VLM → TTS
+├── Dockerfile.railway      # Railway Manim image
+├── railway.toml
+├── requirements-render.txt # Worker deps
 └── vercel.json
 ```
 

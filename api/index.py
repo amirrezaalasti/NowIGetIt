@@ -79,6 +79,11 @@ def health() -> dict:
         manim_version = getattr(manim, "__version__", "unknown")
     except ImportError:
         pass
+    artifacts_path = None
+    try:
+        artifacts_path = str(store.artifacts_root())
+    except OSError:
+        artifacts_path = "unavailable"
     return {
         "ok": True,
         "model": settings.openrouter_model,
@@ -88,9 +93,10 @@ def health() -> dict:
         "manim_render_enabled": settings.enable_manim_render,
         "manim_available": manim_available,
         "manim_version": manim_version,
-        "artifacts_root": str(store.artifacts_root()),
+        "artifacts_root": artifacts_path,
         "auth_configured": auth_is_configured(),
         "supabase_configured": db.supabase_enabled(),
+        "render_worker_configured": bool(settings.render_worker_url),
     }
 
 

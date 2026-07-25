@@ -1,0 +1,13 @@
+.venv
+venv
+__pycache__
+artifacts
+temp
+.nowigetit
+.next
+node_modules
+.git
+*.mp4
+*.pyc
+.DS_Store
+agent-transcripts

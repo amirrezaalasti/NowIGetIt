@@ -3,18 +3,29 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
-ARTIFACTS_ROOT = ROOT / "artifacts"
 
 
 def artifacts_root() -> Path:
-    ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
-    return ARTIFACTS_ROOT
+    """
+    Local: repo/artifacts. On Vercel the deploy FS is read-only, so use /tmp.
+    Note: /tmp is ephemeral per instance — durable ownership/usage lives in Supabase.
+    """
+    override = (os.getenv("ARTIFACTS_ROOT") or "").strip()
+    if override:
+        root = Path(override)
+    elif os.getenv("VERCEL"):
+        root = Path("/tmp/nowigetit/artifacts")
+    else:
+        root = ROOT / "artifacts"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def job_dir(job_id: str) -> Path:

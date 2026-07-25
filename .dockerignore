@@ -1,0 +1,17 @@
+.venv
+venv
+node_modules
+.next
+.git
+artifacts
+temp
+.nowigetit
+__pycache__
+*.pyc
+*.mp4
+heating_demands
+public
+src
+.devcontainer
+.vercel
+agent-transcripts
