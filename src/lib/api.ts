@@ -42,29 +42,72 @@ export type JobDetail = {
   urls?: Record<string, string>;
 };
 
+type TokenCache = { token: string; expiresAt: number };
+
+let tokenCache: TokenCache | null = null;
+
 function apiBase(): string {
   return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "";
 }
 
+export function clearApiToken() {
+  tokenCache = null;
+}
+
+export async function getApiToken(): Promise<string> {
+  if (tokenCache && tokenCache.expiresAt > Date.now() + 60_000) {
+    return tokenCache.token;
+  }
+  const res = await fetch("/api/auth/api-token", { cache: "no-store" });
+  if (!res.ok) {
+    tokenCache = null;
+    throw new Error("Sign in required");
+  }
+  const data = (await res.json()) as { accessToken: string; expiresAt: number };
+  tokenCache = { token: data.accessToken, expiresAt: data.expiresAt };
+  return data.accessToken;
+}
+
+async function authHeaders(
+  extra?: Record<string, string>,
+): Promise<Record<string, string>> {
+  const token = await getApiToken();
+  return {
+    Authorization: `Bearer ${token}`,
+    ...extra,
+  };
+}
+
 export function assetUrl(path: string | null | undefined): string {
   if (!path) return "";
-  if (path.startsWith("http")) return path;
-  return `${apiBase()}${path}`;
+  const base = path.startsWith("http") ? path : `${apiBase()}${path}`;
+  if (!tokenCache?.token) return base;
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}access_token=${encodeURIComponent(tokenCache.token)}`;
+}
+
+/** Prefetch a token so media URLs can include access_token. */
+export async function ensureApiToken(): Promise<string | null> {
+  try {
+    return await getApiToken();
+  } catch {
+    return null;
+  }
 }
 
 export async function addSceneComment(
   jobId: string,
   sceneId: string,
   comment: string,
-  timestamp?: number
+  timestamp?: number,
 ): Promise<HumanComment> {
   const res = await fetch(
     `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/comments`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ comment, timestamp }),
-    }
+    },
   );
   if (!res.ok) throw new Error("Failed to post comment");
   return res.json();
@@ -76,17 +119,20 @@ export async function streamRetouch(
   comment: string,
   timestamp: number | undefined,
   onEvent: (event: PipelineEvent) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
 ): Promise<void> {
   const res = await fetch(
     `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/retouch/stream`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: await authHeaders({
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      }),
       body: JSON.stringify({ comment, timestamp }),
       signal,
       cache: "no-store",
-    }
+    },
   );
   if (!res.ok) {
     const detail = await res.text();
@@ -118,11 +164,19 @@ export async function streamRetouch(
 
 export async function approveScene(
   jobId: string,
-  sceneId: string
-): Promise<{ ok: boolean; final_video_url: string | null; scene_video_url: string | null; note?: string }> {
+  sceneId: string,
+): Promise<{
+  ok: boolean;
+  final_video_url: string | null;
+  scene_video_url: string | null;
+  note?: string;
+}> {
   const res = await fetch(
     `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/approve`,
-    { method: "POST", headers: { "Content-Type": "application/json" } }
+    {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+    },
   );
   if (!res.ok) {
     const detail = await res.text();
@@ -140,21 +194,62 @@ export async function fetchHealth(): Promise<{
   manim_render_enabled?: boolean;
   manim_available?: boolean;
   manim_version?: string;
+  auth_configured?: boolean;
+  supabase_configured?: boolean;
 }> {
   const res = await fetch(`${apiBase()}/api/health`, { cache: "no-store" });
   if (!res.ok) throw new Error("API health check failed");
   return res.json();
 }
 
+export type UsageSnapshot = {
+  user_id: string;
+  period_start: string;
+  llm: {
+    tokens_used: number;
+    tokens_limit: number;
+    requests_used: number;
+    requests_limit: number;
+  };
+  storage: {
+    bytes_used: number;
+    bytes_limit: number;
+  };
+};
+
+export async function fetchMe(): Promise<{
+  user: {
+    id: string;
+    email?: string | null;
+    name?: string | null;
+    image?: string | null;
+  };
+  usage: UsageSnapshot | null;
+  supabase_configured: boolean;
+}> {
+  const res = await fetch(`${apiBase()}/api/me`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to load account usage");
+  return res.json();
+}
+
 export async function listJobs(): Promise<JobSummary[]> {
-  const res = await fetch(`${apiBase()}/api/jobs`, { cache: "no-store" });
+  const res = await fetch(`${apiBase()}/api/jobs`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error("Failed to list jobs");
   const data = await res.json();
   return data.jobs || [];
 }
 
 export async function fetchJob(jobId: string): Promise<JobDetail> {
-  const res = await fetch(`${apiBase()}/api/jobs/${jobId}`, { cache: "no-store" });
+  const res = await fetch(`${apiBase()}/api/jobs/${jobId}`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
   if (!res.ok) throw new Error(`Job not found: ${jobId}`);
   return res.json();
 }
@@ -166,10 +261,10 @@ export async function streamGenerate(
 ): Promise<void> {
   const res = await fetch(`${apiBase()}/api/generate/stream`, {
     method: "POST",
-    headers: {
+    headers: await authHeaders({
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-    },
+    }),
     body: JSON.stringify({ prompt, skip_render: false }),
     signal,
     cache: "no-store",

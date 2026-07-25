@@ -1,11 +1,22 @@
 import { Generator } from "@/components/Generator";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import { UsageMeter } from "@/components/UsageMeter";
+import { UserMenu } from "@/components/UserMenu";
 
 export default function Home() {
   return (
     <main className="relative flex flex-1 flex-col overflow-hidden bg-atmosphere">
       <div className="pointer-events-none absolute inset-0 grid-haze" aria-hidden />
 
-      <header className="relative z-10 mx-auto w-full max-w-3xl px-6 pt-16 sm:pt-24">
+      <div className="relative z-20 mx-auto flex w-full max-w-3xl items-start justify-between gap-4 px-6 pt-6">
+        <UsageMeter />
+        <div className="flex items-center gap-3">
+          <ThemeToggle />
+          <UserMenu />
+        </div>
+      </div>
+
+      <header className="relative z-10 mx-auto w-full max-w-3xl px-6 pt-10 sm:pt-16">
         <p className="animate-rise font-[family-name:var(--font-display)] text-5xl tracking-tight text-[var(--ink)] sm:text-7xl">
           NowIGetIt
         </p>

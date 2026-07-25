@@ -31,6 +31,29 @@ class OpenRouterClient:
         )
         self.model = self.settings.openrouter_model
         self.vlm_model = self.settings.openrouter_vlm_model
+        self.usage_log: list[dict[str, Any]] = []
+
+    def _track_usage(self, response: Any, *, model: str, kind: str) -> None:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return
+        tokens_in = int(getattr(usage, "prompt_tokens", 0) or 0)
+        tokens_out = int(getattr(usage, "completion_tokens", 0) or 0)
+        if tokens_in <= 0 and tokens_out <= 0:
+            return
+        self.usage_log.append(
+            {
+                "kind": kind,
+                "model": model,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+            }
+        )
+
+    def drain_usage_log(self) -> list[dict[str, Any]]:
+        entries = list(self.usage_log)
+        self.usage_log.clear()
+        return entries
 
     def chat(
         self,
@@ -46,8 +69,9 @@ class OpenRouterClient:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
+        resolved_model = model or self.model
         kwargs: dict[str, Any] = {
-            "model": model or self.model,
+            "model": resolved_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -56,6 +80,8 @@ class OpenRouterClient:
             kwargs["response_format"] = {"type": "json_object"}
 
         response = self.client.chat.completions.create(**kwargs)
+        kind = "vlm" if resolved_model == self.vlm_model else "llm"
+        self._track_usage(response, model=resolved_model, kind=kind)
         content = response.choices[0].message.content or ""
         return content.strip()
 

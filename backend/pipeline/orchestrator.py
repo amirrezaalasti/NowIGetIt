@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from backend import artifacts as store
+from backend import supabase_db as db
 from backend.code_utils import validate_manim_code
 from backend.config import get_settings
 from backend.llm import OpenRouterClient
@@ -95,6 +96,9 @@ def run_pipeline(
     request: GenerateRequest,
     *,
     on_event: Optional[EventCallback] = None,
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    user_name: Optional[str] = None,
 ) -> GenerateResult:
     """
     Pipeline:
@@ -117,7 +121,32 @@ def run_pipeline(
             "resolution": request.resolution,
             "skip_render": request.skip_render,
         },
+        user_id=user_id,
+        user_email=user_email,
+        user_name=user_name,
     )
+
+    if user_id:
+        db.ensure_user(
+            user_id=user_id,
+            email=user_email,
+            name=user_name,
+        )
+        db.upsert_job(
+            job_id=job_id,
+            user_id=user_id,
+            prompt=request.prompt,
+            status="running",
+        )
+
+    def _flush_usage() -> None:
+        if not user_id:
+            return
+        db.flush_client_usage(
+            user_id=user_id,
+            job_id=job_id,
+            usage_log=client.drain_usage_log(),
+        )
 
     _emit(
         on_event,
@@ -128,6 +157,15 @@ def run_pipeline(
     )
     plan = create_scene_plan(client, request.prompt)
     plan_path = store.save_scene_plan(job_id, plan.model_dump())
+    _flush_usage()
+    if user_id:
+        db.upsert_job(
+            job_id=job_id,
+            user_id=user_id,
+            prompt=request.prompt,
+            title=plan.title,
+            status="running",
+        )
     _emit(
         on_event,
         PipelineEventType.plan,
@@ -366,6 +404,7 @@ def run_pipeline(
             },
             job_id=job_id,
         )
+        _flush_usage()
 
     scene_summaries = "\n\n".join(
         (
@@ -433,6 +472,30 @@ def run_pipeline(
         scene_plan_url=f"/api/jobs/{job_id}/file/scene_plan.json",
     )
     store.save_result(job_id, result.model_dump())
+    _flush_usage()
+    if user_id:
+        db.upsert_job(
+            job_id=job_id,
+            user_id=user_id,
+            prompt=request.prompt,
+            title=plan.title,
+            status="complete",
+        )
+        try:
+            db.sync_job_storage(
+                user_id=user_id,
+                job_id=job_id,
+                job_path=store.job_dir(job_id),
+            )
+        except db.QuotaExceededError:
+            # Job finished; storage overage is recorded as a hard error for future gens.
+            _emit(
+                on_event,
+                PipelineEventType.status,
+                "Warning: storage quota exceeded after this job",
+                data={"job_id": job_id, "quota": "STORAGE_LIMIT"},
+                job_id=job_id,
+            )
     _emit(
         on_event,
         PipelineEventType.complete,
@@ -471,6 +534,10 @@ def retouch_scene(job_id: str, scene_id: str, human_instructions: str, timestamp
     emit(f"Loading scene data for '{scene_id}'…", {"scene_id": scene_id, "job_id": job_id})
 
     job_data = store.load_job(job_id)
+    meta = job_data.get("meta") or {}
+    owner_id = meta.get("user_id") if isinstance(meta, dict) else None
+    if isinstance(owner_id, str) and owner_id:
+        db.assert_within_quotas(owner_id, need_tokens=5_000)
     scenes = job_data.get("scenes") or []
     match_scene = next((s for s in scenes if s["scene_id"] == scene_id), None)
     if not match_scene:
@@ -621,6 +688,21 @@ def retouch_scene(job_id: str, scene_id: str, human_instructions: str, timestamp
         "scene_title": scene_sec.title,
     }
 
+    if isinstance(owner_id, str) and owner_id:
+        db.flush_client_usage(
+            user_id=owner_id,
+            job_id=job_id,
+            usage_log=client.drain_usage_log(),
+        )
+        try:
+            db.sync_job_storage(
+                user_id=owner_id,
+                job_id=job_id,
+                job_path=store.job_dir(job_id),
+            )
+        except db.QuotaExceededError:
+            emit("Warning: storage quota exceeded after this retouch", {"quota": "STORAGE_LIMIT"})
+
     emit("Retouch complete! Review the concept preview and approve to update the final video.", result)
     return result
 
@@ -673,7 +755,13 @@ def iter_retouch_scene(
 
 
 
-def iter_pipeline_events(request: GenerateRequest) -> Iterator[str]:
+def iter_pipeline_events(
+    request: GenerateRequest,
+    *,
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    user_name: Optional[str] = None,
+) -> Iterator[str]:
     """SSE event stream that emits progress as steps complete."""
     from queue import Empty, Queue
     from threading import Thread
@@ -685,7 +773,13 @@ def iter_pipeline_events(request: GenerateRequest) -> Iterator[str]:
 
     def worker() -> None:
         try:
-            run_pipeline(request, on_event=on_event)
+            run_pipeline(
+                request,
+                on_event=on_event,
+                user_id=user_id,
+                user_email=user_email,
+                user_name=user_name,
+            )
         except Exception as exc:  # noqa: BLE001
             q.put(
                 PipelineEvent(

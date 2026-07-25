@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSession } from "next-auth/react";
 import {
   addSceneComment,
   approveScene,
   assetUrl,
+  ensureApiToken,
   fetchJob,
   listJobs,
   streamRetouch,
@@ -200,7 +202,7 @@ function SceneVideoPlayer({
         <video
           ref={videoRef}
           key={String(videoCacheBust)}
-          className="w-full rounded-xl border border-[var(--line)] bg-black"
+          className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-video)]"
           src={videoSrc}
           controls
           playsInline
@@ -208,21 +210,21 @@ function SceneVideoPlayer({
         />
         {latestFrameUrl && (
           <div className="mt-2 rounded-xl border border-[var(--line)] overflow-hidden">
-            <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--ink-muted)] bg-black/40">
+            <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--ink-muted)] bg-[var(--surface-strong)]">
               Updated Concept Preview (Manim rendering disabled — code is revised)
             </p>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={assetUrl(latestFrameUrl)}
               alt="Retouched concept preview"
-              className="w-full object-contain bg-black/30"
+              className="w-full object-contain bg-[var(--surface-panel)]"
             />
           </div>
         )}
       </div>
 
       {/* ── Chat Thread ── */}
-      <div className="rounded-xl border border-[var(--line)] bg-[rgba(255,255,255,0.02)] flex flex-col">
+      <div className="rounded-xl border border-[var(--line)] bg-[var(--surface)] flex flex-col">
         <div className="px-4 pt-3 pb-2 border-b border-[var(--line)]">
           <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--ink)]">
             Scene Feedback &amp; AI Retouch Chat
@@ -246,7 +248,7 @@ function SceneVideoPlayer({
               <div key={c.id} className="space-y-2">
                 {/* Human message bubble */}
                 <div className="flex items-end gap-2 justify-end">
-                  <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-[var(--accent)] px-3 py-2 text-xs text-black">
+                  <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-[var(--accent)] px-3 py-2 text-xs text-[var(--on-accent)]">
                     {typeof c.timestamp === "number" && (
                       <button
                         type="button"
@@ -269,7 +271,7 @@ function SceneVideoPlayer({
                     <div className="shrink-0 w-6 h-6 rounded-full bg-[var(--line)] flex items-center justify-center text-[10px]">
                       AI
                     </div>
-                    <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--line)] bg-[rgba(0,0,0,0.3)] px-3 py-2 text-xs space-y-1">
+                    <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-[var(--line)] bg-[var(--surface-panel)] px-3 py-2 text-xs space-y-1">
                       {reply.steps.map((s, i) => (
                         <div
                           key={i}
@@ -311,7 +313,7 @@ function SceneVideoPlayer({
                             <button
                               type="button"
                               onClick={() => void handleApprove(c.id)}
-                              className="flex-1 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-[11px] font-semibold text-black hover:opacity-90 transition"
+                              className="flex-1 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-[11px] font-semibold text-[var(--on-accent)] hover:opacity-90 transition"
                             >
                               ✓ Approve &amp; Update Final Video
                             </button>
@@ -389,7 +391,7 @@ function SceneVideoPlayer({
             }}
             placeholder="Describe what to change… (⌘↵ to send)"
             rows={2}
-            className="w-full rounded-lg border border-[var(--line)] bg-black/40 p-2 text-xs text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] resize-none"
+            className="w-full rounded-lg border border-[var(--line)] bg-[var(--surface-strong)] p-2 text-xs text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] resize-none"
           />
           <div className="flex items-center justify-between gap-2">
             <label className="flex items-center gap-1.5 text-xs text-[var(--ink-muted)] cursor-pointer">
@@ -405,7 +407,7 @@ function SceneVideoPlayer({
               type="button"
               onClick={handleSubmit}
               disabled={!newComment.trim() || submitting}
-              className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-xs font-semibold text-black transition hover:opacity-90 disabled:opacity-40"
+              className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-xs font-semibold text-[var(--on-accent)] transition hover:opacity-90 disabled:opacity-40"
             >
               {submitting ? "Retouching…" : "Send ↵"}
             </button>
@@ -427,6 +429,7 @@ type Props = {
 const POLL_MS = 1500;
 
 export function DebugInspector({ activeJobId, live = false }: Props) {
+  const { status: authStatus } = useSession();
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [job, setJob] = useState<JobDetail | null>(null);
@@ -436,15 +439,21 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
   const [refreshKey, setRefreshKey] = useState(0);
   const hasLoadedRef = useRef(false);
   const loadedForIdRef = useRef<string | null>(null);
+  const signedIn = authStatus === "authenticated";
 
   const refreshJobs = useCallback(async () => {
+    if (!signedIn) {
+      setJobs([]);
+      return;
+    }
     try {
+      await ensureApiToken();
       const list = await listJobs();
       setJobs(list);
     } catch {
-      /* API may be offline */
+      /* API may be offline or session expired */
     }
-  }, []);
+  }, [signedIn]);
 
   const bumpRefresh = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -459,7 +468,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
   }, [activeJobId]);
 
   useEffect(() => {
-    if (!selectedId) {
+    if (!selectedId || !signedIn) {
       setJob(null);
       hasLoadedRef.current = false;
       loadedForIdRef.current = null;
@@ -476,7 +485,8 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
     if (!silent) setLoading(true);
     setError(null);
 
-    fetchJob(selectedId)
+    void ensureApiToken()
+      .then(() => fetchJob(selectedId))
       .then((detail) => {
         if (!cancelled) {
           setJob(detail);
@@ -493,7 +503,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, refreshKey]);
+  }, [selectedId, refreshKey, signedIn]);
 
   // Live-poll artifacts while generation is running for the selected job
   useEffect(() => {
@@ -522,7 +532,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-[0.16em] text-[var(--ink-muted)]">
-            Debug inspector
+            Your library
             {live && selectedId === activeJobId && (
               <span className="ml-2 normal-case tracking-normal text-[var(--accent)]">
                 · live
@@ -530,7 +540,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
             )}
           </p>
           <h2 className="mt-1 font-[family-name:var(--font-display)] text-2xl">
-            Saved plans & VLM frames
+            Past explanations
           </h2>
         </div>
         <button
@@ -545,8 +555,8 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
       <div className="mb-6 flex flex-wrap gap-2">
         {jobs.length === 0 && (
           <p className="text-sm text-[var(--ink-muted)]">
-            No saved jobs yet — generate once to populate{" "}
-            <code className="text-[var(--accent)]">artifacts/</code>.
+            Nothing here yet — generate an explanation and it will show up in your
+            account.
           </p>
         )}
         {jobs.map((j) => (
@@ -567,7 +577,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
       </div>
 
       {error && (
-        <p className="mb-4 text-sm text-red-200">{error}</p>
+        <p className="mb-4 text-sm text-[var(--danger-ink)]">{error}</p>
       )}
       {loading && (
         <p className="mb-4 text-sm text-[var(--ink-muted)]">Loading job…</p>
@@ -591,7 +601,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
               </div>
               <video
                 key={job.final_video_url || job.urls?.final_video}
-                className="w-full rounded-2xl border border-[var(--line)] bg-black"
+                className="w-full rounded-2xl border border-[var(--line)] bg-[var(--surface-video)]"
                 src={assetUrl(job.final_video_url || job.urls?.final_video)}
                 controls
                 playsInline
@@ -634,13 +644,13 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
           </div>
 
           {tab === "plan" && (
-            <pre className="max-h-[32rem] overflow-auto rounded-2xl border border-[var(--line)] bg-[rgba(0,0,0,0.3)] p-4 text-xs leading-relaxed text-[var(--ink-muted)]">
+            <pre className="max-h-[32rem] overflow-auto rounded-2xl border border-[var(--line)] bg-[var(--surface-panel)] p-4 text-xs leading-relaxed text-[var(--ink-muted)]">
               {JSON.stringify(job.scene_plan, null, 2)}
             </pre>
           )}
 
           {tab === "events" && (
-            <pre className="max-h-[32rem] overflow-auto rounded-2xl border border-[var(--line)] bg-[rgba(0,0,0,0.3)] p-4 text-xs leading-relaxed text-[var(--ink-muted)]">
+            <pre className="max-h-[32rem] overflow-auto rounded-2xl border border-[var(--line)] bg-[var(--surface-panel)] p-4 text-xs leading-relaxed text-[var(--ink-muted)]">
               {JSON.stringify(job.events, null, 2)}
             </pre>
           )}
@@ -673,14 +683,14 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                     {(scene.vlm_reviews || []).map((review, idx) => (
                       <div
                         key={`${scene.scene_id}-r${idx}`}
-                        className="overflow-hidden rounded-xl border border-[var(--line)] bg-[rgba(255,255,255,0.02)]"
+                        className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--surface)]"
                       >
                         {typeof review.frame_url === "string" && review.frame_url && (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={assetUrl(review.frame_url)}
                             alt={`Frame preview ${idx}`}
-                            className="aspect-video w-full object-cover bg-black/40"
+                            className="aspect-video w-full object-cover bg-[var(--surface-strong)]"
                           />
                         )}
                         <div className="space-y-2 p-3 text-xs">
@@ -698,7 +708,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                       <summary className="cursor-pointer text-sm text-[var(--ink-muted)]">
                         Generated Manim code
                       </summary>
-                      <pre className="mt-2 max-h-64 overflow-auto rounded-xl border border-[var(--line)] bg-black/30 p-3 text-[11px] text-[var(--ink-muted)]">
+                      <pre className="mt-2 max-h-64 overflow-auto rounded-xl border border-[var(--line)] bg-[var(--surface-panel)] p-3 text-[11px] text-[var(--ink-muted)]">
                         {scene.code_final}
                       </pre>
                     </details>

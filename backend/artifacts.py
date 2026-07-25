@@ -42,7 +42,15 @@ def append_event(job_id: str, event: dict[str, Any]) -> None:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
-def init_job(job_id: str, *, prompt: str, settings_snapshot: dict[str, Any]) -> Path:
+def init_job(
+    job_id: str,
+    *,
+    prompt: str,
+    settings_snapshot: dict[str, Any],
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    user_name: Optional[str] = None,
+) -> Path:
     root = job_dir(job_id)
     write_json(
         root / "meta.json",
@@ -51,9 +59,35 @@ def init_job(job_id: str, *, prompt: str, settings_snapshot: dict[str, Any]) -> 
             "prompt": prompt,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "settings": settings_snapshot,
+            "user_id": user_id,
+            "user_email": user_email,
+            "user_name": user_name,
         },
     )
     return root
+
+
+def job_owner_id(job_id: str) -> Optional[str]:
+    meta_path = artifacts_root() / job_id / "meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    owner = meta.get("user_id")
+    return owner if isinstance(owner, str) and owner else None
+
+
+def assert_job_owner(job_id: str, user_id: str) -> None:
+    """Raise FileNotFoundError if missing, PermissionError if not owned by user."""
+    root = artifacts_root() / job_id
+    if not root.exists() or not (root / "meta.json").exists():
+        raise FileNotFoundError(job_id)
+    owner = job_owner_id(job_id)
+    # Legacy jobs without owner are inaccessible once auth is on
+    if owner != user_id:
+        raise PermissionError(job_id)
 
 
 def save_scene_plan(job_id: str, plan: dict[str, Any]) -> str:
@@ -132,7 +166,7 @@ def save_result(job_id: str, data: dict[str, Any]) -> str:
     return write_json(job_dir(job_id) / "result.json", data)
 
 
-def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
+def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[str, Any]]:
     root = artifacts_root()
     jobs: list[dict[str, Any]] = []
     for path in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -145,6 +179,8 @@ def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 pass
+        if user_id is not None and meta.get("user_id") != user_id:
+            continue
         plan_path = path / "scene_plan.json"
         title = None
         if plan_path.exists():
@@ -159,6 +195,7 @@ def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
                 "prompt": meta.get("prompt"),
                 "created_at": meta.get("created_at"),
                 "has_result": (path / "result.json").exists(),
+                "user_id": meta.get("user_id"),
             }
         )
         if len(jobs) >= limit:

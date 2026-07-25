@@ -1,15 +1,52 @@
 @import "tailwindcss";
 
-:root {
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
   --bg-deep: #0c1412;
   --bg-mid: #13201c;
   --bg-lift: #1c2e28;
+  --bg-end: #0a1210;
   --ink: #e8f0ec;
   --ink-muted: #9bb0a6;
   --accent: #3ecf8e;
   --accent-hot: #f0c75e;
+  --on-accent: #062016;
   --line: rgba(232, 240, 236, 0.12);
   --glow: rgba(62, 207, 142, 0.18);
+  --glow-hot: rgba(240, 199, 94, 0.12);
+  --surface: rgba(255, 255, 255, 0.03);
+  --surface-inset: rgba(0, 0, 0, 0.25);
+  --surface-panel: rgba(0, 0, 0, 0.3);
+  --surface-strong: rgba(0, 0, 0, 0.4);
+  --surface-video: #000000;
+  --danger-ink: #fecaca;
+  --danger-bg: rgba(239, 68, 68, 0.1);
+  --danger-line: rgba(248, 113, 113, 0.3);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-deep: #f2f7f4;
+  --bg-mid: #e4eee8;
+  --bg-lift: #d5e4db;
+  --bg-end: #dce8e1;
+  --ink: #0f1c18;
+  --ink-muted: #4a6358;
+  --accent: #1f9a66;
+  --accent-hot: #b8860b;
+  --on-accent: #062016;
+  --line: rgba(15, 28, 24, 0.12);
+  --glow: rgba(31, 154, 102, 0.16);
+  --glow-hot: rgba(184, 134, 11, 0.14);
+  --surface: rgba(15, 28, 24, 0.04);
+  --surface-inset: rgba(15, 28, 24, 0.05);
+  --surface-panel: rgba(15, 28, 24, 0.06);
+  --surface-strong: rgba(15, 28, 24, 0.08);
+  --surface-video: #0a1210;
+  --danger-ink: #b91c1c;
+  --danger-bg: rgba(239, 68, 68, 0.08);
+  --danger-line: rgba(185, 28, 28, 0.28);
 }
 
 @theme inline {
@@ -71,8 +108,8 @@ body {
 .bg-atmosphere {
   background:
     radial-gradient(ellipse 80% 55% at 15% 10%, var(--glow), transparent 55%),
-    radial-gradient(ellipse 60% 45% at 90% 20%, rgba(240, 199, 94, 0.12), transparent 50%),
-    linear-gradient(165deg, var(--bg-deep) 0%, var(--bg-mid) 48%, #0a1210 100%);
+    radial-gradient(ellipse 60% 45% at 90% 20%, var(--glow-hot), transparent 50%),
+    linear-gradient(165deg, var(--bg-deep) 0%, var(--bg-mid) 48%, var(--bg-end) 100%);
 }
 
 .grid-haze {

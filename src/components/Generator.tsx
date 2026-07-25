@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useSession } from "next-auth/react";
 import { DebugInspector } from "@/components/DebugInspector";
 import {
   assetUrl,
+  ensureApiToken,
   fetchHealth,
   streamGenerate,
   type PipelineEvent,
@@ -26,6 +29,7 @@ const EXAMPLES = [
 ];
 
 export function Generator() {
+  const { status: authStatus } = useSession();
   const [prompt, setPrompt] = useState("");
   const [running, setRunning] = useState(false);
   const [events, setEvents] = useState<PipelineEvent[]>([]);
@@ -39,6 +43,7 @@ export function Generator() {
   const [liveMessage, setLiveMessage] = useState<string>("");
   const abortRef = useRef<AbortController | null>(null);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
+  const signedIn = authStatus === "authenticated";
 
   useEffect(() => {
     fetchHealth()
@@ -74,6 +79,10 @@ export function Generator() {
 
   async function onGenerate() {
     if (!prompt.trim() || running) return;
+    if (!signedIn) {
+      window.location.href = "/login";
+      return;
+    }
     setRunning(true);
     setError(null);
     setEvents([]);
@@ -88,6 +97,7 @@ export function Generator() {
     abortRef.current = controller;
 
     try {
+      await ensureApiToken();
       await streamGenerate(
         prompt.trim(),
         (event) => {
@@ -219,6 +229,36 @@ export function Generator() {
     }
   }
 
+  if (authStatus === "loading") {
+    return (
+      <section className="relative mx-auto w-full max-w-3xl px-6 pb-16 pt-6">
+        <p className="text-sm text-[var(--ink-muted)]">Checking session…</p>
+      </section>
+    );
+  }
+
+  if (!signedIn) {
+    return (
+      <section className="relative mx-auto w-full max-w-3xl px-6 pb-16 pt-6">
+        <div className="animate-rise-delay-2 rounded-2xl border border-[var(--line)] bg-[var(--surface)] px-6 py-10 text-center">
+          <h2 className="font-[family-name:var(--font-display)] text-2xl text-[var(--ink)]">
+            Sign in to generate
+          </h2>
+          <p className="mx-auto mt-3 max-w-md text-sm text-[var(--ink-muted)]">
+            Google sign-in keeps your scene plans, videos, and revisions private
+            to your account.
+          </p>
+          <Link
+            href="/login"
+            className="mt-8 inline-flex rounded-full bg-[var(--accent)] px-8 py-3 text-base font-semibold text-[var(--on-accent)] transition hover:brightness-110"
+          >
+            Continue with Google
+          </Link>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <>
       <section className="relative mx-auto w-full max-w-3xl px-6 pb-16 pt-6">
@@ -238,7 +278,7 @@ export function Generator() {
           onChange={(e) => setPrompt(e.target.value)}
           rows={4}
           placeholder="What should click? Describe the concept you want animated…"
-          className="w-full resize-none rounded-2xl border border-[var(--line)] bg-[rgba(255,255,255,0.03)] px-5 py-4 text-lg leading-relaxed text-[var(--ink)] outline-none transition focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--glow)] placeholder:text-[var(--ink-muted)] animate-rise-delay-2"
+          className="w-full resize-none rounded-2xl border border-[var(--line)] bg-[var(--surface)] px-5 py-4 text-lg leading-relaxed text-[var(--ink)] outline-none transition focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--glow)] placeholder:text-[var(--ink-muted)] animate-rise-delay-2"
         />
 
         <div className="mt-4 flex flex-wrap gap-2 animate-rise-delay-2">
@@ -259,7 +299,7 @@ export function Generator() {
             type="button"
             disabled={running || !prompt.trim()}
             onClick={onGenerate}
-            className="group relative overflow-hidden rounded-full bg-[var(--accent)] px-8 py-3 text-base font-semibold text-[#062016] transition enabled:hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            className="group relative overflow-hidden rounded-full bg-[var(--accent)] px-8 py-3 text-base font-semibold text-[var(--on-accent)] transition enabled:hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <span className="relative z-10">
               {running ? "Building scenes…" : "Generate explanation"}
@@ -288,7 +328,7 @@ export function Generator() {
         )}
 
         {error && (
-          <p className="mt-6 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+          <p className="mt-6 rounded-xl border border-[var(--danger-line)] bg-[var(--danger-bg)] px-4 py-3 text-sm text-[var(--danger-ink)]">
             {error}
           </p>
         )}
@@ -314,7 +354,7 @@ export function Generator() {
             </div>
             <video
               key={finalVideoUrl}
-              className="mt-4 w-full rounded-2xl border border-[var(--line)] bg-black"
+              className="mt-4 w-full rounded-2xl border border-[var(--line)] bg-[var(--surface-video)]"
               src={assetUrl(finalVideoUrl)}
               controls
               playsInline
@@ -353,7 +393,7 @@ export function Generator() {
                     )}
                     {scene.videoUrl ? (
                       <video
-                        className="mt-3 w-full rounded-xl border border-[var(--line)] bg-black"
+                        className="mt-3 w-full rounded-xl border border-[var(--line)] bg-[var(--surface-video)]"
                         src={assetUrl(scene.videoUrl)}
                         controls
                         playsInline
@@ -386,7 +426,7 @@ export function Generator() {
               </p>
               <div 
                 ref={logContainerRef}
-                className="max-h-[28rem] overflow-y-auto rounded-2xl border border-[var(--line)] bg-[rgba(0,0,0,0.25)] p-4 font-mono text-xs leading-relaxed text-[var(--ink-muted)]"
+                className="max-h-[28rem] overflow-y-auto rounded-2xl border border-[var(--line)] bg-[var(--surface-inset)] p-4 font-mono text-xs leading-relaxed text-[var(--ink-muted)]"
               >
                 {events.length === 0 && (
                   <div className="opacity-60">Waiting for pipeline events…</div>
