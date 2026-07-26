@@ -273,6 +273,12 @@ export type TtsVoiceOption = {
   label: string;
 };
 
+export type LanguageOption = {
+  id: string;
+  label: string;
+  native_label: string;
+};
+
 export type LengthPreset = "short" | "standard" | "deep";
 export type Audience = "hs" | "undergrad" | "general";
 
@@ -285,6 +291,7 @@ export async function fetchHealth(): Promise<{
   tts_model?: string;
   tts_voice?: string;
   tts_voices?: TtsVoiceOption[];
+  languages?: LanguageOption[];
   manim_render_enabled?: boolean;
   manim_available?: boolean;
   manim_version?: string;
@@ -424,7 +431,12 @@ export type GenerateOptions = {
   skip_render?: boolean;
   length_preset?: LengthPreset;
   audience?: Audience;
+  language?: string;
   tts_voice?: string;
+  /** Generate spoken narration (default true). */
+  include_audio?: boolean;
+  /** Burn narration as on-screen subtitles (default true). */
+  include_subtitles?: boolean;
   plan_only?: boolean;
 };
 
@@ -499,7 +511,10 @@ export async function streamGenerate(
         resolution: opts.resolution ?? "720p",
         length_preset: opts.length_preset ?? "standard",
         audience: opts.audience ?? "general",
+        language: opts.language ?? "en",
         tts_voice: opts.tts_voice ?? "Kore",
+        include_audio: opts.include_audio ?? true,
+        include_subtitles: opts.include_subtitles ?? true,
         plan_only: opts.plan_only ?? true,
       }),
       signal,
@@ -536,7 +551,14 @@ export async function streamContinue(
   jobId: string,
   onEvent: (event: PipelineEvent) => void,
   signal?: AbortSignal,
-  opts?: { resolution?: string; skip_render?: boolean; tts_voice?: string },
+  opts?: {
+    resolution?: string;
+    skip_render?: boolean;
+    language?: string;
+    tts_voice?: string;
+    include_audio?: boolean;
+    include_subtitles?: boolean;
+  },
 ): Promise<void> {
   try {
     const res = await fetch(`${apiBase()}/api/jobs/${jobId}/continue/stream`, {
@@ -548,7 +570,10 @@ export async function streamContinue(
       body: JSON.stringify({
         resolution: opts?.resolution ?? "720p",
         skip_render: opts?.skip_render ?? false,
+        language: opts?.language,
         tts_voice: opts?.tts_voice,
+        include_audio: opts?.include_audio,
+        include_subtitles: opts?.include_subtitles,
       }),
       signal,
       cache: "no-store",

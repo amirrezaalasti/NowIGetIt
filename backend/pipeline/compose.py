@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -53,13 +54,102 @@ def _same_file(a: Path, b: Path) -> bool:
         return str(a) == str(b)
 
 
+def _srt_timestamp(seconds: float) -> str:
+    ms = int(round(max(0.0, seconds) * 1000))
+    h, rem = divmod(ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _chunk_narration(text: str, duration: float) -> list[tuple[float, float, str]]:
+    """Split narration into timed subtitle cues spanning `duration` seconds."""
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if not cleaned or duration <= 0.05:
+        return []
+
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", cleaned) if p.strip()]
+    if not parts:
+        parts = [cleaned]
+
+    chunks: list[str] = []
+    for part in parts:
+        words = part.split()
+        if len(words) <= 12:
+            chunks.append(part)
+            continue
+        for i in range(0, len(words), 10):
+            piece = " ".join(words[i : i + 10]).strip()
+            if piece:
+                chunks.append(piece)
+    if not chunks:
+        return []
+
+    weights = [max(1, len(c)) for c in chunks]
+    total_w = float(sum(weights))
+    cues: list[tuple[float, float, str]] = []
+    t = 0.0
+    for i, (chunk, weight) in enumerate(zip(chunks, weights)):
+        if i == len(chunks) - 1:
+            end = duration
+        else:
+            end = min(duration, t + max(0.85, duration * (weight / total_w)))
+        if end <= t:
+            end = min(duration, t + 0.85)
+        if t >= duration - 0.05:
+            break
+        cues.append((t, end, chunk))
+        t = end
+    if cues:
+        start, _end, body = cues[-1]
+        cues[-1] = (start, duration, body)
+    return cues
+
+
+def write_narration_srt(
+    text: str,
+    duration: float,
+    output_path: Path,
+) -> Optional[Path]:
+    """Write an SRT file for narration. Returns path or None if empty."""
+    cues = _chunk_narration(text, duration)
+    if not cues:
+        return None
+    lines: list[str] = []
+    for i, (start, end, body) in enumerate(cues, start=1):
+        lines.append(str(i))
+        lines.append(f"{_srt_timestamp(start)} --> {_srt_timestamp(end)}")
+        lines.append(body)
+        lines.append("")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return output_path
+
+
+def _ffmpeg_subtitles_filter(srt_path: Path) -> str:
+    """Build a subtitles= filter fragment with escaped path + readable style."""
+    path = str(srt_path.resolve())
+    # filtergraph escapes: \ : '
+    path = path.replace("\\", "\\\\").replace(":", "\\:").replace("'", r"\'")
+    style = (
+        "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF&,"
+        "OutlineColour=&HAA000000&,BorderStyle=3,Outline=2,Shadow=0,"
+        "MarginV=42,Alignment=2"
+    )
+    return f"subtitles='{path}':force_style='{style}'"
+
+
 def mux_scene_audio(
     video_path: str,
     audio_path: Optional[str],
     output_path: Path,
+    *,
+    subtitle_text: Optional[str] = None,
+    burn_subtitles: bool = True,
 ) -> Optional[str]:
     """
-    Attach narration to a scene clip.
+    Attach narration to a scene clip and optionally burn-in subtitles.
 
     Keeps the FULL narration: if audio is longer than video, freeze the last
     frame; if video is longer, pad audio with silence. Never use -shortest
@@ -73,17 +163,21 @@ def mux_scene_audio(
     if not video.exists():
         return None
 
-    if not audio_path or not Path(audio_path).exists():
-        if _same_file(video, output_path):
-            return str(output_path)
-        shutil.copy2(video, output_path)
-        return str(output_path)
-
-    audio = Path(audio_path)
+    audio = Path(audio_path) if audio_path and Path(audio_path).exists() else None
     v_dur = probe_duration(video)
-    a_dur = probe_duration(audio)
-    # Small pad so endings aren't clipped
-    target = max(v_dur, a_dur) + 0.15
+    a_dur = probe_duration(audio) if audio else 0.0
+    target = max(v_dur, a_dur, 0.5) + (0.15 if audio else 0.0)
+
+    srt_path: Optional[Path] = None
+    subs_filter = ""
+    if burn_subtitles and (subtitle_text or "").strip():
+        srt_path = write_narration_srt(
+            subtitle_text or "",
+            max(target - 0.15, v_dur, a_dur, 1.0),
+            output_path.with_suffix(".srt"),
+        )
+        if srt_path is not None:
+            subs_filter = "," + _ffmpeg_subtitles_filter(srt_path)
 
     # Avoid ffmpeg/copy writing onto the same inode (re-mux / continue paths).
     write_path = output_path
@@ -99,76 +193,159 @@ def mux_scene_audio(
         write_path.replace(output_path)
         return str(output_path)
 
-    # Freeze last frame to cover narration; pad/trim audio to the same length.
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video),
-        "-i",
-        str(audio),
-        "-filter_complex",
-        (
-            f"[0:v]tpad=stop_mode=clone:stop_duration={max(0.0, target - v_dur):.3f},"
-            f"fps=30,format=yuv420p[v];"
-            f"[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
-            f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}[a]"
-        ),
-        "-map",
-        "[v]",
-        "-map",
-        "[a]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-movflags",
-        "+faststart",
-        str(write_path),
-    ]
+    def _run(cmd: list[str]) -> bool:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            return proc.returncode == 0 and write_path.exists() and write_path.stat().st_size > 0
+        except Exception:  # noqa: BLE001
+            return False
+
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        if proc.returncode == 0 and write_path.exists() and write_path.stat().st_size > 0:
-            done = _finalize()
-            if done:
-                return done
-        # Fallback: basic mux (may truncate longer stream)
-        proc2 = subprocess.run(
-            [
+        if audio is not None:
+            # Freeze last frame to cover narration; pad/trim audio to same length.
+            video_chain = (
+                f"[0:v]tpad=stop_mode=clone:stop_duration={max(0.0, target - v_dur):.3f},"
+                f"fps=30,format=yuv420p{subs_filter}[v]"
+            )
+            audio_chain = (
+                "[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+                f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}[a]"
+            )
+            cmd = [
                 "ffmpeg",
                 "-y",
                 "-i",
                 str(video),
                 "-i",
                 str(audio),
+                "-filter_complex",
+                f"{video_chain};{audio_chain}",
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
                 "-c:v",
                 "libx264",
-                "-pix_fmt",
-                "yuv420p",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
                 "-c:a",
                 "aac",
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-shortest",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
                 str(write_path),
-            ],
-            capture_output=True,
-            timeout=120,
-        )
-        if proc2.returncode == 0 and write_path.exists():
-            done = _finalize()
-            if done:
-                return done
-    except Exception:  # noqa: BLE001
-        pass
+            ]
+            if _run(cmd):
+                done = _finalize()
+                if done:
+                    return done
+            # Retry without subtitles if libass/subtitles filter failed.
+            if subs_filter:
+                cmd_no_subs = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(video),
+                    "-i",
+                    str(audio),
+                    "-filter_complex",
+                    (
+                        f"[0:v]tpad=stop_mode=clone:stop_duration={max(0.0, target - v_dur):.3f},"
+                        f"fps=30,format=yuv420p[v];"
+                        f"[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+                        f"apad=whole_dur={target:.3f},atrim=0:{target:.3f}[a]"
+                    ),
+                    "-map",
+                    "[v]",
+                    "-map",
+                    "[a]",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "23",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-movflags",
+                    "+faststart",
+                    str(write_path),
+                ]
+                if _run(cmd_no_subs):
+                    done = _finalize()
+                    if done:
+                        return done
+            # Fallback: basic mux (may truncate longer stream)
+            if _run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(video),
+                    "-i",
+                    str(audio),
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "1:a:0",
+                    "-shortest",
+                    str(write_path),
+                ]
+            ):
+                done = _finalize()
+                if done:
+                    return done
+        else:
+            # No audio — still burn subtitles when requested.
+            vf = f"fps=30,format=yuv420p{subs_filter}"
+            if _run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(video),
+                    "-vf",
+                    vf,
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "23",
+                    "-an",
+                    "-movflags",
+                    "+faststart",
+                    str(write_path),
+                ]
+            ):
+                done = _finalize()
+                if done:
+                    return done
+            if subs_filter and _run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(video),
+                    "-c",
+                    "copy",
+                    str(write_path),
+                ]
+            ):
+                done = _finalize()
+                if done:
+                    return done
     finally:
         if write_path != output_path:
             write_path.unlink(missing_ok=True)

@@ -29,6 +29,7 @@ from backend.pipeline.storyboard import create_storyboard_frame
 from backend.pipeline.tts import synthesize_narration
 from backend.pipeline.visual_preview import create_visual_preview
 from backend.pipeline.vlm_review import review_scene
+from backend.languages import DEFAULT_LANGUAGE, normalize_language
 from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
 
 
@@ -81,11 +82,12 @@ def _revision_instructions_from_review(review: Any) -> str:
         parts.append(instructions)
     if issues:
         parts.append("Issues to fix:\n- " + "\n- ".join(issues[:4]))
-    # Keep boilerplate short so revises stay surgical (long generic lists strip content).
+    # Keep boilerplate short so revises stay surgical (do NOT push formula truncation).
     parts.append(
-        "Surgical layout fixes only: remove overlaps/cutoffs, shorten labels, "
-        "FadeOut prior labels before dense beats, one formula in a bottom zone, "
-        "keep the core diagram visible in the final hold."
+        "Surgical layout fixes only: reposition overlaps, FadeOut prior labels before "
+        "dense beats, keep one complete formula readable (smaller font / two lines OK — "
+        "never truncate terms), remove decorative filler shapes, keep the core diagram "
+        "visible in the final hold."
     )
     return "\n\n".join(parts)
 
@@ -206,6 +208,109 @@ def _persist_job_tts_voice(job_id: str, voice: str) -> None:
         pass
 
 
+def _job_include_subtitles(job_id: str, fallback: bool = True) -> bool:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        if "include_subtitles" in settings:
+            return bool(settings.get("include_subtitles"))
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
+
+
+def _persist_job_include_subtitles(job_id: str, include: bool) -> None:
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["include_subtitles"] = bool(include)
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _job_include_audio(job_id: str, fallback: bool = True) -> bool:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        if "include_audio" in settings:
+            return bool(settings.get("include_audio"))
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
+
+
+def _persist_job_include_audio(job_id: str, include: bool) -> None:
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["include_audio"] = bool(include)
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _job_language(job_id: str, fallback: str = DEFAULT_LANGUAGE) -> str:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        lang = settings.get("language")
+        if isinstance(lang, str) and lang.strip():
+            return normalize_language(lang)
+    except Exception:  # noqa: BLE001
+        pass
+    return normalize_language(fallback)
+
+
+def _persist_job_language(job_id: str, language: str) -> None:
+    canonical = normalize_language(language)
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["language"] = canonical
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _mux_scene_vo(
+    video_path: str,
+    audio_path: Optional[str],
+    output_path: Path,
+    *,
+    job_id: str,
+    narration: str = "",
+) -> Optional[str]:
+    """Mux narration + burn-in subtitles (defaults from job settings)."""
+    if not _job_include_audio(job_id, fallback=True):
+        audio_path = None
+    return mux_scene_audio(
+        video_path,
+        audio_path,
+        output_path,
+        subtitle_text=narration,
+        burn_subtitles=_job_include_subtitles(job_id, fallback=True),
+    )
+
+
 def _load_plan(job_id: str) -> ScenePlan:
     job = store.load_job(job_id)
     plan_data = job.get("scene_plan")
@@ -250,6 +355,8 @@ def _process_one_scene(
     """TTS-first → codegen (timed) → render → VLM for a single scene."""
     settings = get_settings()
     voice = tts_voice or _job_tts_voice(job_id)
+    language = _job_language(job_id)
+    include_audio = _job_include_audio(job_id, fallback=True)
     store.save_scene_section(job_id, scene.id, scene.model_dump())
     _emit(
         on_event,
@@ -261,14 +368,19 @@ def _process_one_scene(
 
     sdir = store.scene_dir(job_id, scene.id)
 
-    # --- TTS first so codegen can match narration length ---
+    # --- TTS first so codegen can match narration length (unless audio disabled) ---
     # Gemini returns PCM→WAV (no ffmpeg); other providers may return MP3.
-    audio_path, audio_skipped = synthesize_narration(
-        scene.narration,
-        work_dir / "audio" / f"{scene.id}.wav",
-        settings=settings,
-        voice=voice,
-    )
+    audio_path: Optional[str] = None
+    audio_skipped = False
+    if include_audio:
+        audio_path, audio_skipped = synthesize_narration(
+            scene.narration,
+            work_dir / "audio" / f"{scene.id}.wav",
+            settings=settings,
+            voice=voice,
+        )
+    else:
+        audio_skipped = True
     if audio_path and Path(audio_path).exists():
         dest = sdir / f"audio{Path(audio_path).suffix.lower()}"
         shutil.copy2(audio_path, dest)
@@ -280,17 +392,29 @@ def _process_one_scene(
     scene = scene.model_copy(update={"duration_seconds": float(target_duration)})
     store.save_scene_section(job_id, scene.id, scene.model_dump())
 
+    if include_audio:
+        tts_msg = (
+            f"TTS for {scene.id}"
+            + (
+                " (skipped — TTS not configured)"
+                if audio_skipped
+                else f" · {target_duration:.1f}s"
+            )
+        )
+    else:
+        tts_msg = f"Audio disabled for {scene.id} · {target_duration:.1f}s from plan"
     _emit(
         on_event,
         PipelineEventType.scene_tts,
-        f"TTS for {scene.id}"
-        + (" (skipped — TTS not configured)" if audio_skipped else f" · {target_duration:.1f}s"),
+        tts_msg,
         data={
             "scene_id": scene.id,
             "audio_path": audio_path,
             "skipped": audio_skipped,
+            "include_audio": include_audio,
             "target_duration": target_duration,
             "tts_voice": voice,
+            "language": language,
             "job_id": job_id,
         },
         job_id=job_id,
@@ -303,6 +427,7 @@ def _process_one_scene(
         previous_context=previous_context,
         target_duration_seconds=target_duration,
         creative_direction=creative_direction,
+        language=language,
     )
     store.save_code(job_id, scene.id, code, revision=0)
     _emit(
@@ -365,6 +490,7 @@ def _process_one_scene(
                 scene=scene,
                 revision_instructions=rev_instructions,
                 target_duration_seconds=target_duration,
+                language=language,
             )
             store.save_code(job_id, scene.id, code, revision=revision_count)
             video_path, frame_path, render_log = render_scene(
@@ -533,6 +659,7 @@ def _process_one_scene(
             revision_instructions=rev_instructions,
             target_duration_seconds=target_duration,
             surgical=True,
+            language=language,
         )
         store.save_code(job_id, scene.id, code, revision=revision_count)
 
@@ -568,6 +695,7 @@ def _process_one_scene(
                         target_duration_seconds=target_duration,
                         surgical=False,
                         render_error=(render_log or "")[-500:],
+                        language=language,
                     )
                     store.save_code(
                         job_id, scene.id, code, revision=revision_count
@@ -643,10 +771,12 @@ def _process_one_scene(
     # Mux narration immediately so the UI can play a finished clip per scene
     # (don't wait for the whole pipeline / final compose).
     if video_path:
-        muxed = mux_scene_audio(
+        muxed = _mux_scene_vo(
             video_path,
             audio_path,
             sdir / "scene_vo.mp4",
+            job_id=job_id,
+            narration=scene.narration,
         )
         publish_src = muxed or video_path
         video_url = store.publish_scene_video(job_id, scene.id, publish_src)
@@ -737,10 +867,18 @@ def _compose_and_finish(
     for art in artifacts:
         if not art.video_path:
             continue
-        muxed = mux_scene_audio(
+        vo_path = store.scene_dir(job_id, art.scene_id) / "scene_vo.mp4"
+        # Prefer an already-muxed VO clip so we don't burn subtitles twice.
+        if vo_path.exists() and vo_path.stat().st_size > 0:
+            muxed_clips.append(str(vo_path))
+            art.video_url = store.publish_scene_video(job_id, art.scene_id, str(vo_path))
+            continue
+        muxed = _mux_scene_vo(
             art.video_path,
             art.audio_path,
-            store.scene_dir(job_id, art.scene_id) / "scene_vo.mp4",
+            vo_path,
+            job_id=job_id,
+            narration=art.narration,
         )
         if muxed:
             muxed_clips.append(muxed)
@@ -1015,7 +1153,10 @@ def run_pipeline(
             "skip_render": request.skip_render,
             "length_preset": request.length_preset,
             "audience": request.audience,
+            "language": request.language,
             "tts_voice": request.tts_voice,
+            "include_audio": request.include_audio,
+            "include_subtitles": request.include_subtitles,
             "plan_only": request.plan_only,
         },
         user_id=user_id,
@@ -1058,6 +1199,7 @@ def run_pipeline(
         request.prompt,
         length_preset=request.length_preset,
         audience=request.audience,
+        language=request.language,
     )
     plan_path = store.save_scene_plan(job_id, plan.model_dump())
     for scene in plan.scenes:
@@ -1080,7 +1222,10 @@ def run_pipeline(
         "awaiting_confirm": request.plan_only,
         "length_preset": request.length_preset,
         "audience": request.audience,
+        "language": request.language,
         "tts_voice": request.tts_voice,
+        "include_audio": request.include_audio,
+        "include_subtitles": request.include_subtitles,
     }
     _emit(
         on_event,
@@ -1146,6 +1291,12 @@ def continue_pipeline(
     skip_render = request.skip_render
     if request.tts_voice:
         _persist_job_tts_voice(job_id, request.tts_voice)
+    if request.language:
+        _persist_job_language(job_id, request.language)
+    if request.include_audio is not None:
+        _persist_job_include_audio(job_id, request.include_audio)
+    if request.include_subtitles is not None:
+        _persist_job_include_subtitles(job_id, request.include_subtitles)
     tts_voice = _job_tts_voice(job_id, fallback=request.tts_voice)
 
     if user_id:
@@ -1253,10 +1404,12 @@ def regenerate_scene(
     # Mux + refresh final if we have video
     video_url = artifact.video_url
     if artifact.video_path:
-        muxed = mux_scene_audio(
+        muxed = _mux_scene_vo(
             artifact.video_path,
             artifact.audio_path,
             store.scene_dir(job_id, scene_id) / "scene_vo.mp4",
+            job_id=job_id,
+            narration=artifact.narration,
         )
         if muxed:
             video_url = store.publish_scene_video(job_id, scene_id, muxed)
@@ -1357,12 +1510,14 @@ def retouch_scene(
     if audio_file is not None:
         target_duration = probe_duration(audio_file) or target_duration
 
+    language = _job_language(job_id)
     new_code = revise_scene_code(
         client,
         code=current_code,
         scene=scene_sec,
         revision_instructions=rev_instructions,
         target_duration_seconds=target_duration,
+        language=language,
     )
 
     ok, err = validate_manim_code(new_code)
@@ -1380,6 +1535,7 @@ def retouch_scene(
                 f"Previous revision had a syntax error:\n{err}\nPlease fix it."
             ),
             target_duration_seconds=target_duration,
+            language=language,
         )
         ok, err = validate_manim_code(new_code)
 
@@ -1424,6 +1580,7 @@ def retouch_scene(
             scene=scene_sec,
             revision_instructions=rev_instructions_err,
             target_duration_seconds=target_duration,
+            language=language,
         )
         rev_count = len(list(sdir.glob("code_r*.py")))
         store.save_code(job_id, scene_id, new_code, revision=rev_count)
@@ -1484,11 +1641,16 @@ def retouch_scene(
                     break
 
         final_video_path = video_path
-        if audio_file is not None and audio_file.exists():
-            muxed_path = sdir / "scene_vo.mp4"
-            muxed = mux_scene_audio(video_path, str(audio_file), muxed_path)
-            if muxed:
-                final_video_path = str(muxed_path)
+        muxed_path = sdir / "scene_vo.mp4"
+        muxed = _mux_scene_vo(
+            video_path,
+            str(audio_file) if audio_file is not None and audio_file.exists() else None,
+            muxed_path,
+            job_id=job_id,
+            narration=scene_sec.narration,
+        )
+        if muxed:
+            final_video_path = str(muxed_path)
 
         video_url = store.publish_scene_video(job_id, scene_id, final_video_path)
 
@@ -1817,7 +1979,21 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
     audio_p = _scene_audio_file(sdir)
     audio_str = str(audio_p) if audio_p is not None else None
     muxed_path = sdir / "scene_vo.mp4"
-    muxed = mux_scene_audio(str(scene_video), audio_str, muxed_path)
+    narration = ""
+    for s in scenes:
+        if s.get("scene_id") == scene_id:
+            narration = str(s.get("narration") or "")
+            section = s.get("section") or {}
+            if not narration and isinstance(section, dict):
+                narration = str(section.get("narration") or "")
+            break
+    muxed = _mux_scene_vo(
+        str(scene_video),
+        audio_str,
+        muxed_path,
+        job_id=job_id,
+        narration=narration,
+    )
 
     muxed_clips: list[str] = []
     for s in scenes:

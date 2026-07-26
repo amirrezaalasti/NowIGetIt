@@ -21,6 +21,7 @@ from backend import supabase_db as db
 from backend.auth import CurrentUser, MediaUser, auth_is_configured
 from backend.config import get_settings
 from backend import job_runner
+from backend.languages import languages_for_api
 from backend.tts_voices import voices_for_api
 from backend.pipeline.orchestrator import (
     aiter_continue_events,
@@ -126,6 +127,7 @@ def health() -> dict:
         "tts_model": settings.tts_model,
         "tts_voice": settings.tts_voice,
         "tts_voices": voices_for_api(),
+        "languages": languages_for_api(),
         "manim_render_enabled": settings.enable_manim_render,
         "manim_available": manim_available,
         "manim_version": manim_version,

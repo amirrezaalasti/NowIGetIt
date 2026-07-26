@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from backend.languages import DEFAULT_LANGUAGE, normalize_language
 from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
 
 
@@ -22,8 +23,14 @@ class GenerateRequest(BaseModel):
     audience: str = Field(
         default="general", pattern="^(hs|undergrad|general)$"
     )
+    # Narration + on-screen label language (ISO-ish code, e.g. en, fa, es)
+    language: str = Field(default=DEFAULT_LANGUAGE, max_length=16)
     # Gemini TTS narrator voice (OpenRouter google/gemini-3.1-flash-tts-preview)
     tts_voice: str = Field(default=DEFAULT_TTS_VOICE, max_length=64)
+    # Generate spoken narration audio (default on). Subtitles can still be on.
+    include_audio: bool = True
+    # Burn narration as on-screen subtitles (default on)
+    include_subtitles: bool = True
     # If true, stop after planning so the UI can edit the storyboard
     plan_only: bool = False
 
@@ -32,13 +39,21 @@ class GenerateRequest(BaseModel):
     def _normalize_voice(cls, value: str) -> str:
         return normalize_tts_voice(value)
 
+    @field_validator("language")
+    @classmethod
+    def _normalize_language(cls, value: str) -> str:
+        return normalize_language(value)
+
 
 class ContinueRequest(BaseModel):
     resolution: Optional[str] = Field(
         default=None, pattern="^(480p|720p|1080p)$"
     )
     skip_render: bool = False
+    language: Optional[str] = Field(default=None, max_length=16)
     tts_voice: Optional[str] = Field(default=None, max_length=64)
+    include_audio: Optional[bool] = None
+    include_subtitles: Optional[bool] = None
 
     @field_validator("tts_voice")
     @classmethod
@@ -46,6 +61,13 @@ class ContinueRequest(BaseModel):
         if value is None or not str(value).strip():
             return None
         return normalize_tts_voice(value)
+
+    @field_validator("language")
+    @classmethod
+    def _normalize_language(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        return normalize_language(value)
 
 
 class SceneSection(BaseModel):

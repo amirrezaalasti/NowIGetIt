@@ -294,11 +294,12 @@ def _extract_preview_frame(video_path: str, frame_path: Path) -> Optional[str]:
 
 def extract_review_frames(video_path: str, out_dir: Path) -> list[str]:
     """
-    Extract mid + end preview frames for VLM review.
+    Extract late-mid + end preview frames for VLM review.
 
-    Progressive scenes often clear labels before a final hold; a mid-frame
-    prevents false "empty / off-brief" scores from the last 0.25s alone.
-    Returns paths in order: mid (optional), end.
+    Avoid early midpoints (~40%): titles often use Write() and look "truncated"
+    mid-animation, which caused false VLM rejects. Prefer ~70% (diagram built,
+    labels mostly done) and the finished end hold.
+    Returns paths in chronological order.
     """
     if not video_path or not Path(video_path).exists() or not shutil.which("ffmpeg"):
         return []
@@ -308,7 +309,8 @@ def extract_review_frames(video_path: str, out_dir: Path) -> list[str]:
 
     duration = _probe_video_duration(video_path) or 0.0
     if duration >= 2.5:
-        mid_t = max(0.6, min(duration - 0.8, duration * 0.45))
+        # Late enough that Write/FadeIn titles should be finished in most scenes.
+        mid_t = max(1.0, min(duration - 0.7, duration * 0.72))
         mid_path = out_dir / "preview_mid.png"
         mid = _run_ffmpeg_frame(
             [

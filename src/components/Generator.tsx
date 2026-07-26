@@ -19,6 +19,7 @@ import {
   updateJobPlan,
   type Audience,
   type JobDetail,
+  type LanguageOption,
   type LengthPreset,
   type PipelineEvent,
   type ScenePlanDraft,
@@ -35,6 +36,17 @@ const DEFAULT_TTS_VOICES: TtsVoiceOption[] = [
   { id: "Charon", gender: "Male", label: "Charon · Male" },
   { id: "Fenrir", gender: "Male", label: "Fenrir · Male" },
   { id: "Orus", gender: "Male", label: "Orus · Male" },
+];
+
+const DEFAULT_LANGUAGES: LanguageOption[] = [
+  { id: "en", label: "English", native_label: "English" },
+  { id: "es", label: "Spanish", native_label: "Español" },
+  { id: "fr", label: "French", native_label: "Français" },
+  { id: "de", label: "German", native_label: "Deutsch" },
+  { id: "fa", label: "Persian", native_label: "فارسی" },
+  { id: "ar", label: "Arabic", native_label: "العربية" },
+  { id: "zh", label: "Chinese (Simplified)", native_label: "简体中文" },
+  { id: "ja", label: "Japanese", native_label: "日本語" },
 ];
 
 function AutoTextarea({
@@ -160,8 +172,13 @@ export function Generator() {
   const [lengthPreset, setLengthPreset] = useState<LengthPreset>("standard");
   const [audience, setAudience] = useState<Audience>("general");
   const [ttsVoice, setTtsVoice] = useState("Kore");
+  const [language, setLanguage] = useState("en");
+  const [includeAudio, setIncludeAudio] = useState(true);
+  const [includeSubtitles, setIncludeSubtitles] = useState(true);
   const [ttsVoices, setTtsVoices] =
     useState<TtsVoiceOption[]>(DEFAULT_TTS_VOICES);
+  const [languages, setLanguages] =
+    useState<LanguageOption[]>(DEFAULT_LANGUAGES);
   const [running, setRunning] = useState(false);
   const [awaitingPlan, setAwaitingPlan] = useState(false);
   const [editingPlan, setEditingPlan] = useState<ScenePlanDraft | null>(null);
@@ -211,6 +228,9 @@ export function Generator() {
               : "";
         if (h.tts_voices?.length) {
           setTtsVoices(h.tts_voices);
+        }
+        if (h.languages?.length) {
+          setLanguages(h.languages);
         }
         setHealth(
           h.openrouter_configured
@@ -469,12 +489,19 @@ export function Generator() {
       setPrompt(job.meta.prompt);
     }
     const metaSettings = job.meta?.settings;
-    if (
-      metaSettings &&
-      typeof metaSettings === "object" &&
-      typeof (metaSettings as { tts_voice?: unknown }).tts_voice === "string"
-    ) {
-      setTtsVoice((metaSettings as { tts_voice: string }).tts_voice);
+    if (metaSettings && typeof metaSettings === "object") {
+      const s = metaSettings as {
+        tts_voice?: unknown;
+        language?: unknown;
+        include_audio?: unknown;
+        include_subtitles?: unknown;
+      };
+      if (typeof s.tts_voice === "string") setTtsVoice(s.tts_voice);
+      if (typeof s.language === "string") setLanguage(s.language);
+      if (typeof s.include_audio === "boolean") setIncludeAudio(s.include_audio);
+      if (typeof s.include_subtitles === "boolean") {
+        setIncludeSubtitles(s.include_subtitles);
+      }
     }
     if (job.final_video_url) setFinalVideoUrl(job.final_video_url);
     if (job.final_debug && typeof job.final_debug.notes === "string") {
@@ -663,7 +690,10 @@ export function Generator() {
           prompt: prompt.trim(),
           length_preset: lengthPreset,
           audience,
+          language,
           tts_voice: ttsVoice,
+          include_audio: includeAudio,
+          include_subtitles: includeSubtitles,
           plan_only: true,
           skip_render: false,
         },
@@ -728,7 +758,10 @@ export function Generator() {
       setScenes((prev) => prev.map((s) => ({ ...s, status: "queued" })));
       setLiveMessage("Building scenes…");
       await streamContinue(jobId, applyPipelineEvent, controller.signal, {
+        language,
         tts_voice: ttsVoice,
+        include_audio: includeAudio,
+        include_subtitles: includeSubtitles,
       });
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
@@ -850,12 +883,29 @@ export function Generator() {
               />
               <label className="flex min-w-[10rem] flex-col gap-1.5">
                 <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+                  Language
+                </span>
+                <select
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value)}
+                  disabled={running}
+                  className="rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {languages.map((lang) => (
+                    <option key={lang.id} value={lang.id}>
+                      {lang.label} · {lang.native_label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex min-w-[10rem] flex-col gap-1.5">
+                <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
                   Narrator
                 </span>
                 <select
                   value={ttsVoice}
                   onChange={(e) => setTtsVoice(e.target.value)}
-                  disabled={running}
+                  disabled={running || !includeAudio}
                   className="rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {ttsVoices.map((v) => (
@@ -864,6 +914,26 @@ export function Generator() {
                     </option>
                   ))}
                 </select>
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink-muted)]">
+                <input
+                  type="checkbox"
+                  checked={includeAudio}
+                  onChange={(e) => setIncludeAudio(e.target.checked)}
+                  disabled={running}
+                  className="rounded border-[var(--line)]"
+                />
+                Audio
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink-muted)]">
+                <input
+                  type="checkbox"
+                  checked={includeSubtitles}
+                  onChange={(e) => setIncludeSubtitles(e.target.checked)}
+                  disabled={running}
+                  className="rounded border-[var(--line)]"
+                />
+                Subtitles
               </label>
             </div>
 
