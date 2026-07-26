@@ -264,3 +264,32 @@ def sync_job_storage(*, user_id: str, job_id: str, job_path: Path) -> None:
         raise
     except Exception:  # noqa: BLE001
         logger.exception("Failed to sync storage for job %s", job_id)
+
+
+def delete_job(*, job_id: str, user_id: str) -> None:
+    """Remove durable job row (and zero storage) when possible."""
+    if not supabase_enabled():
+        return
+    try:
+        _rpc("delete_job", {"p_id": job_id, "p_user_id": user_id})
+        return
+    except Exception:  # noqa: BLE001
+        logger.debug("delete_job RPC unavailable; falling back to table delete")
+    try:
+        client = _client()
+        client.table("jobs").delete().eq("id", job_id).eq("user_id", user_id).execute()
+    except Exception:  # noqa: BLE001
+        try:
+            client = _client()
+            client.table("jobs").delete().eq("job_id", job_id).eq(
+                "user_id", user_id
+            ).execute()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to delete job row %s", job_id)
+    try:
+        _rpc(
+            "set_job_storage",
+            {"p_user_id": user_id, "p_job_id": job_id, "p_storage_bytes": 0},
+        )
+    except Exception:  # noqa: BLE001
+        pass

@@ -50,6 +50,7 @@ from backend.schemas import (
     SceneArtifact,
     ScenePlan,
     SceneSection,
+    VlmReview,
 )
 
 EventCallback = Callable[[PipelineEvent], None]
@@ -351,8 +352,9 @@ def _process_one_scene(
     on_event: Optional[EventCallback],
     creative_direction: str = "",
     tts_voice: Optional[str] = None,
+    skip_vlm_review: bool = False,
 ) -> SceneArtifact:
-    """TTS-first → codegen (timed) → render → VLM for a single scene."""
+    """TTS-first → codegen (timed) → render → optional VLM for a single scene."""
     settings = get_settings()
     voice = tts_voice or _job_tts_voice(job_id)
     language = _job_language(job_id)
@@ -519,60 +521,21 @@ def _process_one_scene(
     else:
         preview_note = "Render skipped by request."
 
-    review_frame_paths: list[str] = []
-
-    def _ensure_preview_frame(rev: int) -> tuple[Optional[str], str]:
-        """Return (frame_path, frame_source) for review; fall back to storyboard."""
-        nonlocal frame_path, frame_source, review_frame_paths
-        if video_path and Path(video_path).exists():
-            review_frame_paths = extract_review_frames(
-                video_path, sdir / f"vlm_frames_r{rev}"
-            )
-            if review_frame_paths:
-                frame_path = review_frame_paths[-1]
-                frame_source = "manim_preview"
-                return frame_path, frame_source
-        if frame_path and frame_source == "manim_preview":
-            review_frame_paths = [frame_path]
-            return frame_path, frame_source
-        create_storyboard_frame(
-            scene,
-            output_path=sdir / f"vlm_r{rev}_plan_card.png",
+    # HITL regenerate: human is the reviewer — skip VLM + clarity auto-revise.
+    if skip_vlm_review:
+        review = VlmReview(
+            approved=True,
+            issues=[],
+            revision_instructions="Skipped (HITL regenerate)",
+            confidence=1.0,
+            clarity_score=0.8,
+            misconception_risk=0.2,
         )
-        frame_path = create_visual_preview(
-            scene,
-            output_path=sdir / f"vlm_r{rev}_preview.png",
-        )
-        frame_source = "visual_preview"
-        review_frame_paths = [frame_path] if frame_path else []
-        return frame_path, frame_source
-
-    def _run_review(rev: int) -> Any:
-        nonlocal frame_path, frame_source, review_frame_paths
-        _ensure_preview_frame(rev)
-        syntax_ok, syntax_err = validate_manim_code(code)
-        use_image_vlm = frame_source == "manim_preview"
-        result = review_scene(
-            client,
-            scene=scene,
-            code=code,
-            frame_path=frame_path if use_image_vlm else None,
-            frame_paths=review_frame_paths if use_image_vlm else None,
-            frame_source=frame_source if use_image_vlm else "visual_preview",
-        )
-        if not syntax_ok:
-            result = result.model_copy(
-                update={
-                    "approved": False,
-                    "issues": [syntax_err, *result.issues],
-                    "revision_instructions": f"Fix invalid Python ({syntax_err}).",
-                }
-            )
         saved = store.save_vlm_review(
             job_id,
             scene.id,
-            revision=rev,
-            review=result.model_dump(),
+            revision=revision_count,
+            review=review.model_dump(),
             frame_path=frame_path,
             frame_source=frame_source,
         )
@@ -580,190 +543,262 @@ def _process_one_scene(
             frame_urls.append(saved["frame_url"])
         reviews_log.append(
             {
-                **result.model_dump(),
-                "revision": rev,
-                "frame_source": frame_source,
-                "frame_url": saved.get("frame_url"),
-                "frame_count": len(review_frame_paths),
-                "review_mode": (
-                    "image_vlm" if frame_source == "manim_preview" else "code_only"
-                ),
-            }
-        )
-        _emit(
-            on_event,
-            PipelineEventType.scene_vlm,
-            f"Scene check for {scene.id}"
-            + (
-                f" · clarity {result.clarity_score:.0%}"
-                if hasattr(result, "clarity_score")
-                else ""
-            )
-            + (f" · r{rev}" if rev else ""),
-            data={
-                **result.model_dump(),
-                "scene_id": scene.id,
-                "job_id": job_id,
-                "frame_url": saved.get("frame_url"),
-                "frame_source": frame_source,
-                "revision": rev,
-            },
-            job_id=job_id,
-        )
-        return result
-
-    review = _run_review(0)
-
-    # Keep-best: never ship a revision that scores worse than a prior attempt.
-    best: dict[str, Any] = {
-        "code": code,
-        "video_path": video_path,
-        "frame_path": frame_path,
-        "frame_source": frame_source,
-        "review": review,
-        "clarity": _review_clarity(review),
-        "preview_note": preview_note,
-        "revision": 0,
-    }
-    stagnant = 0
-    max_stagnant = 1
-
-    # Auto-revise cluttered / rejected scenes (shares MAX_SCENE_REVISIONS budget).
-    while (
-        settings.enable_auto_vlm_revise
-        and revision_count < settings.max_scene_revisions
-        and _needs_visual_revision(
-            review, clarity_threshold=settings.vlm_clarity_threshold
-        )
-    ):
-        revision_count += 1
-        rev_instructions = _revision_instructions_from_review(review)
-        _emit(
-            on_event,
-            PipelineEventType.scene_revise,
-            f"Auto-revising {scene.id} for clarity (attempt {revision_count})…",
-            data={
-                "scene_id": scene.id,
-                "job_id": job_id,
+                **review.model_dump(),
                 "revision": revision_count,
-                "clarity_score": getattr(review, "clarity_score", None),
-                "best_clarity": best["clarity"],
-            },
-            job_id=job_id,
-        )
-        # Always revise from the best known code — not a worse intermediate rewrite.
-        code = revise_scene_code(
-            client,
-            code=best["code"],
-            scene=scene,
-            revision_instructions=rev_instructions,
-            target_duration_seconds=target_duration,
-            surgical=True,
-            language=language,
+                "frame_source": frame_source,
+                "frame_url": saved.get("frame_url"),
+                "review_mode": "hitl_skip",
+            }
         )
         store.save_code(job_id, scene.id, code, revision=revision_count)
+    else:
+        review_frame_paths: list[str] = []
 
-        if not skip_render:
-            prev_video, prev_frame, prev_source = (
-                video_path,
-                frame_path,
-                frame_source,
+        def _ensure_preview_frame(rev: int) -> tuple[Optional[str], str]:
+            """Return (frame_path, frame_source) for review; fall back to storyboard."""
+            nonlocal frame_path, frame_source, review_frame_paths
+            if video_path and Path(video_path).exists():
+                review_frame_paths = extract_review_frames(
+                    video_path, sdir / f"vlm_frames_r{rev}"
+                )
+                if review_frame_paths:
+                    frame_path = review_frame_paths[-1]
+                    frame_source = "manim_preview"
+                    return frame_path, frame_source
+            if frame_path and frame_source == "manim_preview":
+                review_frame_paths = [frame_path]
+                return frame_path, frame_source
+            create_storyboard_frame(
+                scene,
+                output_path=sdir / f"vlm_r{rev}_plan_card.png",
             )
-            video_path, frame_path, render_log = render_scene(
-                code,
-                work_dir=work_dir / "render" / scene.id,
-                resolution=resolution,
-                scene_id=f"{scene.id}_r{revision_count}",
+            frame_path = create_visual_preview(
+                scene,
+                output_path=sdir / f"vlm_r{rev}_preview.png",
             )
-            if frame_path:
-                frame_source = "manim_preview"
-            elif video_path is None:
-                # Render broke after a visual revise — try one render-focused fix
-                # if budget remains, else keep the last playable clip.
-                preview_note = render_log
-                if revision_count < settings.max_scene_revisions:
-                    revision_count += 1
-                    code = revise_scene_code(
-                        client,
-                        code=code,
-                        scene=scene,
-                        revision_instructions=(
-                            "Manim render failed after a clarity fix. "
-                            f"Error:\n{(render_log or '')[-500:]}\n"
-                            "Fix so it renders; keep layout sparse and non-overlapping."
-                        ),
-                        target_duration_seconds=target_duration,
-                        surgical=False,
-                        render_error=(render_log or "")[-500:],
-                        language=language,
-                    )
-                    store.save_code(
-                        job_id, scene.id, code, revision=revision_count
-                    )
-                    video_path, frame_path, render_log = render_scene(
-                        code,
-                        work_dir=work_dir / "render" / scene.id,
-                        resolution=resolution,
-                        scene_id=f"{scene.id}_r{revision_count}",
-                    )
-                    if frame_path:
-                        frame_source = "manim_preview"
-                    preview_note = None if video_path else render_log
-                if video_path is None and prev_video:
-                    video_path, frame_path, frame_source = (
-                        prev_video,
-                        prev_frame,
-                        prev_source,
-                    )
+            frame_source = "visual_preview"
+            review_frame_paths = [frame_path] if frame_path else []
+            return frame_path, frame_source
 
-        review = _run_review(revision_count)
-        new_clarity = _review_clarity(review)
-        if new_clarity > best["clarity"] + 0.02:
-            best = {
-                "code": code,
-                "video_path": video_path,
-                "frame_path": frame_path,
-                "frame_source": frame_source,
-                "review": review,
-                "clarity": new_clarity,
-                "preview_note": preview_note,
-                "revision": revision_count,
-            }
-            stagnant = 0
-        else:
-            stagnant += 1
-            # Restore best artifacts so the next attempt (or ship) uses them.
-            code = best["code"]
-            video_path = best["video_path"]
-            frame_path = best["frame_path"]
-            frame_source = best["frame_source"]
-            preview_note = best["preview_note"]
-            review = best["review"]
+        def _run_review(rev: int) -> Any:
+            nonlocal frame_path, frame_source, review_frame_paths
+            _ensure_preview_frame(rev)
+            syntax_ok, syntax_err = validate_manim_code(code)
+            use_image_vlm = frame_source == "manim_preview"
+            result = review_scene(
+                client,
+                scene=scene,
+                code=code,
+                frame_path=frame_path if use_image_vlm else None,
+                frame_paths=review_frame_paths if use_image_vlm else None,
+                frame_source=frame_source if use_image_vlm else "visual_preview",
+            )
+            if not syntax_ok:
+                result = result.model_copy(
+                    update={
+                        "approved": False,
+                        "issues": [syntax_err, *result.issues],
+                        "revision_instructions": f"Fix invalid Python ({syntax_err}).",
+                    }
+                )
+            saved = store.save_vlm_review(
+                job_id,
+                scene.id,
+                revision=rev,
+                review=result.model_dump(),
+                frame_path=frame_path,
+                frame_source=frame_source,
+            )
+            if saved.get("frame_url"):
+                frame_urls.append(saved["frame_url"])
+            reviews_log.append(
+                {
+                    **result.model_dump(),
+                    "revision": rev,
+                    "frame_source": frame_source,
+                    "frame_url": saved.get("frame_url"),
+                    "frame_count": len(review_frame_paths),
+                    "review_mode": (
+                        "image_vlm"
+                        if frame_source == "manim_preview"
+                        else "code_only"
+                    ),
+                }
+            )
             _emit(
                 on_event,
-                PipelineEventType.status,
-                f"Kept best {scene.id} at clarity {best['clarity']:.0%} "
-                f"(r{best['revision']}; attempt {revision_count} did not improve)",
+                PipelineEventType.scene_vlm,
+                f"Scene check for {scene.id}"
+                + (
+                    f" · clarity {result.clarity_score:.0%}"
+                    if hasattr(result, "clarity_score")
+                    else ""
+                )
+                + (f" · r{rev}" if rev else ""),
                 data={
+                    **result.model_dump(),
                     "scene_id": scene.id,
                     "job_id": job_id,
-                    "best_clarity": best["clarity"],
-                    "attempt_clarity": new_clarity,
-                    "revision": revision_count,
+                    "frame_url": saved.get("frame_url"),
+                    "frame_source": frame_source,
+                    "revision": rev,
                 },
                 job_id=job_id,
             )
-            if stagnant > max_stagnant:
-                break
+            return result
 
-    # Ship the best revision we saw (may be r0).
-    code = best["code"]
-    video_path = best["video_path"]
-    frame_path = best["frame_path"]
-    frame_source = best["frame_source"]
-    preview_note = best["preview_note"]
-    review = best["review"]
-    store.save_code(job_id, scene.id, code, revision=best["revision"])
+        review = _run_review(0)
+
+        # Keep-best: never ship a revision that scores worse than a prior attempt.
+        best: dict[str, Any] = {
+            "code": code,
+            "video_path": video_path,
+            "frame_path": frame_path,
+            "frame_source": frame_source,
+            "review": review,
+            "clarity": _review_clarity(review),
+            "preview_note": preview_note,
+            "revision": 0,
+        }
+        stagnant = 0
+        max_stagnant = 1
+
+        # Auto-revise cluttered / rejected scenes (shares MAX_SCENE_REVISIONS budget).
+        while (
+            settings.enable_auto_vlm_revise
+            and revision_count < settings.max_scene_revisions
+            and _needs_visual_revision(
+                review, clarity_threshold=settings.vlm_clarity_threshold
+            )
+        ):
+            revision_count += 1
+            rev_instructions = _revision_instructions_from_review(review)
+            _emit(
+                on_event,
+                PipelineEventType.scene_revise,
+                f"Auto-revising {scene.id} for clarity (attempt {revision_count})…",
+                data={
+                    "scene_id": scene.id,
+                    "job_id": job_id,
+                    "revision": revision_count,
+                    "clarity_score": getattr(review, "clarity_score", None),
+                    "best_clarity": best["clarity"],
+                },
+                job_id=job_id,
+            )
+            # Always revise from the best known code — not a worse intermediate rewrite.
+            code = revise_scene_code(
+                client,
+                code=best["code"],
+                scene=scene,
+                revision_instructions=rev_instructions,
+                target_duration_seconds=target_duration,
+                surgical=True,
+                language=language,
+            )
+            store.save_code(job_id, scene.id, code, revision=revision_count)
+
+            if not skip_render:
+                prev_video, prev_frame, prev_source = (
+                    video_path,
+                    frame_path,
+                    frame_source,
+                )
+                video_path, frame_path, render_log = render_scene(
+                    code,
+                    work_dir=work_dir / "render" / scene.id,
+                    resolution=resolution,
+                    scene_id=f"{scene.id}_r{revision_count}",
+                )
+                if frame_path:
+                    frame_source = "manim_preview"
+                elif video_path is None:
+                    # Render broke after a visual revise — try one render-focused fix
+                    # if budget remains, else keep the last playable clip.
+                    preview_note = render_log
+                    if revision_count < settings.max_scene_revisions:
+                        revision_count += 1
+                        code = revise_scene_code(
+                            client,
+                            code=code,
+                            scene=scene,
+                            revision_instructions=(
+                                "Manim render failed after a clarity fix. "
+                                f"Error:\n{(render_log or '')[-500:]}\n"
+                                "Fix so it renders; keep layout sparse and non-overlapping."
+                            ),
+                            target_duration_seconds=target_duration,
+                            surgical=False,
+                            render_error=(render_log or "")[-500:],
+                            language=language,
+                        )
+                        store.save_code(
+                            job_id, scene.id, code, revision=revision_count
+                        )
+                        video_path, frame_path, render_log = render_scene(
+                            code,
+                            work_dir=work_dir / "render" / scene.id,
+                            resolution=resolution,
+                            scene_id=f"{scene.id}_r{revision_count}",
+                        )
+                        if frame_path:
+                            frame_source = "manim_preview"
+                        preview_note = None if video_path else render_log
+                    if video_path is None and prev_video:
+                        video_path, frame_path, frame_source = (
+                            prev_video,
+                            prev_frame,
+                            prev_source,
+                        )
+
+            review = _run_review(revision_count)
+            new_clarity = _review_clarity(review)
+            if new_clarity > best["clarity"] + 0.02:
+                best = {
+                    "code": code,
+                    "video_path": video_path,
+                    "frame_path": frame_path,
+                    "frame_source": frame_source,
+                    "review": review,
+                    "clarity": new_clarity,
+                    "preview_note": preview_note,
+                    "revision": revision_count,
+                }
+                stagnant = 0
+            else:
+                stagnant += 1
+                # Restore best artifacts so the next attempt (or ship) uses them.
+                code = best["code"]
+                video_path = best["video_path"]
+                frame_path = best["frame_path"]
+                frame_source = best["frame_source"]
+                preview_note = best["preview_note"]
+                review = best["review"]
+                _emit(
+                    on_event,
+                    PipelineEventType.status,
+                    f"Kept best {scene.id} at clarity {best['clarity']:.0%} "
+                    f"(r{best['revision']}; attempt {revision_count} did not improve)",
+                    data={
+                        "scene_id": scene.id,
+                        "job_id": job_id,
+                        "best_clarity": best["clarity"],
+                        "attempt_clarity": new_clarity,
+                        "revision": revision_count,
+                    },
+                    job_id=job_id,
+                )
+                if stagnant > max_stagnant:
+                    break
+
+        # Ship the best revision we saw (may be r0).
+        code = best["code"]
+        video_path = best["video_path"]
+        frame_path = best["frame_path"]
+        frame_source = best["frame_source"]
+        preview_note = best["preview_note"]
+        review = best["review"]
+        store.save_code(job_id, scene.id, code, revision=best["revision"])
 
     approved = bool(getattr(review, "approved", False))
     issues = list(getattr(review, "issues", None) or [])
@@ -1335,7 +1370,10 @@ def regenerate_scene(
     *,
     on_event: Optional[EventCallback] = None,
 ) -> dict[str, Any]:
-    """Regenerate a single scene from scratch (not a comment retouch)."""
+    """Regenerate a single scene from scratch (not a comment retouch).
+
+    Skips VLM review and clarity auto-revise — the human is the reviewer.
+    """
     request = request or RegenerateSceneRequest()
     settings = get_settings()
     client = OpenRouterClient(settings=settings)
@@ -1399,6 +1437,7 @@ def regenerate_scene(
         on_event=on_event,
         creative_direction=request.direction,
         tts_voice=_job_tts_voice(job_id),
+        skip_vlm_review=True,
     )
 
     # Mux + refresh final if we have video

@@ -55,6 +55,14 @@ const nextConfig: NextConfig = {
           source: "/api/me",
           destination: "http://127.0.0.1:8000/api/me",
         },
+        {
+          source: "/api/documents",
+          destination: "http://127.0.0.1:8000/api/documents",
+        },
+        {
+          source: "/api/documents/:path*",
+          destination: "http://127.0.0.1:8000/api/documents/:path*",
+        },
       ];
     }
     return [];

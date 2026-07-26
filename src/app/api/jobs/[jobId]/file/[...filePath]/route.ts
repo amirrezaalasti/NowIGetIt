@@ -55,9 +55,16 @@ function contentTypeFor(filePath: string): string {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".html": "text/html; charset=utf-8",
+    ".htm": "text/html; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
     ".json": "application/json",
     ".py": "text/x-python",
     ".txt": "text/plain",
+    ".pdf": "application/pdf",
   };
   return map[ext] || "application/octet-stream";
 }

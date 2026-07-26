@@ -52,6 +52,8 @@ class Settings:
     default_llm_estimate_tokens: int
     render_worker_url: str
     render_worker_secret: str
+    docling_worker_url: str
+    docling_worker_secret: str
 
 
 def get_settings() -> Settings:
@@ -98,4 +100,6 @@ def get_settings() -> Settings:
         ),
         render_worker_url=(os.getenv("RENDER_WORKER_URL") or "").strip().rstrip("/"),
         render_worker_secret=(os.getenv("RENDER_WORKER_SECRET") or "").strip(),
+        docling_worker_url=(os.getenv("DOCLING_WORKER_URL") or "").strip().rstrip("/"),
+        docling_worker_secret=(os.getenv("DOCLING_WORKER_SECRET") or "").strip(),
     )

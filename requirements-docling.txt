@@ -1,0 +1,5 @@
+# Docling conversion worker / local document ingest (Python 3.12).
+# Heavy ML deps — install in Railway Docling service or local venv, not on Vercel.
+-r requirements.txt
+docling>=2.15.0
+beautifulsoup4>=4.12.0

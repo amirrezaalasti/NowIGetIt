@@ -203,6 +203,15 @@ export function Generator() {
   const didInitialRestoreRef = useRef(false);
   const signedIn = authStatus === "authenticated";
   const urlJobId = searchParams.get("job");
+  const urlPrompt = searchParams.get("prompt");
+
+  useEffect(() => {
+    if (urlPrompt && !prompt) {
+      setPrompt(urlPrompt);
+    }
+    // Seed once from ?prompt= (e.g. Understand → Create handoff)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlPrompt]);
 
   useEffect(() => {
     eventsLenRef.current = events.length;

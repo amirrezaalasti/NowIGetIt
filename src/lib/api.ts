@@ -622,3 +622,234 @@ export async function streamRegenerateScene(
   }
   await readSseStream(res, onEvent);
 }
+
+export type DocumentAskAction =
+  | "explain"
+  | "explain_figure"
+  | "comment"
+  | "simplify"
+  | "translate"
+  | "quiz"
+  | "deepen"
+  | "relate"
+  | "critique"
+  | "summarize_slide"
+  | "extract_formula"
+  | "key_takeaways"
+  | "misconceptions"
+  | "turn_into_video_prompt"
+  | "freeform";
+
+export type DocumentBlock = {
+  id: string;
+  slide_id: string;
+  type: string;
+  text: string;
+  html_snippet?: string;
+  image_path?: string | null;
+  image_url?: string | null;
+};
+
+export type DocumentSlide = {
+  id: string;
+  index: number;
+  title: string;
+  html?: string;
+  html_url?: string | null;
+  plain_text?: string;
+  block_ids: string[];
+};
+
+export type DocumentManifest = {
+  doc_id: string;
+  title: string;
+  source_filename: string;
+  source_ext: string;
+  status: string;
+  slide_count: number;
+  slides: DocumentSlide[];
+  blocks: Record<string, DocumentBlock>;
+  markdown_url?: string | null;
+  created_at?: string;
+};
+
+export type DocumentListItem = {
+  doc_id: string;
+  title?: string | null;
+  source_filename?: string | null;
+  created_at?: string | null;
+  status?: string | null;
+  slide_count?: number;
+  kind?: string;
+};
+
+export type DocumentAnnotation = {
+  id: string;
+  doc_id: string;
+  slide_id: string;
+  block_id?: string | null;
+  action: string;
+  message: string;
+  reply: string;
+  author: string;
+  created_at: string;
+  pinned?: boolean;
+};
+
+export type DocumentDetail = {
+  doc_id: string;
+  manifest: DocumentManifest;
+  annotations: DocumentAnnotation[];
+  urls?: Record<string, string>;
+};
+
+export type DocumentAskResult = {
+  doc_id: string;
+  slide_id: string;
+  block_id?: string | null;
+  action: DocumentAskAction;
+  reply: string;
+  comment_id?: string | null;
+  video_prompt?: string | null;
+};
+
+export async function listDocuments(limit = 50): Promise<DocumentListItem[]> {
+  const res = await fetch(`${apiBase()}/api/documents?limit=${limit}`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to list documents");
+  const data = (await res.json()) as { documents: DocumentListItem[] };
+  return data.documents || [];
+}
+
+export async function getDocument(docId: string): Promise<DocumentDetail> {
+  const res = await fetch(`${apiBase()}/api/documents/${docId}`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to load document");
+  return res.json();
+}
+
+export async function deleteDocument(docId: string): Promise<void> {
+  const res = await fetch(`${apiBase()}/api/documents/${docId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Delete failed (${res.status})`);
+  }
+}
+
+export async function uploadDocument(file: File): Promise<{
+  doc_id: string;
+  title: string;
+  slide_count: number;
+  status: string;
+  manifest: DocumentManifest;
+}> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${apiBase()}/api/documents/upload`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: form,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Upload failed (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Progressive upload: emits status / slide_ready / complete as pages convert. */
+export async function uploadDocumentStream(
+  file: File,
+  onEvent: (event: PipelineEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${apiBase()}/api/documents/upload/stream`, {
+    method: "POST",
+    headers: await authHeaders({ Accept: "text/event-stream" }),
+    body: form,
+    signal,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Upload failed (${res.status})`);
+  }
+  await readSseStream(res, onEvent);
+}
+
+export async function askDocument(
+  docId: string,
+  body: {
+    action: DocumentAskAction;
+    slide_id: string;
+    block_id?: string | null;
+    message?: string;
+    language?: string;
+    save_as_comment?: boolean;
+  },
+): Promise<DocumentAskResult> {
+  const res = await fetch(`${apiBase()}/api/documents/${docId}/ask`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Ask failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function saveDocumentComment(
+  docId: string,
+  body: {
+    slide_id: string;
+    block_id?: string | null;
+    action?: string;
+    message?: string;
+    reply: string;
+    author?: string;
+  },
+): Promise<DocumentAnnotation> {
+  const res = await fetch(`${apiBase()}/api/documents/${docId}/comments`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Save comment failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function deleteDocumentComment(
+  docId: string,
+  commentId: string,
+): Promise<void> {
+  const res = await fetch(
+    `${apiBase()}/api/documents/${docId}/comments/${commentId}`,
+    {
+      method: "DELETE",
+      headers: await authHeaders(),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Delete comment failed (${res.status})`);
+  }
+}
