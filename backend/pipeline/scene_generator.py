@@ -29,12 +29,13 @@ Treat these as the real APIs you are calling:
 
   Text / MarkupText / Paragraph
   - Born centered at ORIGIN (auto-recentered after create). No host width-cap,
-    soft-wrap, or scale_to_fit_width — you own sizing.
-  - Default font is DejaVu Sans; ligatures disabled. Do not set exotic fonts.
+    soft-wrap, font-size upscaling, or scale_to_fit_width — you own sizing.
+  - Default font is DejaVu Sans. Do not set exotic fonts.
   - Do NOT use width=/height= on Text, stretch_to_fit_*, scale_to_fit_width,
     per-letter Text pieces, NBSP padding, or `_ManimText` (bypasses are rewritten).
   - Keep formulas COMPLETE. If a line is long: smaller font_size or an explicit
     two-line Text("line one\\nline two") — never truncate words.
+  - Prefer FadeIn for on-screen text (Write looks cut off mid-animation).
 
   to_edge(UP) / to_edge(DOWN)
   - After the edge move, X is forced to 0 (horizontally centered). No frame clamp

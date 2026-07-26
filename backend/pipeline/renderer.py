@@ -13,7 +13,11 @@ from typing import Optional
 
 import httpx
 
-from backend.code_utils import clean_manim_code, extract_scene_name
+from backend.code_utils import (
+    assert_safe_text_shim,
+    clean_manim_code,
+    extract_scene_name,
+)
 from backend.config import get_settings
 
 
@@ -90,8 +94,9 @@ def _render_scene_remote(
     worker_url: str,
     worker_secret: str,
 ) -> tuple[Optional[str], Optional[str], str]:
-    # Ensure Text kerning shim + other normalizations ship with the payload.
+    # Ensure Text safety shim + other normalizations ship with the payload.
     code = clean_manim_code(code)
+    assert_safe_text_shim(code)
     headers = {"Content-Type": "application/json"}
     if worker_secret:
         headers["Authorization"] = f"Bearer {worker_secret}"
@@ -152,6 +157,7 @@ def _render_scene_local(
     scene_id: str,
 ) -> tuple[Optional[str], Optional[str], str]:
     code = clean_manim_code(code)
+    assert_safe_text_shim(code)
     scene_dir = Path(work_dir).resolve() / scene_id
     scene_dir.mkdir(parents=True, exist_ok=True)
     scene_file = scene_dir / "scene.py"

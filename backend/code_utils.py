@@ -5,36 +5,57 @@ from __future__ import annotations
 import ast
 import re
 
-# Pango lays out Text() at the given font_size in pixels; small sizes get
-# uneven letter advances (broken kerning). Render at a safe size, then scale.
-# See: https://github.com/ManimCommunity/manim/issues/2844
-#
-# Do NOT pad with NBSP/spaces and hide trailing glyphs: on many hosts those
-# pads add zero width (no anti-clip benefit) and when submobject counts differ
-# the hide step erases real letters ("Network" → "Networ").
+# =============================================================================
+# TEXT SAFETY (HARD RULE)
+# =============================================================================
+# NEVER render Text at a larger font_size and scale down. On Linux/Pango that
+# zeroes trailing glyph widths ("dimension" → "dime…"). Job: b9e3b6764bd4.
+# NEVER pad with NBSP / hide glyphs ("Network" → "Networ").
+# NEVER auto scale_to_fit_width / soft-wrap host-side in a way that chops words.
+# =============================================================================
+
 _TEXT_KERNING_MARKER = "# _NOWIGETIT_TEXT_KERNING_SHIM"
 _TEXT_KERNING_END_MARKER = "# _NOWIGETIT_TEXT_KERNING_END"
 # Survives older Railway workers that strip/re-inject only the kerning shim.
-_TEXT_LAYOUT_MARKER = "# _NOWIGETIT_TEXT_LAYOUT_FIX_V4"
-_TEXT_LAYOUT_END_MARKER = "# _NOWIGETIT_TEXT_LAYOUT_FIX_V4_END"
-# Strip older layout-fix generations (width caps / soft-wrap / clamp).
+_TEXT_LAYOUT_MARKER = "# _NOWIGETIT_TEXT_LAYOUT_FIX_V6"
+_TEXT_LAYOUT_END_MARKER = "# _NOWIGETIT_TEXT_LAYOUT_FIX_V6_END"
 _TEXT_LAYOUT_LEGACY_MARKERS = (
     ("# _NOWIGETIT_TEXT_LAYOUT_FIX_V2", "# _NOWIGETIT_TEXT_LAYOUT_FIX_V2_END"),
     ("# _NOWIGETIT_TEXT_LAYOUT_FIX_V3", "# _NOWIGETIT_TEXT_LAYOUT_FIX_V3_END"),
+    ("# _NOWIGETIT_TEXT_LAYOUT_FIX_V4", "# _NOWIGETIT_TEXT_LAYOUT_FIX_V4_END"),
+    ("# _NOWIGETIT_TEXT_LAYOUT_FIX_V5", "# _NOWIGETIT_TEXT_LAYOUT_FIX_V5_END"),
 )
-_TEXT_KERNING_MIN_SIZE = 48.0
-# Installed on the Railway image (fonts-dejavu-core); avoids Pango fallback drift.
 _TEXT_DEFAULT_FONT = "DejaVu Sans"
+
+# Patterns that must NEVER appear in cleaned scene code (old scale-up hack).
+_FORBIDDEN_TEXT_SHIM_PATTERNS: tuple[tuple[str, str], ...] = (
+    (
+        r"_TEXT_KERNING_MIN\s*=",
+        "scale-up kerning constant _TEXT_KERNING_MIN",
+    ),
+    (
+        r"internal\s*=\s*max\s*\(\s*size\s*,",
+        "font_size scale-up via max(size, …)",
+    ),
+    (
+        r"max\s*\(\s*size\s*,\s*_TEXT_KERNING_MIN",
+        "font_size scale-up via max(size, _TEXT_KERNING_MIN)",
+    ),
+    (
+        r"mob\.scale\s*\(\s*size\s*/\s*internal",
+        "scale(size/internal) after larger font render",
+    ),
+)
+
 _TEXT_KERNING_SHIM = f"""{_TEXT_KERNING_MARKER}
+# FORBIDDEN: render at larger font_size then scale down (truncates glyphs on Linux).
 _ManimText = Text
 _ManimMarkupText = MarkupText
 _ManimParagraph = Paragraph
 _Manim_to_edge = Mobject.to_edge
-_TEXT_KERNING_MIN = {_TEXT_KERNING_MIN_SIZE}
 _TEXT_DEFAULT_FONT = {_TEXT_DEFAULT_FONT!r}
 
 def _recenter_text_origin(mob):
-    # Linux/Pango can emit Text SVGs whose bbox center is far from ORIGIN.
     try:
         c = mob.get_center()
         if abs(float(c[0])) > 1e-6 or abs(float(c[1])) > 1e-6:
@@ -44,49 +65,44 @@ def _recenter_text_origin(mob):
     return mob
 
 def _prepare_text_kwargs(kwargs):
-    # width/height stretch the SVG and ruin letter spacing / clip glyphs
     kwargs.pop("width", None)
     kwargs.pop("height", None)
     kwargs.setdefault("font", _TEXT_DEFAULT_FONT)
-    kwargs.setdefault("disable_ligatures", True)
     return kwargs
 
-def _kerning_safe_text(factory, text, args, kwargs):
-    kwargs = _prepare_text_kwargs(dict(kwargs))
-    font_size = kwargs.get("font_size", 48)
+def _assert_text_glyphs_intact(mob, text):
+    # Tripwire: trailing letters must keep positive width (catches scale-up regressions).
+    if not isinstance(text, str):
+        return mob
+    letters = sum(1 for ch in text if not ch.isspace())
+    if letters <= 0:
+        return mob
     try:
-        size = float(font_size)
-    except (TypeError, ValueError):
-        return _recenter_text_origin(factory(text, *args, **kwargs))
-    internal = max(size, _TEXT_KERNING_MIN)
-    kwargs["font_size"] = internal
-    mob = factory(text, *args, **kwargs)
-    if internal != size:
-        mob.scale(size / internal)
-    return _recenter_text_origin(mob)
+        positive = sum(1 for m in mob if float(getattr(m, "width", 0.0) or 0.0) > 1e-4)
+    except Exception:
+        return mob
+    if positive < max(1, letters - 2):
+        raise RuntimeError(
+            "NowIGetIt text safety: Text glyphs missing/zero-width "
+            f"(visible={{positive}}, letters={{letters}}, text={{text!r}}). "
+            "Do not render Text at a larger font_size and scale down."
+        )
+    return mob
 
 def Text(text, *args, **kwargs):
-    return _kerning_safe_text(_ManimText, text, args, kwargs)
+    mob = _ManimText(text, *args, **_prepare_text_kwargs(dict(kwargs)))
+    return _assert_text_glyphs_intact(_recenter_text_origin(mob), text)
 
 def MarkupText(text, *args, **kwargs):
-    return _kerning_safe_text(_ManimMarkupText, text, args, kwargs)
+    mob = _ManimMarkupText(text, *args, **_prepare_text_kwargs(dict(kwargs)))
+    return _assert_text_glyphs_intact(_recenter_text_origin(mob), text)
 
 def Paragraph(*text, **kwargs):
-    kwargs = _prepare_text_kwargs(dict(kwargs))
-    font_size = kwargs.get("font_size", 48)
-    try:
-        size = float(font_size)
-    except (TypeError, ValueError):
-        return _recenter_text_origin(_ManimParagraph(*text, **kwargs))
-    internal = max(size, _TEXT_KERNING_MIN)
-    kwargs["font_size"] = internal
-    mob = _ManimParagraph(*text, **kwargs)
-    if internal != size:
-        mob.scale(size / internal)
-    return _recenter_text_origin(mob)
+    mob = _ManimParagraph(*text, **_prepare_text_kwargs(dict(kwargs)))
+    joined = " ".join(str(t) for t in text)
+    return _assert_text_glyphs_intact(_recenter_text_origin(mob), joined)
 
 def _safe_to_edge(self, edge=LEFT, buff=DEFAULT_MOBJECT_TO_EDGE_BUFFER, *args, **kwargs):
-    # Center titles/captions horizontally; do NOT shrink or clamp width.
     result = _Manim_to_edge(self, edge, buff, *args, **kwargs)
     try:
         e = np.array(edge, dtype=float)
@@ -100,8 +116,10 @@ Mobject.to_edge = _safe_to_edge
 {_TEXT_KERNING_END_MARKER}
 """
 
-# Re-applied after an outdated worker re-injects an old kerning-only shim.
+# Runs AFTER any stale worker re-injects an old scale-up kerning shim.
+# Always calls raw _ManimText so a stale wrapper cannot win.
 _TEXT_LAYOUT_FIX = f"""{_TEXT_LAYOUT_MARKER}
+# FORBIDDEN: font_size upscale + scale(); this block bypasses stale wrappers.
 def _nig_recenter(mob):
     try:
         c = mob.get_center()
@@ -111,26 +129,57 @@ def _nig_recenter(mob):
         pass
     return mob
 
-def _nig_wrap_text(factory):
-    def _wrapped(text, *args, **kwargs):
-        kwargs = dict(kwargs)
-        kwargs.pop("width", None)
-        kwargs.pop("height", None)
-        kwargs.setdefault("font", {_TEXT_DEFAULT_FONT!r})
-        kwargs.setdefault("disable_ligatures", True)
-        return _nig_recenter(factory(text, *args, **kwargs))
-    return _wrapped
+def _nig_assert_glyphs(mob, text):
+    if not isinstance(text, str):
+        return mob
+    letters = sum(1 for ch in text if not ch.isspace())
+    if letters <= 0:
+        return mob
+    try:
+        positive = sum(1 for m in mob if float(getattr(m, "width", 0.0) or 0.0) > 1e-4)
+    except Exception:
+        return mob
+    if positive < max(1, letters - 2):
+        raise RuntimeError(
+            "NowIGetIt text safety: Text glyphs missing/zero-width "
+            f"(visible={{positive}}, letters={{letters}}, text={{text!r}}). "
+            "Do not render Text at a larger font_size and scale down."
+        )
+    return mob
 
-Text = _nig_wrap_text(Text)
-MarkupText = _nig_wrap_text(MarkupText)
-_NIG_Paragraph = Paragraph
+def _nig_text_factory():
+    return globals().get("_ManimText") or Text
+
+def _nig_markup_factory():
+    return globals().get("_ManimMarkupText") or MarkupText
+
+def _nig_paragraph_factory():
+    return globals().get("_ManimParagraph") or Paragraph
+
+def Text(text, *args, **kwargs):
+    kwargs = dict(kwargs)
+    kwargs.pop("width", None)
+    kwargs.pop("height", None)
+    kwargs.setdefault("font", {_TEXT_DEFAULT_FONT!r})
+    # Pass font_size through unchanged — never bump then scale.
+    mob = _nig_text_factory()(text, *args, **kwargs)
+    return _nig_assert_glyphs(_nig_recenter(mob), text)
+
+def MarkupText(text, *args, **kwargs):
+    kwargs = dict(kwargs)
+    kwargs.pop("width", None)
+    kwargs.pop("height", None)
+    kwargs.setdefault("font", {_TEXT_DEFAULT_FONT!r})
+    mob = _nig_markup_factory()(text, *args, **kwargs)
+    return _nig_assert_glyphs(_nig_recenter(mob), text)
+
 def Paragraph(*text, **kwargs):
     kwargs = dict(kwargs)
     kwargs.pop("width", None)
     kwargs.pop("height", None)
     kwargs.setdefault("font", {_TEXT_DEFAULT_FONT!r})
-    kwargs.setdefault("disable_ligatures", True)
-    return _nig_recenter(_NIG_Paragraph(*text, **kwargs))
+    mob = _nig_paragraph_factory()(*text, **kwargs)
+    return _nig_assert_glyphs(_nig_recenter(mob), " ".join(str(t) for t in text))
 
 _NIG_to_edge = Mobject.to_edge
 def _nig_safe_to_edge(self, edge=LEFT, buff=DEFAULT_MOBJECT_TO_EDGE_BUFFER, *args, **kwargs):
@@ -145,6 +194,46 @@ def _nig_safe_to_edge(self, edge=LEFT, buff=DEFAULT_MOBJECT_TO_EDGE_BUFFER, *arg
 Mobject.to_edge = _nig_safe_to_edge
 {_TEXT_LAYOUT_END_MARKER}
 """
+
+
+class UnsafeTextShimError(RuntimeError):
+    """Raised when cleaned Manim code still contains the glyph-truncating Text hack."""
+
+
+def assert_safe_text_shim(code: str, *, allow_legacy_prefix: bool = True) -> None:
+    """Fail hard unless the durable no-scale Text bypass is present and active.
+
+    Outdated Railway workers may re-inject a legacy scale-up kerning block *before*
+    the durable layout fix. That is allowed only when V6 remains after it and the
+    V6 region itself contains no scale-up logic (V6 calls raw ``_ManimText``).
+    """
+    if _TEXT_LAYOUT_MARKER not in code or _TEXT_LAYOUT_END_MARKER not in code:
+        raise UnsafeTextShimError(
+            "Refusing to render: missing durable text layout fix "
+            f"({_TEXT_LAYOUT_MARKER})."
+        )
+    v6_start = code.find(_TEXT_LAYOUT_MARKER)
+    v6_region = code[v6_start:]
+    for pattern, label in _FORBIDDEN_TEXT_SHIM_PATTERNS:
+        if re.search(pattern, v6_region):
+            raise UnsafeTextShimError(
+                f"Refusing to render: forbidden Text shim in durable fix ({label}). "
+                "Rendering Text larger then scaling down truncates glyphs on Linux."
+            )
+    if not allow_legacy_prefix:
+        for pattern, label in _FORBIDDEN_TEXT_SHIM_PATTERNS:
+            if re.search(pattern, code):
+                raise UnsafeTextShimError(
+                    f"Refusing to render: forbidden Text shim ({label}). "
+                    "Rendering Text larger then scaling down truncates glyphs on Linux."
+                )
+    # Last Text() definition must live inside the durable fix.
+    defs = list(re.finditer(r"^def Text\s*\(", code, flags=re.M))
+    if not defs or defs[-1].start() < v6_start:
+        raise UnsafeTextShimError(
+            "Refusing to render: final Text() definition is not the durable "
+            "no-scale layout fix (stale scale-up wrapper would win)."
+        )
 
 
 def validate_manim_code(code: str) -> tuple[bool, str]:
@@ -163,6 +252,10 @@ def validate_manim_code(code: str) -> tuple[bool, str]:
         ast.parse(code)
     except SyntaxError as exc:
         return False, f"SyntaxError: {exc.msg} (line {exc.lineno})"
+    try:
+        assert_safe_text_shim(code)
+    except UnsafeTextShimError as exc:
+        return False, str(exc)
     return True, ""
 
 
@@ -177,7 +270,6 @@ def _strip_marked_block(code: str, start_marker: str, end_marker: str) -> str:
         if end < len(code) and code[end] == "\n":
             end += 1
         return code[:start] + code[end:]
-    # Legacy blocks had no end marker — cut until the next top-level class.
     rest = code[start:]
     m = re.search(r"^class\s", rest, flags=re.M)
     if m:
@@ -195,11 +287,11 @@ def _strip_text_kerning_shim(code: str) -> str:
 
 
 def _inject_text_kerning_shim(code: str) -> str:
-    """Shadow Text/MarkupText/Paragraph with kerning-safe wrappers.
+    """Inject safe Text wrappers + durable layout bypass.
 
-    Always refresh an existing shim so older jobs pick up clip/kerning fixes.
-    Also inject a layout fix *after* the kerning shim so outdated Railway
-    workers that only replace the kerning block still keep title centering.
+    The layout fix is intentionally AFTER the kerning block so outdated Railway
+    workers that only replace the kerning markers still leave V6 intact, and V6
+    calls raw `_ManimText` so a stale scale-up wrapper cannot win.
     """
     code = _strip_text_kerning_shim(code)
     shim = _TEXT_KERNING_SHIM.strip() + "\n" + _TEXT_LAYOUT_FIX.strip() + "\n"
@@ -212,7 +304,6 @@ def _inject_text_kerning_shim(code: str) -> str:
 
 def _rewrite_text_bypass(code: str) -> str:
     """Force scene code to use wrapped Text, not raw _ManimText bypasses."""
-    # Rewrite only scene body after the last injected fix block.
     end = code.find(_TEXT_LAYOUT_END_MARKER)
     if end < 0:
         end = code.find(_TEXT_KERNING_END_MARKER)
@@ -223,6 +314,7 @@ def _rewrite_text_bypass(code: str) -> str:
         return code
     split_at = end + len(end_marker)
     head, tail = code[:split_at], code[split_at:]
+    # Scene body must use Text(); keep _ManimText only inside the shim.
     tail = re.sub(r"\b_ManimText\s*\(", "Text(", tail)
     tail = re.sub(r"\b_ManimMarkupText\s*\(", "MarkupText(", tail)
     tail = re.sub(r"\b_ManimParagraph\s*\(", "Paragraph(", tail)
@@ -238,48 +330,38 @@ def clean_manim_code(code: str) -> str:
         if len(parts) >= 2:
             code = parts[1].strip()
 
-    # Prefer Community Edition import
     code = code.replace("from manimlib import *", "from manim import *")
     code = code.replace("from manimlib import", "from manim import")
 
-    # ManimGL → Community API shims
     code = code.replace("ShowCreation", "Create")
     code = re.sub(r"\bAlwaysRedraw\b", "always_redraw", code)
     code = re.sub(r"\bTOP_RIGHT\b", "UR", code)
     code = re.sub(r"\bTOP_LEFT\b", "UL", code)
     code = re.sub(r"\bBOTTOM_RIGHT\b", "DR", code)
     code = re.sub(r"\bBOTTOM_LEFT\b", "DL", code)
-    # Broken 3D HUD helper on plain / MovingCamera scenes
     code = re.sub(
         r"self\.add_fixed_in_frame_mobjects\(([^)]+)\)",
         r"self.add(\1)",
         code,
     )
-    # Prefer plain Scene — MovingCameraScene often breaks generated code
     code = re.sub(
         r"class\s+(\w+)\s*\(\s*MovingCameraScene\s*\)",
         r"class \1(Scene)",
         code,
     )
     code = re.sub(r"\.get_graph\(", ".plot(", code)
-    # Axes(width=..., height=...) → x_length / y_length
     code = re.sub(r"(\bAxes\s*\([^)]*?)\bwidth\s*=", r"\1x_length=", code)
     code = re.sub(r"(\bAxes\s*\([^)]*?)\bheight\s*=", r"\1y_length=", code)
-    # NumberPlane width/height similarly
     code = re.sub(r"(\bNumberPlane\s*\([^)]*?)\bwidth\s*=", r"\1x_length=", code)
     code = re.sub(r"(\bNumberPlane\s*\([^)]*?)\bheight\s*=", r"\1y_length=", code)
-    # Convert MathTex and Tex to Text to prevent dvisvgm / LaTeX system dependencies
     code = re.sub(r"\bMathTex\s*\(", "Text(", code)
     code = re.sub(r"\bTex\s*\(", "Text(", code)
     code = re.sub(r"\bTexText\s*\(", "Text(", code)
-    # Horizontal/vertical stretch distorts glyphs and often clips the last letter.
     code = re.sub(r"\.stretch_to_fit_width\s*\([^)]*\)", "", code)
     code = re.sub(r"\.stretch_to_fit_height\s*\([^)]*\)", "", code)
-    # Forced width caps from older prompts/models shrink text until words look cut off.
     code = re.sub(r"\.scale_to_fit_width\s*\([^)]*\)", "", code)
-    # Write() on titles looks truncated for ~1s; prefer instant FadeIn.
     code = re.sub(
-        r"\bWrite\(\s*(title|subtitle|caption|heading|label)\s*\)",
+        r"\bWrite\(\s*(title|subtitle|caption|heading|label|summary|formula|note|text)\s*\)",
         r"FadeIn(\1)",
         code,
         flags=re.I,
@@ -304,7 +386,6 @@ def clean_manim_code(code: str) -> str:
     for line in code.split("\n"):
         for invalid, valid in color_replacements.items():
             line = line.replace(invalid, valid)
-        # Drop invalid tip_size kwargs that some models invent
         line = re.sub(r",\s*tip_size\s*=\s*[^,\)]+", "", line)
         line = re.sub(r"tip_size\s*=\s*[^,\)]+\s*,\s*", "", line)
         if "self.play(" in line and ".move_to," in line:
@@ -323,7 +404,10 @@ def clean_manim_code(code: str) -> str:
             code = imp + "\n" + code
     code = _inject_text_kerning_shim(code)
     code = _rewrite_text_bypass(code)
-    return code.strip()
+    code = code.strip()
+    # Our own clean path must never emit the scale-up hack anywhere.
+    assert_safe_text_shim(code, allow_legacy_prefix=False)
+    return code
 
 
 def extract_scene_name(code: str) -> str:
