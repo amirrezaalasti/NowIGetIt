@@ -34,6 +34,7 @@ _load_env_files()
 class Settings:
     openrouter_api_key: str
     openrouter_model: str
+    openrouter_model_manim: str
     openrouter_vlm_model: str
     openrouter_base_url: str
     openrouter_site_url: str
@@ -46,7 +47,6 @@ class Settings:
     max_scene_revisions: int
     enable_auto_vlm_revise: bool
     vlm_clarity_threshold: float
-    scene_parallelism: int
     supabase_url: str
     supabase_service_role_key: str
     default_llm_estimate_tokens: int
@@ -62,9 +62,12 @@ def get_settings() -> Settings:
     vlm = (os.getenv("OPENROUTER_VLM_MODEL") or "").strip()
     if not vlm:
         vlm = "google/gemini-2.5-flash-lite"
+    text_model = os.getenv("OPENROUTER_MODEL", "google/gemini-3.6-flash")
+    manim_model = (os.getenv("OPENROUTER_MODEL_MANIM") or "").strip() or text_model
     return Settings(
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
-        openrouter_model=os.getenv("OPENROUTER_MODEL", "google/gemini-3.6-flash"),
+        openrouter_model=text_model,
+        openrouter_model_manim=manim_model,
         openrouter_vlm_model=vlm,
         openrouter_base_url=os.getenv(
             "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
@@ -88,7 +91,6 @@ def get_settings() -> Settings:
         enable_auto_vlm_revise=os.getenv("ENABLE_AUTO_VLM_REVISE", "true").lower()
         in {"1", "true", "yes"},
         vlm_clarity_threshold=float(os.getenv("VLM_CLARITY_THRESHOLD", "0.55")),
-        scene_parallelism=max(1, int(os.getenv("SCENE_PARALLELISM", "3"))),
         supabase_url=(
             os.getenv("SUPABASE_URL")
             or os.getenv("NEXT_PUBLIC_SUPABASE_URL")

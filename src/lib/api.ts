@@ -285,6 +285,7 @@ export type Audience = "hs" | "undergrad" | "general";
 export async function fetchHealth(): Promise<{
   ok: boolean;
   model?: string;
+  manim_model?: string;
   vlm_model?: string;
   openrouter_configured?: boolean;
   tts_configured?: boolean;
@@ -703,6 +704,11 @@ export type DocumentDetail = {
   urls?: Record<string, string>;
 };
 
+export type DocumentAskTurn = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 export type DocumentAskResult = {
   doc_id: string;
   slide_id: string;
@@ -711,6 +717,7 @@ export type DocumentAskResult = {
   reply: string;
   comment_id?: string | null;
   video_prompt?: string | null;
+  user_message?: string;
 };
 
 export async function listDocuments(limit = 50): Promise<DocumentListItem[]> {
@@ -797,6 +804,8 @@ export async function askDocument(
     message?: string;
     language?: string;
     save_as_comment?: boolean;
+    prior_reply?: string | null;
+    conversation?: DocumentAskTurn[];
   },
 ): Promise<DocumentAskResult> {
   const res = await fetch(`${apiBase()}/api/documents/${docId}/ask`, {

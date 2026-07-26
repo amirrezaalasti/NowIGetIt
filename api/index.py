@@ -161,6 +161,7 @@ def health() -> dict:
     return {
         "ok": True,
         "model": settings.openrouter_model,
+        "manim_model": settings.openrouter_model_manim,
         "vlm_model": settings.openrouter_vlm_model,
         "openrouter_configured": bool(settings.openrouter_api_key),
         "tts_configured": bool(settings.tts_api_key),
@@ -490,7 +491,11 @@ def get_document(doc_id: str, user: CurrentUser) -> dict:
 def delete_document_endpoint(doc_id: str, user: CurrentUser) -> dict:
     """Permanently delete a converted document and its artifacts."""
     try:
-        _require_job_owner(doc_id, user.id)
+        root = store.artifacts_root() / doc_id
+        if root.exists():
+            _require_job_owner(doc_id, user.id)
+        # If local artifacts are already gone, still clear the remote job row
+        # (scoped by user_id inside delete_job RPC).
         doc_store.delete_document(doc_id, user_id=user.id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}") from exc
@@ -498,6 +503,11 @@ def delete_document_endpoint(doc_id: str, user: CurrentUser) -> dict:
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete document: {exc}",
+        ) from exc
     return {"ok": True, "doc_id": doc_id}
 
 

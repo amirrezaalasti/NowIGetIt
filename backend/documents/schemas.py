@@ -98,6 +98,11 @@ class DocumentManifest(BaseModel):
     created_at: str = ""
 
 
+class DocumentAskTurn(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str = Field(..., min_length=1, max_length=20000)
+
+
 class DocumentAskRequest(BaseModel):
     action: DocumentAskAction = DocumentAskAction.explain
     slide_id: str = Field(..., min_length=1, max_length=80)
@@ -106,6 +111,10 @@ class DocumentAskRequest(BaseModel):
     language: str = Field(default="en", max_length=16)
     # Default off — UI offers an explicit "Save as comment" on the reply.
     save_as_comment: bool = False
+    # Prior assistant answer when asking a follow-up about the reply itself.
+    prior_reply: Optional[str] = Field(default=None, max_length=20000)
+    # Optional short thread for multi-turn follow-ups (oldest → newest).
+    conversation: list[DocumentAskTurn] = Field(default_factory=list, max_length=12)
 
 
 class DocumentAskResult(BaseModel):
@@ -116,6 +125,8 @@ class DocumentAskResult(BaseModel):
     reply: str
     comment_id: Optional[str] = None
     video_prompt: Optional[str] = None
+    # Echo so the UI can keep a local thread
+    user_message: str = ""
 
 
 class DocumentCommentRequest(BaseModel):

@@ -73,7 +73,8 @@ cp .env.example .env
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENROUTER_API_KEY` | Yes | OpenRouter API key |
-| `OPENROUTER_MODEL` | No | Text LLM (default in `.env.example`) |
+| `OPENROUTER_MODEL` | No | General text LLM (documents / Understand) |
+| `OPENROUTER_MODEL_MANIM` | No | Manim pipeline LLM (planning, codegen, code QA; falls back to `OPENROUTER_MODEL`) |
 | `OPENROUTER_VLM_MODEL` | No | Vision model for frame review |
 | `TTS_*` | No | OpenRouter TTS (defaults to Gemini 3.1 Flash TTS / voice `Kore`; key falls back to `OPENROUTER_API_KEY`) |
 | `ENABLE_MANIM_RENDER` | No | `true` for local video output |

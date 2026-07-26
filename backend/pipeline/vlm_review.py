@@ -236,6 +236,7 @@ Manim code:
             + ". Review CODE ONLY. Storyboard/plan cards are not failures.",
             temperature=0.15,
             max_tokens=3072,
+            model=client.manim_model,
         )
         return _coerce_review(data)
     except (ValueError, AssertionError) as exc:
@@ -267,4 +268,5 @@ def final_debug_pass(
         user=f"Scene plan JSON:\n{plan_json}\n\nBuilt scenes:\n{scene_summaries}",
         temperature=0.2,
         max_tokens=3072,
+        model=client.manim_model,
     )

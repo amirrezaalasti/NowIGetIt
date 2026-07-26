@@ -243,7 +243,7 @@ export function Generator() {
         }
         setHealth(
           h.openrouter_configured
-            ? `Ready · ${short(h.model) || "llm"} · VLM ${short(h.vlm_model) || "flash-lite"}${manim}${worker}`
+            ? `Ready · ${short(h.manim_model || h.model) || "llm"} · VLM ${short(h.vlm_model) || "flash-lite"}${manim}${worker}`
             : "API up · set OPENROUTER_API_KEY",
         );
       })

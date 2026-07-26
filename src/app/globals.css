@@ -277,3 +277,15 @@ html[data-theme="light"] .brand-logo-light {
 .nig-md th {
   background: var(--surface-inset);
 }
+
+.nig-md .katex {
+  font-size: 1.05em;
+  color: var(--ink);
+}
+
+.nig-md .katex-display {
+  margin: 0.85em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15em 0;
+}

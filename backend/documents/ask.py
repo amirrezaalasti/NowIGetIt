@@ -98,12 +98,31 @@ def ask_on_manifest(
     ):
         action = DocumentAskAction.explain_figure
 
+    is_follow_up = bool(
+        (request.prior_reply and request.prior_reply.strip())
+        or any(t.role == "assistant" for t in request.conversation)
+    )
     system = (
         "You are NowIGetIt's document tutor. The user is studying an interactive "
         "HTML slide deck converted from a PDF/PPT/document. Be accurate, concise, "
-        "and pedagogical. Prefer markdown. If information is insufficient, say so."
+        "and pedagogical. Prefer markdown.\n"
+        "For mathematics, ALWAYS use LaTeX delimiters the UI can render: "
+        "inline as $...$ and display as $$...$$ (never bare Unicode-only equations "
+        "when a formula matters). If information is insufficient, say so."
     )
-    instruction = _ACTION_PROMPTS[action]
+    if is_follow_up:
+        system += (
+            " The user is asking a FOLLOW-UP about your previous answer and/or the "
+            "slide. Answer the new question directly; quote or refine prior points "
+            "only when needed."
+        )
+
+    instruction = (
+        "Answer the user's follow-up question using the prior answer and slide "
+        "context."
+        if is_follow_up and action == DocumentAskAction.freeform
+        else _ACTION_PROMPTS[action]
+    )
     user_bits = [
         f"Document title: {manifest.title}",
         f"Source file: {manifest.source_filename}",
@@ -138,6 +157,21 @@ def ask_on_manifest(
     if block and slide.plain_text:
         user_bits.extend(
             ["", f"Full slide context (truncated):\n{slide.plain_text[:3500]}"]
+        )
+
+    if request.conversation:
+        user_bits.append("")
+        user_bits.append("Conversation so far:")
+        for turn in request.conversation[-10:]:
+            label = "User" if turn.role == "user" else "Assistant"
+            user_bits.append(f"{label}: {turn.content[:6000]}")
+    elif request.prior_reply and request.prior_reply.strip():
+        user_bits.extend(
+            [
+                "",
+                "Previous assistant answer the user is following up on:",
+                request.prior_reply.strip()[:8000],
+            ]
         )
 
     image_path = _resolve_image_path(root, block)
@@ -203,6 +237,7 @@ def ask_on_manifest(
         reply=reply,
         comment_id=comment_id,
         video_prompt=video_prompt,
+        user_message=request.message.strip(),
     )
 
 

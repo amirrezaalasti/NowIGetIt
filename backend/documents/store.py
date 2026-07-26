@@ -179,9 +179,13 @@ def list_documents(*, user_id: Optional[str] = None, limit: int = 50) -> list[di
     docs: list[dict[str, Any]] = []
     for job in jobs:
         job_id = str(job.get("job_id") or "")
+        root = base.artifacts_root() / job_id
+        # Skip remote-only ghosts (deleted locally but row still present).
+        if not root.exists():
+            continue
         if not job_id.startswith("doc_"):
             # Also accept kind=document from meta
-            meta_path = base.artifacts_root() / job_id / "meta.json"
+            meta_path = root / "meta.json"
             kind = None
             if meta_path.exists():
                 try:
@@ -194,7 +198,7 @@ def list_documents(*, user_id: Optional[str] = None, limit: int = 50) -> list[di
         source_filename = None
         slide_count = 0
         status = job.get("status") or ("complete" if job.get("has_result") else "unknown")
-        manifest_path = base.artifacts_root() / job_id / "document.json"
+        manifest_path = root / "document.json"
         if manifest_path.exists():
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -205,7 +209,7 @@ def list_documents(*, user_id: Optional[str] = None, limit: int = 50) -> list[di
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
         else:
-            meta_path = base.artifacts_root() / job_id / "meta.json"
+            meta_path = root / "meta.json"
             if meta_path.exists():
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -215,6 +219,8 @@ def list_documents(*, user_id: Optional[str] = None, limit: int = 50) -> list[di
                     status = meta.get("status") or status
                 except (json.JSONDecodeError, TypeError, ValueError):
                     pass
+            else:
+                continue
         docs.append(
             {
                 "doc_id": job_id,
@@ -237,16 +243,20 @@ def safe_filename(name: str) -> str:
 
 
 def delete_document(doc_id: str, *, user_id: str) -> None:
-    """Delete document artifacts from disk and best-effort Supabase job row."""
+    """Delete document artifacts from disk and the Supabase job row."""
     root = base.artifacts_root() / doc_id
-    if not root.exists():
-        # Still clear remote row if present
-        db.delete_job(job_id=doc_id, user_id=user_id)
-        raise FileNotFoundError(doc_id)
-    base.assert_job_owner(doc_id, user_id)
+    if root.exists():
+        base.assert_job_owner(doc_id, user_id)
+        try:
+            shutil.rmtree(root)
+        except OSError as exc:
+            logger.exception("Failed to remove document dir %s", doc_id)
+            raise RuntimeError(f"Failed to delete document files: {exc}") from exc
+    else:
+        # Local already gone — still clear the remote row (idempotent).
+        logger.info("Document dir missing for %s; clearing remote job row", doc_id)
+
     try:
-        shutil.rmtree(root)
-    except OSError as exc:
-        logger.exception("Failed to remove document dir %s", doc_id)
-        raise RuntimeError(f"Failed to delete document files: {exc}") from exc
-    db.delete_job(job_id=doc_id, user_id=user_id)
+        db.delete_job(job_id=doc_id, user_id=user_id)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Failed to remove job row: {exc}") from exc

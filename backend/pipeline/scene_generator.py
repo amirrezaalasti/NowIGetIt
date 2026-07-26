@@ -110,6 +110,7 @@ def generate_scene_code(
     plan: ScenePlan,
     scene: SceneSection,
     previous_context: str = "",
+    next_context: str = "",
     target_duration_seconds: Optional[float] = None,
     creative_direction: str = "",
     language: str = "en",
@@ -157,6 +158,11 @@ Creative direction:
 Previous scenes context:
 {previous_context or "(first scene)"}
 
+What comes right after this scene (context only — do NOT preview or draw its content,
+just make sure THIS scene's final beat feels like a natural hand-off rather than a
+random stop, matching the tone of the narration's closing line):
+{next_context or "(final scene)"}
+
 Reference Manim patterns (adapt to this scene):
 {template_block}
 
@@ -169,6 +175,12 @@ Composition contract:
 - If crowded, simplify labels — never delete formula terms or strip the motion that
   teaches the idea.
 - Every object on screen must map to the concept (no filler shapes).
+- TIMING IS NON-NEGOTIABLE: the audio narration is already fixed at {duration:.1f}s.
+  Sum every self.play(run_time=...) and self.wait(...) call (excluding the final 0.5s
+  hold) and make sure it lands within ±0.5s of {duration:.1f}s — a mismatch here means
+  the video will freeze or run silent against the voiceover. Distribute the budget
+  roughly evenly across the beats above (~{per_beat:.1f}s each); do not dump the whole
+  budget into one giant self.wait().
 
 Return one complete runnable Manim Community Scene file.
 """
@@ -177,6 +189,7 @@ Return one complete runnable Manim Community Scene file.
         user=user,
         temperature=0.25,
         max_tokens=8192,
+        model=client.manim_model,
     )
     code = clean_manim_code(raw)
     ok, err = validate_manim_code(code)
@@ -251,5 +264,6 @@ Current code (base your edits on this — keep what already works):
         user=user,
         temperature=0.12,
         max_tokens=8192,
+        model=client.manim_model,
     )
     return clean_manim_code(raw)

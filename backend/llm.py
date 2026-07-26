@@ -30,6 +30,7 @@ class OpenRouterClient:
             },
         )
         self.model = self.settings.openrouter_model
+        self.manim_model = self.settings.openrouter_model_manim
         self.vlm_model = self.settings.openrouter_vlm_model
         self.usage_log: list[dict[str, Any]] = []
 
@@ -80,7 +81,12 @@ class OpenRouterClient:
             kwargs["response_format"] = {"type": "json_object"}
 
         response = self.client.chat.completions.create(**kwargs)
-        kind = "vlm" if resolved_model == self.vlm_model else "llm"
+        if resolved_model == self.vlm_model:
+            kind = "vlm"
+        elif resolved_model == self.manim_model:
+            kind = "manim"
+        else:
+            kind = "llm"
         self._track_usage(response, model=resolved_model, kind=kind)
         content = response.choices[0].message.content or ""
         return content.strip()

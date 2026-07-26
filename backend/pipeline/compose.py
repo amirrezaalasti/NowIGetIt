@@ -356,11 +356,100 @@ def mux_scene_audio(
     return str(output_path)
 
 
+def _crossfade_overlap(durations: list[float], *, max_overlap: float = 0.5) -> float:
+    """Pick one overlap duration that's safe for every clip pair in the chain."""
+    if len(durations) < 2:
+        return 0.0
+    shortest = min(durations)
+    # Never eat more than ~35% of the shortest clip, and never go below a hair
+    # (too small a crossfade reads as a glitch rather than a transition).
+    overlap = min(max_overlap, shortest * 0.35)
+    return overlap if overlap >= 0.12 else 0.0
+
+
+def _build_crossfade_filter(
+    durations: list[float], overlap: float
+) -> tuple[str, str, str]:
+    """Chain xfade (video) + acrossfade (audio) across N clips.
+
+    Returns (filter_complex, video_out_label, audio_out_label).
+    """
+    n = len(durations)
+    v_label, a_label = "0:v", "0:a"
+    running = durations[0]
+    parts: list[str] = []
+    for i in range(1, n):
+        ov = min(overlap, max(0.05, running - 0.05), max(0.05, durations[i] - 0.05))
+        offset = max(0.0, running - ov)
+        v_out, a_out = f"v{i}", f"a{i}"
+        parts.append(
+            f"[{v_label}][{i}:v]xfade=transition=fade:duration={ov:.3f}:"
+            f"offset={offset:.3f}[{v_out}]"
+        )
+        parts.append(f"[{a_label}][{i}:a]acrossfade=d={ov:.3f}:c1=tri:c2=tri[{a_out}]")
+        v_label, a_label = v_out, a_out
+        running = running + durations[i] - ov
+    return ";".join(parts), f"[{v_label}]", f"[{a_label}]"
+
+
+def _compose_with_crossfade(
+    clips: list[Path], output_path: Path
+) -> Optional[str]:
+    """Smoothly blend consecutive scenes instead of hard-cutting between them."""
+    if len(clips) < 2 or not shutil.which("ffmpeg"):
+        return None
+    durations = [probe_duration(p) for p in clips]
+    if any(d <= 0 for d in durations):
+        return None
+    overlap = _crossfade_overlap(durations)
+    if overlap <= 0:
+        return None
+
+    filter_complex, v_out, a_out = _build_crossfade_filter(durations, overlap)
+    cmd = ["ffmpeg", "-y"]
+    for clip in clips:
+        cmd += ["-i", str(clip)]
+    cmd += [
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        v_out,
+        "-map",
+        a_out,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=300)
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        return str(output_path)
+    output_path.unlink(missing_ok=True)
+    return None
+
+
 def compose_final_video(
     scene_videos: list[str],
     output_path: Path,
 ) -> Optional[str]:
-    """Concatenate scene videos (with audio) into one final mp4."""
+    """Stitch scene videos (with audio) into one final mp4.
+
+    Prefers short audio+video crossfades between consecutive scenes so the
+    video reads as one continuous piece instead of a slideshow of hard cuts;
+    falls back to a plain concat (hard cut) if crossfading isn't possible.
+    """
     if not scene_videos or not shutil.which("ffmpeg"):
         return None
     existing = [Path(p) for p in scene_videos if p and Path(p).exists()]
@@ -444,6 +533,10 @@ def compose_final_video(
             normalized.append(norm)
         else:
             normalized.append(src)
+
+    crossfaded = _compose_with_crossfade(normalized, output_path)
+    if crossfaded:
+        return crossfaded
 
     list_file.write_text(
         "\n".join(f"file '{p.resolve()}'" for p in normalized) + "\n",

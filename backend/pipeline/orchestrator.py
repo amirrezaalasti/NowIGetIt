@@ -7,7 +7,6 @@ import json
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
@@ -347,6 +346,7 @@ def _process_one_scene(
     index: int,
     total: int,
     previous_context: str,
+    next_context: str = "",
     resolution: str,
     skip_render: bool,
     on_event: Optional[EventCallback],
@@ -427,6 +427,7 @@ def _process_one_scene(
         plan=plan,
         scene=scene,
         previous_context=previous_context,
+        next_context=next_context,
         target_duration_seconds=target_duration,
         creative_direction=creative_direction,
         language=language,
@@ -518,6 +519,70 @@ def _process_one_scene(
             },
             job_id=job_id,
         )
+
+        # --- Resync animation timing against the actual narration length ---
+        # A clean render whose PACING drifts from the audio is exactly what
+        # produces "video freezes / goes silent while narration keeps talking".
+        # Fix this BEFORE spending VLM-review budget on a mistimed clip.
+        mismatch = _duration_mismatch(video_path, target_duration)
+        resync_budget = max(0, settings.max_scene_revisions - revision_count)
+        resync_attempts = 0
+        while mismatch is not None and resync_attempts < min(2, resync_budget):
+            resync_attempts += 1
+            revision_count += 1
+            diff = mismatch - target_duration
+            _emit(
+                on_event,
+                PipelineEventType.scene_revise,
+                f"Resyncing timing for {scene.id}: rendered {mismatch:.1f}s vs "
+                f"narration {target_duration:.1f}s (attempt {resync_attempts})…",
+                data={
+                    "scene_id": scene.id,
+                    "job_id": job_id,
+                    "revision": revision_count,
+                    "rendered_duration": mismatch,
+                    "target_duration": target_duration,
+                },
+                job_id=job_id,
+            )
+            rev_instructions = (
+                f"TIMING MISMATCH (audio/video out of sync): the rendered clip runs "
+                f"{mismatch:.1f}s but the fixed narration audio is {target_duration:.1f}s "
+                f"({abs(diff):.1f}s too {'long' if diff > 0 else 'short'}). "
+                f"{'Shorten' if diff > 0 else 'Lengthen'} the animation so TOTAL "
+                f"self.play(run_time=...) + self.wait(...) time (excluding the final "
+                f"0.5s hold) lands within 0.5s of {target_duration:.1f}s. Spread the "
+                "change proportionally across every beat's run_time/wait — never solve "
+                "this with one giant self.wait() or by deleting a beat. Keep the same "
+                "visuals, layout, and beat order; only retime them."
+            )
+            prev_good = (code, video_path, frame_path, frame_source)
+            code = revise_scene_code(
+                client,
+                code=code,
+                scene=scene,
+                revision_instructions=rev_instructions,
+                target_duration_seconds=target_duration,
+                surgical=True,
+                language=language,
+            )
+            store.save_code(job_id, scene.id, code, revision=revision_count)
+            new_video_path, new_frame_path, render_log = render_scene(
+                code,
+                work_dir=work_dir / "render" / scene.id,
+                resolution=resolution,
+                scene_id=f"{scene.id}_r{revision_count}",
+            )
+            if new_video_path:
+                video_path, frame_path = new_video_path, new_frame_path
+                if frame_path:
+                    frame_source = "manim_preview"
+                preview_note = None
+                mismatch = _duration_mismatch(video_path, target_duration)
+            else:
+                # Retiming broke the render — keep the last playable clip and stop.
+                code, video_path, frame_path, frame_source = prev_good
+                mismatch = None
     else:
         preview_note = "Render skipped by request."
 
@@ -992,13 +1057,72 @@ def _compose_and_finish(
     return result
 
 
-def _plan_previous_context(plan: ScenePlan, index: int) -> str:
-    """Build continuity context from the plan (safe for parallel scene starts)."""
+def _plan_previous_context(
+    plan: ScenePlan,
+    index: int,
+    artifacts: Optional[dict[int, SceneArtifact]] = None,
+) -> str:
+    """Continuity context for codegen.
+
+    Gives a brief plan-level history of every earlier scene, plus — since
+    generation is sequential — the ACTUAL generated code and narration ending
+    of the scene immediately before this one. That's what really rendered
+    (colors, objects, terminology), not just what the plan intended, so this
+    scene can genuinely continue from it instead of guessing.
+    """
     parts: list[str] = []
     for scene in plan.scenes[:index]:
         desc = (scene.visual_description or "")[:180]
         parts.append(f"- {scene.id}: {scene.title} — {desc}")
-    return "\n".join(parts)
+    history = "\n".join(parts)
+
+    prev = artifacts.get(index - 1) if artifacts and index > 0 else None
+    if not prev or not (prev.code or "").strip():
+        return history
+
+    code_tail = prev.code.strip()[-1600:]
+    last_line = (prev.narration or "").strip()[-220:]
+    detail = (
+        "\n\nImmediately previous scene — REAL generated code + narration ending "
+        f"(this is what was actually rendered for {prev.scene_id}, not just the plan; "
+        "match its colors, object styles, and terminology so this scene continues it "
+        "naturally instead of starting from an unrelated state):\n"
+        f'Ended narration on: "...{last_line}"\n'
+        f"```python\n# ...tail of {prev.scene_id}'s code...\n{code_tail}\n```"
+    )
+    return (history + detail) if history else detail.lstrip()
+
+
+def _plan_next_context(plan: ScenePlan, index: int) -> str:
+    """Brief look-ahead at the following scene, for a smoother hand-off beat."""
+    if index + 1 >= len(plan.scenes):
+        return ""
+    nxt = plan.scenes[index + 1]
+    desc = (nxt.visual_description or "")[:160]
+    opener = (nxt.narration or "")[:120]
+    return f"- {nxt.id}: {nxt.title} — {desc}\n  opens with: \"{opener}\""
+
+
+def _duration_mismatch(
+    video_path: Optional[str],
+    target_duration: float,
+    *,
+    abs_tol: float = 1.2,
+    rel_tol: float = 0.12,
+) -> Optional[float]:
+    """Return the actual rendered duration if it drifts too far from the
+    narration's target duration, else None. Drift here is exactly what causes
+    the video to freeze on a stale frame or run silently past the voiceover.
+    """
+    if not video_path or not Path(video_path).exists() or target_duration <= 0:
+        return None
+    actual = probe_duration(Path(video_path))
+    if actual <= 0:
+        return None
+    tolerance = max(abs_tol, target_duration * rel_tol)
+    if abs(actual - target_duration) > tolerance:
+        return actual
+    return None
 
 
 def _load_existing_scene_artifact(
@@ -1091,37 +1215,14 @@ def _run_scenes_loop(
             usage_log=c.drain_usage_log(),
         )
 
-    def _run_one(index: int, scene: SceneSection) -> tuple[int, SceneArtifact]:
-        # Own client per worker — usage_log is not thread-safe.
-        scene_client = OpenRouterClient(settings)
-        try:
-            artifact = _process_one_scene(
-                client=scene_client,
-                job_id=job_id,
-                work_dir=work_dir,
-                plan=plan,
-                scene=scene,
-                index=index,
-                total=total,
-                previous_context=_plan_previous_context(plan, index),
-                resolution=resolution,
-                skip_render=skip_render,
-                on_event=on_event,
-                tts_voice=voice,
-            )
-            return index, artifact
-        finally:
-            _flush_client(scene_client)
-
-    workers = max(1, min(settings.scene_parallelism, len(to_run) or 1))
     if to_run:
         _emit(
             on_event,
             PipelineEventType.status,
-            f"Generating {len(to_run)} scene(s) with parallelism={workers}…",
+            f"Generating {len(to_run)} scene(s) in order — each builds on the "
+            "one before it…",
             data={
                 "job_id": job_id,
-                "scene_parallelism": workers,
                 "pending": [s.id for _, s in to_run],
                 "reused": [plan.scenes[i].id for i in sorted(results)],
                 "tts_voice": voice,
@@ -1129,20 +1230,30 @@ def _run_scenes_loop(
             job_id=job_id,
         )
 
-    if len(to_run) <= 1 or workers == 1:
-        for index, scene in to_run:
-            idx, artifact = _run_one(index, scene)
-            results[idx] = artifact
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [
-                pool.submit(_run_one, index, scene) for index, scene in to_run
-            ]
-            for fut in as_completed(futures):
-                idx, artifact = fut.result()
-                results[idx] = artifact
+    # Strictly sequential: scenes are narratively/visually dependent on one
+    # another, so scene N+1's codegen needs scene N's ACTUAL generated code
+    # and narration (see _plan_previous_context) — running them in parallel
+    # would mean every scene only ever sees the static plan, never what its
+    # predecessor really produced.
+    for index, scene in to_run:
+        artifact = _process_one_scene(
+            client=client,
+            job_id=job_id,
+            work_dir=work_dir,
+            plan=plan,
+            scene=scene,
+            index=index,
+            total=total,
+            previous_context=_plan_previous_context(plan, index, results),
+            next_context=_plan_next_context(plan, index),
+            resolution=resolution,
+            skip_render=skip_render,
+            on_event=on_event,
+            tts_voice=voice,
+        )
+        results[index] = artifact
+        _flush_client(client)
 
-    _flush_client(client)
     artifacts = [results[i] for i in range(total)]
     return _compose_and_finish(
         client=client,
@@ -1178,7 +1289,7 @@ def run_pipeline(
         job_id,
         prompt=request.prompt,
         settings_snapshot={
-            "model": settings.openrouter_model,
+            "model": settings.openrouter_model_manim,
             "vlm_model": settings.openrouter_vlm_model,
             "enable_manim_render": settings.enable_manim_render,
             "max_scene_revisions": settings.max_scene_revisions,
@@ -1432,6 +1543,7 @@ def regenerate_scene(
         index=index,
         total=len(plan.scenes),
         previous_context="\n".join(prev_parts),
+        next_context=_plan_next_context(plan, index),
         resolution=resolution,
         skip_render=request.skip_render,
         on_event=on_event,

@@ -34,6 +34,24 @@ Rules:
   to spoken length (~2.5 words/sec for Latin scripts; ~3–4 syllables/sec for others).
 - Visuals: concrete Manim-friendly elements (shapes, graphs, equations as Text, arrows, labels).
 
+CONTINUITY (critical — scenes are rendered separately, so the SCRIPT is what glues them
+into one video; without it the video feels like disconnected clips):
+- Treat the whole plan as ONE continuous lecture split into scenes, not N unrelated clips.
+  Pick a single through-line / metaphor / running example in concept_summary and reuse it.
+- Every scene's narration (except the very first) must open by briefly linking back to the
+  previous scene's idea before introducing the new one — e.g. "Now that we've seen how X
+  behaves, the natural question is Y…", "That builds up to a subtler idea:", "But this
+  only works when...". Never open a non-first scene with an abrupt, unconnected sentence.
+- Every scene's narration (except the very last) should end on a short forward-leaning
+  beat that sets up the next scene's question, instead of a flat, closed-off statement —
+  e.g. "...but that raises a new problem, which we'll tackle next." Avoid final scenes
+  restating "in conclusion" phrasing more than once across the plan.
+- Do not repeat the exact same transition phrase across multiple scenes; vary the language.
+- Keep numbering/labels/terminology for the same concept identical across scenes (do not
+  rename a variable or component between scenes).
+- Scene durations should ramp sensibly (short cold-open, longer builds, a tight close) —
+  avoid a jarring long scene immediately followed by a very short one.
+
 MOTION + LAYOUT (critical — scenes must animate the idea, not show a still poster):
 - ONE primary visual idea per scene. Never pack a full multi-gate / multi-module
   system (e.g. all LSTM gates, full transformer stack) into a single scene.
@@ -125,5 +143,6 @@ Output language ({lang}): Write ALL learner-facing text in {lang_name}.
         user=user,
         temperature=0.4,
         max_tokens=4096,
+        model=client.manim_model,
     )
     return ScenePlan.model_validate(data)

@@ -23,6 +23,7 @@ import {
   type DocumentAnnotation,
   type DocumentAskAction,
   type DocumentAskResult,
+  type DocumentAskTurn,
   type DocumentDetail,
   type DocumentListItem,
   type DocumentManifest,
@@ -76,6 +77,8 @@ export function Understand() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reply, setReply] = useState<DocumentAskResult | null>(null);
+  const [thread, setThread] = useState<DocumentAskTurn[]>([]);
+  const [followUp, setFollowUp] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [slideHtml, setSlideHtml] = useState<string>("");
   const [expectedPages, setExpectedPages] = useState<number | null>(null);
@@ -111,6 +114,8 @@ export function Understand() {
           setSlideIndex(0);
           setSelection(null);
           setReply(null);
+          setThread([]);
+          setFollowUp("");
         }
         setConverting(data.manifest.status === "converting");
       } catch (err) {
@@ -143,6 +148,8 @@ export function Understand() {
         if (detail?.doc_id === docId) {
           setDetail(null);
           setReply(null);
+          setThread([]);
+          setFollowUp("");
           setSelection(null);
           setSlideHtml("");
           setFocusMode(false);
@@ -342,6 +349,7 @@ export function Understand() {
     setBusy(true);
     setError(null);
     setSavedCommentId(null);
+    setFollowUp("");
     try {
       const result = await askDocument(manifest.doc_id, {
         action,
@@ -351,8 +359,50 @@ export function Understand() {
         language,
         save_as_comment: false,
       });
+      const userText = message.trim() || ACTION_LABEL[action] || action;
       setReply(result);
+      setThread([
+        { role: "user", content: userText },
+        { role: "assistant", content: result.reply },
+      ]);
       setSavedCommentId(result.comment_id || null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runFollowUp() {
+    if (!manifest || !currentSlide || !reply?.reply) return;
+    const q = followUp.trim();
+    if (!q) return;
+    setBusy(true);
+    setError(null);
+    setSavedCommentId(null);
+    try {
+      const conversation = [
+        ...thread,
+        { role: "user" as const, content: q },
+      ].slice(-10);
+      const result = await askDocument(manifest.doc_id, {
+        action: "freeform",
+        slide_id: reply.slide_id || selection?.slideId || currentSlide.id,
+        block_id: reply.block_id || selection?.blockId || null,
+        message: q,
+        language,
+        save_as_comment: false,
+        prior_reply: reply.reply,
+        conversation,
+      });
+      setReply(result);
+      setThread([
+        ...conversation,
+        { role: "assistant", content: result.reply },
+      ]);
+      setFollowUp("");
+      setMessage(q);
+      setAction("freeform");
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -422,6 +472,8 @@ export function Understand() {
         message={message}
         language={language}
         reply={reply}
+        thread={thread}
+        followUp={followUp}
         annotations={annotations}
         showMoreActions={showMoreActions}
         showComments={showComments}
@@ -439,10 +491,15 @@ export function Understand() {
           setSlideIndex(i);
           setSelection(null);
           setSavedCommentId(null);
+          setReply(null);
+          setThread([]);
+          setFollowUp("");
         }}
         onBack={() => {
           setDetail(null);
           setReply(null);
+          setThread([]);
+          setFollowUp("");
           setSelection(null);
           setFocusMode(false);
           setSavedCommentId(null);
@@ -453,6 +510,8 @@ export function Understand() {
         onMessage={setMessage}
         onLanguage={setLanguage}
         onRun={() => void runAsk()}
+        onFollowUp={setFollowUp}
+        onRunFollowUp={() => void runFollowUp()}
         onToggleMore={() => setShowMoreActions((v) => !v)}
         onToggleComments={() => setShowComments((v) => !v)}
         onClearSelection={() => setSelection(null)}
@@ -578,6 +637,8 @@ function DocumentStudio(props: {
   message: string;
   language: string;
   reply: DocumentAskResult | null;
+  thread: DocumentAskTurn[];
+  followUp: string;
   annotations: DocumentAnnotation[];
   showMoreActions: boolean;
   showComments: boolean;
@@ -593,6 +654,8 @@ function DocumentStudio(props: {
   onMessage: (v: string) => void;
   onLanguage: (v: string) => void;
   onRun: () => void;
+  onFollowUp: (v: string) => void;
+  onRunFollowUp: () => void;
   onToggleMore: () => void;
   onToggleComments: () => void;
   onClearSelection: () => void;
@@ -615,6 +678,8 @@ function DocumentStudio(props: {
     message,
     language,
     reply,
+    thread,
+    followUp,
     annotations,
     showMoreActions,
     showComments,
@@ -630,6 +695,8 @@ function DocumentStudio(props: {
     onMessage,
     onLanguage,
     onRun,
+    onFollowUp,
+    onRunFollowUp,
     onToggleMore,
     onToggleComments,
     onClearSelection,
@@ -762,6 +829,8 @@ function DocumentStudio(props: {
             language={language}
             busy={busy}
             reply={reply}
+            thread={thread}
+            followUp={followUp}
             annotations={annotations}
             showMoreActions={showMoreActions}
             showComments={showComments}
@@ -771,6 +840,8 @@ function DocumentStudio(props: {
             onMessage={onMessage}
             onLanguage={onLanguage}
             onRun={onRun}
+            onFollowUp={onFollowUp}
+            onRunFollowUp={onRunFollowUp}
             onToggleMore={onToggleMore}
             onToggleComments={onToggleComments}
             onClearSelection={onClearSelection}
@@ -820,6 +891,8 @@ function AssistantPanel(props: {
   language: string;
   busy: boolean;
   reply: DocumentAskResult | null;
+  thread: DocumentAskTurn[];
+  followUp: string;
   annotations: DocumentAnnotation[];
   showMoreActions: boolean;
   showComments: boolean;
@@ -829,6 +902,8 @@ function AssistantPanel(props: {
   onMessage: (v: string) => void;
   onLanguage: (v: string) => void;
   onRun: () => void;
+  onFollowUp: (v: string) => void;
+  onRunFollowUp: () => void;
   onToggleMore: () => void;
   onToggleComments: () => void;
   onClearSelection: () => void;
@@ -842,6 +917,8 @@ function AssistantPanel(props: {
     language,
     busy,
     reply,
+    thread,
+    followUp,
     annotations,
     showMoreActions,
     showComments,
@@ -851,6 +928,8 @@ function AssistantPanel(props: {
     onMessage,
     onLanguage,
     onRun,
+    onFollowUp,
+    onRunFollowUp,
     onToggleMore,
     onToggleComments,
     onClearSelection,
@@ -963,6 +1042,7 @@ function AssistantPanel(props: {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="text-xs font-medium uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                 Reply · {ACTION_LABEL[reply.action] || reply.action}
+                {thread.length > 2 ? ` · ${Math.floor(thread.length / 2)} turns` : ""}
               </h4>
               <div className="flex flex-wrap items-center gap-1.5">
                 {isReplySaved ? (
@@ -981,6 +1061,28 @@ function AssistantPanel(props: {
                 )}
               </div>
             </div>
+            {thread.length > 2 && (
+              <ol className="space-y-2 border-b border-[var(--line)] pb-3">
+                {thread.slice(0, -1).map((turn, i) => (
+                  <li
+                    key={`${turn.role}-${i}`}
+                    className="text-xs leading-relaxed text-[var(--ink-muted)]"
+                  >
+                    <span className="font-medium text-[var(--ink)]">
+                      {turn.role === "user" ? "You" : "Assistant"}:{" "}
+                    </span>
+                    {turn.role === "assistant" ? (
+                      <MarkdownView
+                        content={turn.content}
+                        className="mt-1 text-[0.85rem] text-[var(--ink-muted)]"
+                      />
+                    ) : (
+                      <span>{turn.content}</span>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
             <MarkdownView content={reply.reply} />
             {reply.video_prompt && (
               <Link
@@ -990,6 +1092,34 @@ function AssistantPanel(props: {
                 Open in Create
               </Link>
             )}
+            <div className="rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-2.5">
+              <label className="block text-[10px] uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+                Ask about this reply
+              </label>
+              <textarea
+                value={followUp}
+                onChange={(e) => onFollowUp(e.target.value)}
+                rows={2}
+                placeholder="Follow up on the answer…"
+                className="mt-1.5 w-full resize-none rounded-lg border border-[var(--line)] bg-[var(--surface-panel)] px-2.5 py-2 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)] focus:border-[var(--accent)]"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    onRunFollowUp();
+                  }
+                }}
+              />
+              <div className="mt-2 flex justify-end">
+                <button
+                  type="button"
+                  disabled={busy || !followUp.trim()}
+                  onClick={onRunFollowUp}
+                  className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--on-accent)] disabled:opacity-50"
+                >
+                  {busy ? "Thinking…" : "Follow up"}
+                </button>
+              </div>
+            </div>
           </div>
         ) : (
           <div className="flex h-full min-h-[8rem] items-center justify-center text-center text-xs leading-relaxed text-[var(--ink-muted)]">
