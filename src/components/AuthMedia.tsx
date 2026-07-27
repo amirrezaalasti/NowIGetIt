@@ -9,6 +9,13 @@ type Props = {
   kind?: "video" | "image";
   className?: string;
   alt?: string;
+  /**
+   * Bump this (e.g. an incrementing counter) whenever the underlying file at
+   * `src` has been overwritten in place — regenerate/retouch always publish
+   * to the *same* URL, so without this the component has no way to know it
+   * needs to refetch and will keep showing the stale clip.
+   */
+  cacheBust?: number | string;
 };
 
 /**
@@ -22,6 +29,7 @@ export function AuthMedia({
   kind = "video",
   className,
   alt = "",
+  cacheBust,
 }: Props) {
   const [playUrl, setPlayUrl] = useState<string | null>(null);
   const [posterUrl, setPosterUrl] = useState<string | null>(null);
@@ -42,8 +50,10 @@ export function AuthMedia({
       try {
         await getApiToken();
         if (cancelled) return;
-        // Cache-bust so a freshly published scene.mp4 is picked up.
-        const url = mediaUrl(src, Date.now());
+        // Cache-bust so a freshly published scene.mp4 is picked up — the
+        // published filename never changes even when the content is
+        // regenerated, so re-fetching relies entirely on this query param.
+        const url = mediaUrl(src, cacheBust ?? Date.now());
         if (!url) throw new Error("Missing media token");
         setPlayUrl(url);
         setReady(true);
@@ -60,7 +70,7 @@ export function AuthMedia({
     return () => {
       cancelled = true;
     };
-  }, [src]);
+  }, [src, cacheBust]);
 
   useEffect(() => {
     let cancelled = false;

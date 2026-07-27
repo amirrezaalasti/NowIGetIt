@@ -32,6 +32,7 @@ from backend.pipeline.orchestrator import (
     iter_pipeline_events,
     iter_regenerate_scene,
     iter_retouch_scene,
+    revise_scene_plan,
     run_pipeline,
     update_scene_plan,
 )
@@ -55,6 +56,7 @@ from backend.schemas import (
     GenerateRequest,
     GenerateResult,
     RegenerateSceneRequest,
+    RevisePlanRequest,
     SceneComment,
     SceneCommentRequest,
     UpdatePlanRequest,
@@ -339,6 +341,26 @@ def put_scene_plan(
     """Save an edited storyboard before continuing generation."""
     _require_job_owner(job_id, user.id)
     plan = update_scene_plan(job_id, body.plan)
+    return {"ok": True, "job_id": job_id, "plan": plan.model_dump()}
+
+
+@app.post("/api/jobs/{job_id}/plan/revise")
+def revise_scene_plan_endpoint(
+    job_id: str, body: RevisePlanRequest, user: CurrentUser
+) -> dict:
+    """AI-revise the storyboard: add/remove/rewrite scenes from a free-text
+    instruction, before generation starts."""
+    _require_job_owner(job_id, user.id)
+    try:
+        db.assert_within_quotas(user.id, need_tokens=6_000)
+    except db.QuotaExceededError as exc:
+        raise _quota_http(exc) from exc
+    try:
+        plan = revise_scene_plan(job_id, body.instructions)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"ok": True, "job_id": job_id, "plan": plan.model_dump()}
 
 

@@ -2,14 +2,48 @@
 
 from __future__ import annotations
 
+import re
+
 from backend.languages import language_display_name, normalize_language
 from backend.llm import OpenRouterClient
 from backend.schemas import ScenePlan
 
+# (min_seconds, max_seconds) of TOTAL spoken narration the final video must
+# reach. This is what actually drives runtime (each scene's clip is timed to
+# its narration's real TTS duration), so planning is validated against it —
+# not just a vague word like "short"/"deep".
+LENGTH_TARGET_SECONDS: dict[str, tuple[float, float]] = {
+    "short": (45.0, 75.0),
+    "standard": (75.0, 115.0),
+    "deep": (150.0, 210.0),
+}
+
+# (min_scenes, max_scenes) — paired with the duration target above so the
+# model doesn't try to hit the runtime with 2 overlong scenes or 20 tiny ones.
+LENGTH_SCENE_COUNT: dict[str, tuple[int, int]] = {
+    "short": (3, 4),
+    "standard": (4, 6),
+    "deep": (6, 9),
+}
+
 LENGTH_GUIDANCE = {
-    "short": "Target ~45–60 seconds total. Prefer 3–4 scenes. Ruthlessly cut filler.",
-    "standard": "Target under ~90 seconds unless the topic clearly needs more.",
-    "deep": "Target ~2–3 minutes. Allow 5–8 scenes with progressive depth.",
+    "short": (
+        f"Target {LENGTH_TARGET_SECONDS['short'][0]:.0f}-"
+        f"{LENGTH_TARGET_SECONDS['short'][1]:.0f} seconds of TOTAL spoken narration "
+        f"across {LENGTH_SCENE_COUNT['short'][0]}-{LENGTH_SCENE_COUNT['short'][1]} scenes. "
+        "Ruthlessly cut filler."
+    ),
+    "standard": (
+        f"Target {LENGTH_TARGET_SECONDS['standard'][0]:.0f}-"
+        f"{LENGTH_TARGET_SECONDS['standard'][1]:.0f} seconds of TOTAL spoken narration "
+        f"across {LENGTH_SCENE_COUNT['standard'][0]}-{LENGTH_SCENE_COUNT['standard'][1]} scenes."
+    ),
+    "deep": (
+        f"Target {LENGTH_TARGET_SECONDS['deep'][0]:.0f}-"
+        f"{LENGTH_TARGET_SECONDS['deep'][1]:.0f} seconds of TOTAL spoken narration "
+        f"across {LENGTH_SCENE_COUNT['deep'][0]}-{LENGTH_SCENE_COUNT['deep'][1]} scenes "
+        "with progressive depth."
+    ),
 }
 
 AUDIENCE_GUIDANCE = {
@@ -17,6 +51,65 @@ AUDIENCE_GUIDANCE = {
     "undergrad": "College intro level: precise terms OK when defined; show formal structure.",
     "general": "Curious adult audience: clear language, strong intuition, light formalism.",
 }
+
+_CJK_LANGS = {"zh", "ja", "ko"}
+
+
+def estimate_narration_seconds(text: str, language: str = "en") -> float:
+    """Rough spoken-duration estimate used to gate plan length before TTS runs.
+
+    Latin/space-separated scripts: ~2.5 words/sec. CJK: ~3.3 chars/sec.
+    This mirrors the pacing guidance given to the planner LLM.
+    """
+    text = (text or "").strip()
+    if not text:
+        return 0.0
+    lang = normalize_language(language)
+    if lang in _CJK_LANGS:
+        chars = len(re.sub(r"\s+", "", text))
+        return chars / 3.3
+    words = len(text.split())
+    return words / 2.5
+
+
+def _plan_total_narration_seconds(plan: ScenePlan, language: str) -> float:
+    return sum(estimate_narration_seconds(s.narration, language) for s in plan.scenes)
+
+
+def _validate_plan_length(plan: ScenePlan, *, length_preset: str, language: str) -> None:
+    """Raise ValueError (caught by the retry loop) when the plan is far from
+    the target runtime for its preset — this is the #1 cause of "picked 3
+    minutes but got way less": narration was simply too short/too few scenes.
+    """
+    min_target, max_target = LENGTH_TARGET_SECONDS.get(
+        length_preset, LENGTH_TARGET_SECONDS["standard"]
+    )
+    min_scenes, max_scenes = LENGTH_SCENE_COUNT.get(length_preset, (3, 6))
+    total_est = _plan_total_narration_seconds(plan, language)
+    scene_count = len(plan.scenes)
+
+    if scene_count < min_scenes:
+        raise ValueError(
+            f"Only {scene_count} scenes were planned, but the '{length_preset}' preset "
+            f"needs {min_scenes}-{max_scenes} scenes to reach a "
+            f"{min_target:.0f}-{max_target:.0f}s video. Add more scenes."
+        )
+    if total_est < min_target * 0.85:
+        raise ValueError(
+            f"Estimated total spoken narration is only ~{total_est:.0f}s across "
+            f"{scene_count} scenes, well short of the {min_target:.0f}-{max_target:.0f}s "
+            f"target for the '{length_preset}' preset. Add more scenes and/or write "
+            f"longer, fuller narration per scene (aim for {min_scenes}-{max_scenes} "
+            "scenes total) so the total spoken narration reaches the target."
+        )
+    if total_est > max_target * 1.3:
+        raise ValueError(
+            f"Estimated total spoken narration is ~{total_est:.0f}s across "
+            f"{scene_count} scenes, well over the {min_target:.0f}-{max_target:.0f}s "
+            f"target for the '{length_preset}' preset. Trim narration and/or "
+            f"reduce to {min_scenes}-{max_scenes} scenes."
+        )
+
 
 PLANNER_SYSTEM = """You are an expert educational animation director (3Blue1Brown-caliber).
 Given a learner's prompt, produce a JSON scene plan for a short explanatory video.
@@ -34,8 +127,9 @@ Rules:
   to spoken length (~2.5 words/sec for Latin scripts; ~3–4 syllables/sec for others).
 - Visuals: concrete Manim-friendly elements (shapes, graphs, equations as Text, arrows, labels).
 
-CONTINUITY (critical — scenes are rendered separately, so the SCRIPT is what glues them
-into one video; without it the video feels like disconnected clips):
+CONTINUITY (critical — scenes are rendered separately, so the SCRIPT AND VISUAL PLAN are
+what glue them into one video; without them the video feels like disconnected clips with
+mismatched, random-looking styles from scene to scene):
 - Treat the whole plan as ONE continuous lecture split into scenes, not N unrelated clips.
   Pick a single through-line / metaphor / running example in concept_summary and reuse it.
 - Every scene's narration (except the very first) must open by briefly linking back to the
@@ -51,6 +145,13 @@ into one video; without it the video feels like disconnected clips):
   rename a variable or component between scenes).
 - Scene durations should ramp sensibly (short cold-open, longer builds, a tight close) —
   avoid a jarring long scene immediately followed by a very short one.
+- recurring_elements (critical for VISUAL consistency, not just narration): list 2-4
+  CONCRETE, literally-reusable visual anchors — a specific named object, shape, color role,
+  or diagram — that must appear (in the same form) in every scene, e.g.
+  ["a labeled x-y axes pair that persists across scenes", "an orange circle representing
+  the current data point", "a running 'loss' counter in the top-right"]. These are handed
+  to every scene's coder so scenes don't each invent their own unrelated visual language.
+  Be specific enough to draw (shape + color/role), not just a topic word.
 
 MOTION + LAYOUT (critical — scenes must animate the idea, not show a still poster):
 - ONE primary visual idea per scene. Never pack a full multi-gate / multi-module
@@ -83,6 +184,8 @@ MOTION + LAYOUT (critical — scenes must animate the idea, not show a still pos
   (e.g. ["particles","heatmap","house"], ["gate","sigmoid","lstm"], ["sine","orbit","trace"],
   ["vector","field"], ["boxes","pipeline"]).
 - visual_identity: one sentence describing the overall look (metaphor + mood).
+- recurring_elements: 2-4 concrete visual anchors reused verbatim across every scene
+  (see CONTINUITY above). Every scene's coder will be told to keep these identical.
 - palette: object with background, accent, text, highlight as hex colors.
   Prefer a distinctive non-default palette (avoid generic purple). Dark educational
   backgrounds like #0f1115 / #0B0C10 work well with warm accents.
@@ -96,6 +199,7 @@ Return ONLY a JSON object with this shape:
   "concept_summary": string,
   "style_notes": string,
   "visual_identity": string,
+  "recurring_elements": [string],
   "palette": {
     "background": "#0f1115",
     "accent": "#e8a87c",
@@ -131,10 +235,20 @@ def create_scene_plan(
     aud = AUDIENCE_GUIDANCE.get(audience, AUDIENCE_GUIDANCE["general"])
     lang = normalize_language(language)
     lang_name = language_display_name(lang)
+    min_target, max_target = LENGTH_TARGET_SECONDS.get(
+        length_preset, LENGTH_TARGET_SECONDS["standard"]
+    )
+    min_scenes, max_scenes = LENGTH_SCENE_COUNT.get(length_preset, (3, 6))
     user = f"""Learner prompt:
 {prompt}
 
 Length preset ({length_preset}): {length}
+HARD REQUIREMENT (checked programmatically — the plan will be rejected and
+retried if this is not met): the sum of every scene's spoken narration must
+land between {min_target:.0f} and {max_target:.0f} seconds total, across
+{min_scenes}-{max_scenes} scenes. Write full, complete narration sentences —
+not short filler lines — so the natural spoken duration reaches this target;
+padding with silence/wait time does not count, only actual narration length.
 Audience ({audience}): {aud}
 Output language ({lang}): Write ALL learner-facing text in {lang_name}.
 """
@@ -148,9 +262,95 @@ Output language ({lang}): Write ALL learner-facing text in {lang_name}.
                 max_tokens=4096,
                 model=client.manim_model,
             )
-            return ScenePlan.model_validate(data)
+            plan = ScenePlan.model_validate(data)
+            _validate_plan_length(plan, length_preset=length_preset, language=lang)
+            return plan
         except Exception as e:
             last_err = e
             user += f"\n\nERROR on last attempt: {e}\nPlease ensure you return a valid JSON object matching the requested schema."
-    
+
     raise ValueError(f"Failed to generate valid ScenePlan after 3 attempts: {last_err}") from last_err
+
+
+REVISE_PLAN_SYSTEM = (
+    PLANNER_SYSTEM
+    + """
+
+REVISION MODE: you are given an EXISTING scene plan (as JSON) and a learner's
+follow-up instruction (e.g. "add a scene about X", "remove scene 3", "make it
+shorter", "merge the last two scenes"). Apply the requested change while:
+- Keeping every untouched scene's narration/visuals unchanged unless the
+  instruction implies otherwise.
+- Preserving concept_summary, visual_identity, recurring_elements, and palette
+  so newly added/edited scenes still look and sound like part of the same
+  video (reuse the SAME palette hex values and recurring_elements).
+- Re-numbering scene ids sequentially as scene_1, scene_2, … after any
+  add/remove/reorder so there are no gaps or duplicates.
+- Keeping the CONTINUITY rules above intact for the new scene order (fix the
+  opening/closing transition lines of scenes adjacent to any change so the
+  narration still flows as one continuous lecture).
+- Respecting the total-narration-length TARGET given in the user message,
+  unless the learner's instruction explicitly asks to change it.
+Return the FULL updated plan as a JSON object in the exact same shape as
+before (not a diff, not just the changed scenes).
+"""
+)
+
+
+def revise_scene_plan(
+    client: OpenRouterClient,
+    plan: ScenePlan,
+    instructions: str,
+    *,
+    length_preset: str = "standard",
+    audience: str = "general",
+    language: str = "en",
+) -> ScenePlan:
+    """Apply a natural-language edit (add/remove/reorder/rewrite scenes) to an
+    existing plan via the LLM, keeping continuity + visual identity intact.
+    """
+    length = LENGTH_GUIDANCE.get(length_preset, LENGTH_GUIDANCE["standard"])
+    aud = AUDIENCE_GUIDANCE.get(audience, AUDIENCE_GUIDANCE["general"])
+    lang = normalize_language(language)
+    lang_name = language_display_name(lang)
+    min_target, max_target = LENGTH_TARGET_SECONDS.get(
+        length_preset, LENGTH_TARGET_SECONDS["standard"]
+    )
+    min_scenes, max_scenes = LENGTH_SCENE_COUNT.get(length_preset, (3, 6))
+    plan_json = plan.model_dump_json(indent=2)
+    user = f"""Existing scene plan (JSON):
+{plan_json}
+
+Learner's requested change:
+{instructions.strip()}
+
+Length preset ({length_preset}): {length}
+TARGET (keep unless the learner's instruction explicitly asks to change the
+overall length, e.g. "make it longer"/"make it shorter" — then honor that
+instruction instead): the sum of every scene's spoken narration should stay
+between {min_target:.0f} and {max_target:.0f} seconds total, across
+{min_scenes}-{max_scenes} scenes.
+Audience ({audience}): {aud}
+Output language ({lang}): Write ALL learner-facing text in {lang_name}.
+"""
+    last_err = None
+    for attempt in range(3):
+        try:
+            data = client.chat_json(
+                system=REVISE_PLAN_SYSTEM,
+                user=user,
+                temperature=0.35 + (attempt * 0.1),
+                max_tokens=4096,
+                model=client.manim_model,
+            )
+            revised = ScenePlan.model_validate(data)
+            if not revised.scenes:
+                raise ValueError("Revised plan has no scenes.")
+            return revised
+        except Exception as e:
+            last_err = e
+            user += f"\n\nERROR on last attempt: {e}\nPlease ensure you return a valid JSON object matching the requested schema."
+
+    raise ValueError(
+        f"Failed to revise ScenePlan after 3 attempts: {last_err}"
+    ) from last_err

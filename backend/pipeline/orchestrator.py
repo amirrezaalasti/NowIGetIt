@@ -21,7 +21,7 @@ from backend.pipeline.compose import (
     mux_scene_audio,
     probe_duration,
 )
-from backend.pipeline.planner import create_scene_plan
+from backend.pipeline.planner import create_scene_plan, revise_scene_plan as _revise_plan_llm
 from backend.pipeline.renderer import extract_review_frames, render_scene
 from backend.pipeline.scene_generator import generate_scene_code, revise_scene_code
 from backend.pipeline.storyboard import create_storyboard_frame
@@ -311,6 +311,30 @@ def _mux_scene_vo(
     )
 
 
+def _job_length_preset(job_id: str, fallback: str = "standard") -> str:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        preset = settings.get("length_preset")
+        if isinstance(preset, str) and preset in {"short", "standard", "deep"}:
+            return preset
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
+
+
+def _job_audience(job_id: str, fallback: str = "general") -> str:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        audience = settings.get("audience")
+        if isinstance(audience, str) and audience in {"hs", "undergrad", "general"}:
+            return audience
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
+
+
 def _load_plan(job_id: str) -> ScenePlan:
     job = store.load_job(job_id)
     plan_data = job.get("scene_plan")
@@ -334,6 +358,41 @@ def update_scene_plan(job_id: str, plan: ScenePlan) -> ScenePlan:
     except Exception:  # noqa: BLE001
         pass
     return plan
+
+
+def revise_scene_plan(job_id: str, instructions: str) -> ScenePlan:
+    """Ask the AI planner to add/remove/reorder/rewrite scenes in an existing
+    plan based on a free-text instruction, then persist the result.
+
+    Used from the storyboard editor before generation starts (job is still
+    `awaiting_plan`); does not touch any already-rendered scene artifacts.
+    """
+    settings = get_settings()
+    client = OpenRouterClient(settings)
+    job = store.load_job(job_id)
+    meta = job.get("meta") or {}
+    owner_id = meta.get("user_id") if isinstance(meta, dict) else None
+    if isinstance(owner_id, str) and owner_id:
+        db.assert_within_quotas(owner_id, need_tokens=6_000)
+
+    plan = _load_plan(job_id)
+    revised = _revise_plan_llm(
+        client,
+        plan,
+        instructions,
+        length_preset=_job_length_preset(job_id),
+        audience=_job_audience(job_id),
+        language=_job_language(job_id),
+    )
+    update_scene_plan(job_id, revised)
+
+    if isinstance(owner_id, str) and owner_id:
+        db.flush_client_usage(
+            user_id=owner_id,
+            job_id=job_id,
+            usage_log=client.drain_usage_log(),
+        )
+    return revised
 
 
 def _process_one_scene(

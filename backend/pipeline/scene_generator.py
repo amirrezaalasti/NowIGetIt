@@ -130,6 +130,12 @@ def generate_scene_code(
         if palette
         else "  (use style_notes colors)"
     )
+    recurring = list(plan.recurring_elements or [])
+    recurring_block = (
+        "\n".join(f"  - {r}" for r in recurring)
+        if recurring
+        else "  (none specified — still reuse the palette + visual_identity consistently)"
+    )
 
     user = f"""Video title: {plan.title}
 Concept: {plan.concept_summary}
@@ -137,6 +143,11 @@ Style: {plan.style_notes}
 Visual identity: {plan.visual_identity or "(none)"}
 Palette:
 {palette_lines}
+Recurring visual elements (CRITICAL — reuse these in THIS scene with the exact
+SAME shape, color, label, and screen role they have elsewhere in the video, so
+every scene visually reads as part of one continuous video, not a disconnected
+clip. Adapt only their position if the layout requires it):
+{recurring_block}
 Output language: {lang_name} — ALL on-screen Text(...) titles/labels/captions/formulas
 must be written in this language (ASCII math symbols OK).
 
@@ -167,6 +178,11 @@ Reference Manim patterns (adapt to this scene):
 {template_block}
 
 Composition contract:
+- VISUAL CONSISTENCY IS NON-NEGOTIABLE: use the palette hex values above verbatim (not
+  approximations) for background/accent/text/highlight, keep title placement/typography
+  the same style as other scenes (top, FadeIn, similar font_size), and render every
+  recurring element listed above so a viewer scrubbing between scenes sees the same
+  visual language, not a new color scheme or layout convention each time.
 - Build a clean teaching frame that MOVES: each animation_beat → at least one self.play
   with Create/Write/GrowArrow/Indicate/.animate/ValueTracker (not only FadeIn + wait).
 - Center the main diagram; keep every label fully inside the frame (no clipped letters).
