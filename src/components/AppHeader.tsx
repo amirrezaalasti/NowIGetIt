@@ -8,6 +8,7 @@ import { UserMenu } from "@/components/UserMenu";
 
 const NAV = [
   { href: "/", label: "Create" },
+  { href: "/understand", label: "Understand" },
   { href: "/library", label: "Library" },
 ] as const;
 
@@ -16,7 +17,7 @@ export function AppHeader() {
 
   return (
     <header className="relative z-30 border-b border-[var(--line)]/70 bg-[var(--bg-deep)]/55 backdrop-blur-md">
-      <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-4 px-6 py-3.5">
+      <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-6 py-3.5">
         <div className="flex min-w-0 items-center gap-6">
           <Link
             href="/"

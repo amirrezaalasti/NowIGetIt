@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import uuid
-from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, Optional
 
@@ -22,12 +22,23 @@ from backend.pipeline.compose import (
     probe_duration,
 )
 from backend.pipeline.planner import create_scene_plan
-from backend.pipeline.renderer import render_scene
+from backend.pipeline.renderer import extract_review_frames, render_scene
 from backend.pipeline.scene_generator import generate_scene_code, revise_scene_code
 from backend.pipeline.storyboard import create_storyboard_frame
 from backend.pipeline.tts import synthesize_narration
 from backend.pipeline.visual_preview import create_visual_preview
 from backend.pipeline.vlm_review import review_scene
+from backend.languages import DEFAULT_LANGUAGE, normalize_language
+from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
+
+
+def _scene_audio_file(directory: Path) -> Optional[Path]:
+    """Prefer WAV (Gemini/Vercel) then legacy MP3."""
+    for name in ("audio.wav", "audio.mp3"):
+        path = directory / name
+        if path.exists():
+            return path
+    return None
 from backend.schemas import (
     ContinueRequest,
     GenerateRequest,
@@ -38,6 +49,7 @@ from backend.schemas import (
     SceneArtifact,
     ScenePlan,
     SceneSection,
+    VlmReview,
 )
 
 EventCallback = Callable[[PipelineEvent], None]
@@ -50,11 +62,16 @@ def _needs_visual_revision(review: Any, *, clarity_threshold: float) -> bool:
     risk = float(getattr(review, "misconception_risk", 0.0) or 0.0)
     issues = list(getattr(review, "issues", None) or [])
     if not approved:
-        return True
+        # Require actionable signal — bare rejects with no issues/clarity hit thrash.
+        return bool(issues) or clarity < clarity_threshold or risk >= 0.55
     # Approved but still messy: only revise when the reviewer flagged problems.
     if clarity < clarity_threshold and (issues or risk >= 0.65):
         return True
     return risk >= 0.75
+
+
+def _review_clarity(review: Any) -> float:
+    return float(getattr(review, "clarity_score", 0.0) or 0.0)
 
 
 def _revision_instructions_from_review(review: Any) -> str:
@@ -64,11 +81,13 @@ def _revision_instructions_from_review(review: Any) -> str:
     if instructions:
         parts.append(instructions)
     if issues:
-        parts.append("Issues to fix:\n- " + "\n- ".join(issues[:8]))
+        parts.append("Issues to fix:\n- " + "\n- ".join(issues[:4]))
+    # Keep boilerplate short so revises stay surgical (do NOT push formula truncation).
     parts.append(
-        "Layout priority: remove overlapping text/arrows, stop cut-off labels, "
-        "shorten on-screen text, fade previous labels before new dense beats, "
-        "keep at most one formula in a bottom zone with clear margins."
+        "Surgical layout fixes only: reposition overlaps, FadeOut prior labels before "
+        "dense beats, keep one complete formula readable (smaller font / two lines OK — "
+        "never truncate terms), remove decorative filler shapes, keep the core diagram "
+        "visible in the final hold."
     )
     return "\n\n".join(parts)
 
@@ -158,6 +177,140 @@ def _job_resolution(job_id: str, fallback: str = "720p") -> str:
     return fallback
 
 
+def _job_tts_voice(job_id: str, fallback: Optional[str] = None) -> str:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        voice = settings.get("tts_voice")
+        if isinstance(voice, str) and voice.strip():
+            return normalize_tts_voice(voice)
+    except Exception:  # noqa: BLE001
+        pass
+    if fallback:
+        return normalize_tts_voice(fallback)
+    return normalize_tts_voice(get_settings().tts_voice, fallback=DEFAULT_TTS_VOICE)
+
+
+def _persist_job_tts_voice(job_id: str, voice: str) -> None:
+    canonical = normalize_tts_voice(voice)
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["tts_voice"] = canonical
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _job_include_subtitles(job_id: str, fallback: bool = True) -> bool:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        if "include_subtitles" in settings:
+            return bool(settings.get("include_subtitles"))
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
+
+
+def _persist_job_include_subtitles(job_id: str, include: bool) -> None:
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["include_subtitles"] = bool(include)
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _job_include_audio(job_id: str, fallback: bool = True) -> bool:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        if "include_audio" in settings:
+            return bool(settings.get("include_audio"))
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
+
+
+def _persist_job_include_audio(job_id: str, include: bool) -> None:
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["include_audio"] = bool(include)
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _job_language(job_id: str, fallback: str = DEFAULT_LANGUAGE) -> str:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        lang = settings.get("language")
+        if isinstance(lang, str) and lang.strip():
+            return normalize_language(lang)
+    except Exception:  # noqa: BLE001
+        pass
+    return normalize_language(fallback)
+
+
+def _persist_job_language(job_id: str, language: str) -> None:
+    canonical = normalize_language(language)
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["language"] = canonical
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _mux_scene_vo(
+    video_path: str,
+    audio_path: Optional[str],
+    output_path: Path,
+    *,
+    job_id: str,
+    narration: str = "",
+) -> Optional[str]:
+    """Mux narration + burn-in subtitles (defaults from job settings)."""
+    if not _job_include_audio(job_id, fallback=True):
+        audio_path = None
+    return mux_scene_audio(
+        video_path,
+        audio_path,
+        output_path,
+        subtitle_text=narration,
+        burn_subtitles=_job_include_subtitles(job_id, fallback=True),
+    )
+
+
 def _load_plan(job_id: str) -> ScenePlan:
     job = store.load_job(job_id)
     plan_data = job.get("scene_plan")
@@ -193,13 +346,19 @@ def _process_one_scene(
     index: int,
     total: int,
     previous_context: str,
+    next_context: str = "",
     resolution: str,
     skip_render: bool,
     on_event: Optional[EventCallback],
     creative_direction: str = "",
+    tts_voice: Optional[str] = None,
+    skip_vlm_review: bool = False,
 ) -> SceneArtifact:
-    """TTS-first → codegen (timed) → render → VLM for a single scene."""
+    """TTS-first → codegen (timed) → render → optional VLM for a single scene."""
     settings = get_settings()
+    voice = tts_voice or _job_tts_voice(job_id)
+    language = _job_language(job_id)
+    include_audio = _job_include_audio(job_id, fallback=True)
     store.save_scene_section(job_id, scene.id, scene.model_dump())
     _emit(
         on_event,
@@ -211,14 +370,22 @@ def _process_one_scene(
 
     sdir = store.scene_dir(job_id, scene.id)
 
-    # --- TTS first so codegen can match narration length ---
-    audio_path, audio_skipped = synthesize_narration(
-        scene.narration,
-        work_dir / "audio" / f"{scene.id}.mp3",
-        settings=settings,
-    )
+    # --- TTS first so codegen can match narration length (unless audio disabled) ---
+    # Gemini returns PCM→WAV (no ffmpeg); other providers may return MP3.
+    audio_path: Optional[str] = None
+    audio_skipped = False
+    if include_audio:
+        audio_path, audio_skipped = synthesize_narration(
+            scene.narration,
+            work_dir / "audio" / f"{scene.id}.wav",
+            settings=settings,
+            voice=voice,
+        )
+    else:
+        audio_skipped = True
     if audio_path and Path(audio_path).exists():
-        shutil.copy2(audio_path, sdir / "audio.mp3")
+        dest = sdir / f"audio{Path(audio_path).suffix.lower()}"
+        shutil.copy2(audio_path, dest)
         target_duration = probe_duration(Path(audio_path)) or scene.duration_seconds
     else:
         target_duration = scene.duration_seconds
@@ -227,16 +394,29 @@ def _process_one_scene(
     scene = scene.model_copy(update={"duration_seconds": float(target_duration)})
     store.save_scene_section(job_id, scene.id, scene.model_dump())
 
+    if include_audio:
+        tts_msg = (
+            f"TTS for {scene.id}"
+            + (
+                " (skipped — TTS not configured)"
+                if audio_skipped
+                else f" · {target_duration:.1f}s"
+            )
+        )
+    else:
+        tts_msg = f"Audio disabled for {scene.id} · {target_duration:.1f}s from plan"
     _emit(
         on_event,
         PipelineEventType.scene_tts,
-        f"TTS for {scene.id}"
-        + (" (skipped — no TTS_API_KEY)" if audio_skipped else f" · {target_duration:.1f}s"),
+        tts_msg,
         data={
             "scene_id": scene.id,
             "audio_path": audio_path,
             "skipped": audio_skipped,
+            "include_audio": include_audio,
             "target_duration": target_duration,
+            "tts_voice": voice,
+            "language": language,
             "job_id": job_id,
         },
         job_id=job_id,
@@ -247,8 +427,10 @@ def _process_one_scene(
         plan=plan,
         scene=scene,
         previous_context=previous_context,
+        next_context=next_context,
         target_duration_seconds=target_duration,
         creative_direction=creative_direction,
+        language=language,
     )
     store.save_code(job_id, scene.id, code, revision=0)
     _emit(
@@ -311,6 +493,7 @@ def _process_one_scene(
                 scene=scene,
                 revision_instructions=rev_instructions,
                 target_duration_seconds=target_duration,
+                language=language,
             )
             store.save_code(job_id, scene.id, code, revision=revision_count)
             video_path, frame_path, render_log = render_scene(
@@ -336,50 +519,88 @@ def _process_one_scene(
             },
             job_id=job_id,
         )
+
+        # --- Resync animation timing against the actual narration length ---
+        # A clean render whose PACING drifts from the audio is exactly what
+        # produces "video freezes / goes silent while narration keeps talking".
+        # Fix this BEFORE spending VLM-review budget on a mistimed clip.
+        mismatch = _duration_mismatch(video_path, target_duration)
+        resync_budget = max(0, settings.max_scene_revisions - revision_count)
+        resync_attempts = 0
+        while mismatch is not None and resync_attempts < min(2, resync_budget):
+            resync_attempts += 1
+            revision_count += 1
+            diff = mismatch - target_duration
+            _emit(
+                on_event,
+                PipelineEventType.scene_revise,
+                f"Resyncing timing for {scene.id}: rendered {mismatch:.1f}s vs "
+                f"narration {target_duration:.1f}s (attempt {resync_attempts})…",
+                data={
+                    "scene_id": scene.id,
+                    "job_id": job_id,
+                    "revision": revision_count,
+                    "rendered_duration": mismatch,
+                    "target_duration": target_duration,
+                },
+                job_id=job_id,
+            )
+            rev_instructions = (
+                f"TIMING MISMATCH (audio/video out of sync): the rendered clip runs "
+                f"{mismatch:.1f}s but the fixed narration audio is {target_duration:.1f}s "
+                f"({abs(diff):.1f}s too {'long' if diff > 0 else 'short'}). "
+                f"{'Shorten' if diff > 0 else 'Lengthen'} the animation so TOTAL "
+                f"self.play(run_time=...) + self.wait(...) time (excluding the final "
+                f"0.5s hold) lands within 0.5s of {target_duration:.1f}s. Spread the "
+                "change proportionally across every beat's run_time/wait — never solve "
+                "this with one giant self.wait() or by deleting a beat. Keep the same "
+                "visuals, layout, and beat order; only retime them."
+            )
+            prev_good = (code, video_path, frame_path, frame_source)
+            code = revise_scene_code(
+                client,
+                code=code,
+                scene=scene,
+                revision_instructions=rev_instructions,
+                target_duration_seconds=target_duration,
+                surgical=True,
+                language=language,
+            )
+            store.save_code(job_id, scene.id, code, revision=revision_count)
+            new_video_path, new_frame_path, render_log = render_scene(
+                code,
+                work_dir=work_dir / "render" / scene.id,
+                resolution=resolution,
+                scene_id=f"{scene.id}_r{revision_count}",
+            )
+            if new_video_path:
+                video_path, frame_path = new_video_path, new_frame_path
+                if frame_path:
+                    frame_source = "manim_preview"
+                preview_note = None
+                mismatch = _duration_mismatch(video_path, target_duration)
+            else:
+                # Retiming broke the render — keep the last playable clip and stop.
+                code, video_path, frame_path, frame_source = prev_good
+                mismatch = None
     else:
         preview_note = "Render skipped by request."
 
-    def _ensure_preview_frame(rev: int) -> tuple[Optional[str], str]:
-        """Return (frame_path, frame_source) for review; fall back to storyboard."""
-        nonlocal frame_path, frame_source
-        if frame_path and frame_source == "manim_preview":
-            return frame_path, frame_source
-        create_storyboard_frame(
-            scene,
-            output_path=sdir / f"vlm_r{rev}_plan_card.png",
+    # HITL regenerate: human is the reviewer — skip VLM + clarity auto-revise.
+    if skip_vlm_review:
+        review = VlmReview(
+            approved=True,
+            issues=[],
+            revision_instructions="Skipped (HITL regenerate)",
+            confidence=1.0,
+            clarity_score=0.8,
+            misconception_risk=0.2,
         )
-        frame_path = create_visual_preview(
-            scene,
-            output_path=sdir / f"vlm_r{rev}_preview.png",
-        )
-        frame_source = "visual_preview"
-        return frame_path, frame_source
-
-    def _run_review(rev: int) -> Any:
-        nonlocal frame_path, frame_source
-        _ensure_preview_frame(rev)
-        syntax_ok, syntax_err = validate_manim_code(code)
-        use_image_vlm = frame_source == "manim_preview"
-        result = review_scene(
-            client,
-            scene=scene,
-            code=code,
-            frame_path=frame_path if use_image_vlm else None,
-            frame_source=frame_source if use_image_vlm else "visual_preview",
-        )
-        if not syntax_ok:
-            result = result.model_copy(
-                update={
-                    "approved": False,
-                    "issues": [syntax_err, *result.issues],
-                    "revision_instructions": f"Fix invalid Python ({syntax_err}).",
-                }
-            )
         saved = store.save_vlm_review(
             job_id,
             scene.id,
-            revision=rev,
-            review=result.model_dump(),
+            revision=revision_count,
+            review=review.model_dump(),
             frame_path=frame_path,
             frame_source=frame_source,
         )
@@ -387,121 +608,262 @@ def _process_one_scene(
             frame_urls.append(saved["frame_url"])
         reviews_log.append(
             {
-                **result.model_dump(),
-                "revision": rev,
+                **review.model_dump(),
+                "revision": revision_count,
                 "frame_source": frame_source,
                 "frame_url": saved.get("frame_url"),
-                "review_mode": (
-                    "image_vlm" if frame_source == "manim_preview" else "code_only"
-                ),
+                "review_mode": "hitl_skip",
             }
         )
-        _emit(
-            on_event,
-            PipelineEventType.scene_vlm,
-            f"Scene check for {scene.id}"
-            + (
-                f" · clarity {result.clarity_score:.0%}"
-                if hasattr(result, "clarity_score")
-                else ""
-            )
-            + (f" · r{rev}" if rev else ""),
-            data={
-                **result.model_dump(),
-                "scene_id": scene.id,
-                "job_id": job_id,
-                "frame_url": saved.get("frame_url"),
-                "frame_source": frame_source,
-                "revision": rev,
-            },
-            job_id=job_id,
-        )
-        return result
-
-    review = _run_review(0)
-
-    # Auto-revise cluttered / rejected scenes (shares MAX_SCENE_REVISIONS budget).
-    while (
-        settings.enable_auto_vlm_revise
-        and revision_count < settings.max_scene_revisions
-        and _needs_visual_revision(
-            review, clarity_threshold=settings.vlm_clarity_threshold
-        )
-    ):
-        revision_count += 1
-        rev_instructions = _revision_instructions_from_review(review)
-        _emit(
-            on_event,
-            PipelineEventType.scene_revise,
-            f"Auto-revising {scene.id} for clarity (attempt {revision_count})…",
-            data={
-                "scene_id": scene.id,
-                "job_id": job_id,
-                "revision": revision_count,
-                "clarity_score": getattr(review, "clarity_score", None),
-            },
-            job_id=job_id,
-        )
-        code = revise_scene_code(
-            client,
-            code=code,
-            scene=scene,
-            revision_instructions=rev_instructions,
-            target_duration_seconds=target_duration,
-        )
         store.save_code(job_id, scene.id, code, revision=revision_count)
+    else:
+        review_frame_paths: list[str] = []
 
-        if not skip_render:
-            prev_video, prev_frame, prev_source = (
-                video_path,
-                frame_path,
-                frame_source,
+        def _ensure_preview_frame(rev: int) -> tuple[Optional[str], str]:
+            """Return (frame_path, frame_source) for review; fall back to storyboard."""
+            nonlocal frame_path, frame_source, review_frame_paths
+            if video_path and Path(video_path).exists():
+                review_frame_paths = extract_review_frames(
+                    video_path, sdir / f"vlm_frames_r{rev}"
+                )
+                if review_frame_paths:
+                    frame_path = review_frame_paths[-1]
+                    frame_source = "manim_preview"
+                    return frame_path, frame_source
+            if frame_path and frame_source == "manim_preview":
+                review_frame_paths = [frame_path]
+                return frame_path, frame_source
+            create_storyboard_frame(
+                scene,
+                output_path=sdir / f"vlm_r{rev}_plan_card.png",
             )
-            video_path, frame_path, render_log = render_scene(
-                code,
-                work_dir=work_dir / "render" / scene.id,
-                resolution=resolution,
-                scene_id=f"{scene.id}_r{revision_count}",
+            frame_path = create_visual_preview(
+                scene,
+                output_path=sdir / f"vlm_r{rev}_preview.png",
             )
-            if frame_path:
-                frame_source = "manim_preview"
-            elif video_path is None:
-                # Render broke after a visual revise — try one render-focused fix
-                # if budget remains, else keep the last playable clip.
-                preview_note = render_log
-                if revision_count < settings.max_scene_revisions:
-                    revision_count += 1
-                    code = revise_scene_code(
-                        client,
-                        code=code,
-                        scene=scene,
-                        revision_instructions=(
-                            "Manim render failed after a clarity fix. "
-                            f"Error:\n{(render_log or '')[-500:]}\n"
-                            "Fix so it renders; keep layout sparse and non-overlapping."
-                        ),
-                        target_duration_seconds=target_duration,
-                    )
-                    store.save_code(
-                        job_id, scene.id, code, revision=revision_count
-                    )
-                    video_path, frame_path, render_log = render_scene(
-                        code,
-                        work_dir=work_dir / "render" / scene.id,
-                        resolution=resolution,
-                        scene_id=f"{scene.id}_r{revision_count}",
-                    )
-                    if frame_path:
-                        frame_source = "manim_preview"
-                    preview_note = None if video_path else render_log
-                if video_path is None and prev_video:
-                    video_path, frame_path, frame_source = (
-                        prev_video,
-                        prev_frame,
-                        prev_source,
-                    )
+            frame_source = "visual_preview"
+            review_frame_paths = [frame_path] if frame_path else []
+            return frame_path, frame_source
 
-        review = _run_review(revision_count)
+        def _run_review(rev: int) -> Any:
+            nonlocal frame_path, frame_source, review_frame_paths
+            _ensure_preview_frame(rev)
+            syntax_ok, syntax_err = validate_manim_code(code)
+            use_image_vlm = frame_source == "manim_preview"
+            result = review_scene(
+                client,
+                scene=scene,
+                code=code,
+                frame_path=frame_path if use_image_vlm else None,
+                frame_paths=review_frame_paths if use_image_vlm else None,
+                frame_source=frame_source if use_image_vlm else "visual_preview",
+            )
+            if not syntax_ok:
+                result = result.model_copy(
+                    update={
+                        "approved": False,
+                        "issues": [syntax_err, *result.issues],
+                        "revision_instructions": f"Fix invalid Python ({syntax_err}).",
+                    }
+                )
+            saved = store.save_vlm_review(
+                job_id,
+                scene.id,
+                revision=rev,
+                review=result.model_dump(),
+                frame_path=frame_path,
+                frame_source=frame_source,
+            )
+            if saved.get("frame_url"):
+                frame_urls.append(saved["frame_url"])
+            reviews_log.append(
+                {
+                    **result.model_dump(),
+                    "revision": rev,
+                    "frame_source": frame_source,
+                    "frame_url": saved.get("frame_url"),
+                    "frame_count": len(review_frame_paths),
+                    "review_mode": (
+                        "image_vlm"
+                        if frame_source == "manim_preview"
+                        else "code_only"
+                    ),
+                }
+            )
+            _emit(
+                on_event,
+                PipelineEventType.scene_vlm,
+                f"Scene check for {scene.id}"
+                + (
+                    f" · clarity {result.clarity_score:.0%}"
+                    if hasattr(result, "clarity_score")
+                    else ""
+                )
+                + (f" · r{rev}" if rev else ""),
+                data={
+                    **result.model_dump(),
+                    "scene_id": scene.id,
+                    "job_id": job_id,
+                    "frame_url": saved.get("frame_url"),
+                    "frame_source": frame_source,
+                    "revision": rev,
+                },
+                job_id=job_id,
+            )
+            return result
+
+        review = _run_review(0)
+
+        # Keep-best: never ship a revision that scores worse than a prior attempt.
+        best: dict[str, Any] = {
+            "code": code,
+            "video_path": video_path,
+            "frame_path": frame_path,
+            "frame_source": frame_source,
+            "review": review,
+            "clarity": _review_clarity(review),
+            "preview_note": preview_note,
+            "revision": 0,
+        }
+        stagnant = 0
+        max_stagnant = 1
+
+        # Auto-revise cluttered / rejected scenes (shares MAX_SCENE_REVISIONS budget).
+        while (
+            settings.enable_auto_vlm_revise
+            and revision_count < settings.max_scene_revisions
+            and _needs_visual_revision(
+                review, clarity_threshold=settings.vlm_clarity_threshold
+            )
+        ):
+            revision_count += 1
+            rev_instructions = _revision_instructions_from_review(review)
+            _emit(
+                on_event,
+                PipelineEventType.scene_revise,
+                f"Auto-revising {scene.id} for clarity (attempt {revision_count})…",
+                data={
+                    "scene_id": scene.id,
+                    "job_id": job_id,
+                    "revision": revision_count,
+                    "clarity_score": getattr(review, "clarity_score", None),
+                    "best_clarity": best["clarity"],
+                },
+                job_id=job_id,
+            )
+            # Always revise from the best known code — not a worse intermediate rewrite.
+            code = revise_scene_code(
+                client,
+                code=best["code"],
+                scene=scene,
+                revision_instructions=rev_instructions,
+                target_duration_seconds=target_duration,
+                surgical=True,
+                language=language,
+            )
+            store.save_code(job_id, scene.id, code, revision=revision_count)
+
+            if not skip_render:
+                prev_video, prev_frame, prev_source = (
+                    video_path,
+                    frame_path,
+                    frame_source,
+                )
+                video_path, frame_path, render_log = render_scene(
+                    code,
+                    work_dir=work_dir / "render" / scene.id,
+                    resolution=resolution,
+                    scene_id=f"{scene.id}_r{revision_count}",
+                )
+                if frame_path:
+                    frame_source = "manim_preview"
+                elif video_path is None:
+                    # Render broke after a visual revise — try one render-focused fix
+                    # if budget remains, else keep the last playable clip.
+                    preview_note = render_log
+                    if revision_count < settings.max_scene_revisions:
+                        revision_count += 1
+                        code = revise_scene_code(
+                            client,
+                            code=code,
+                            scene=scene,
+                            revision_instructions=(
+                                "Manim render failed after a clarity fix. "
+                                f"Error:\n{(render_log or '')[-500:]}\n"
+                                "Fix so it renders; keep layout sparse and non-overlapping."
+                            ),
+                            target_duration_seconds=target_duration,
+                            surgical=False,
+                            render_error=(render_log or "")[-500:],
+                            language=language,
+                        )
+                        store.save_code(
+                            job_id, scene.id, code, revision=revision_count
+                        )
+                        video_path, frame_path, render_log = render_scene(
+                            code,
+                            work_dir=work_dir / "render" / scene.id,
+                            resolution=resolution,
+                            scene_id=f"{scene.id}_r{revision_count}",
+                        )
+                        if frame_path:
+                            frame_source = "manim_preview"
+                        preview_note = None if video_path else render_log
+                    if video_path is None and prev_video:
+                        video_path, frame_path, frame_source = (
+                            prev_video,
+                            prev_frame,
+                            prev_source,
+                        )
+
+            review = _run_review(revision_count)
+            new_clarity = _review_clarity(review)
+            if new_clarity > best["clarity"] + 0.02:
+                best = {
+                    "code": code,
+                    "video_path": video_path,
+                    "frame_path": frame_path,
+                    "frame_source": frame_source,
+                    "review": review,
+                    "clarity": new_clarity,
+                    "preview_note": preview_note,
+                    "revision": revision_count,
+                }
+                stagnant = 0
+            else:
+                stagnant += 1
+                # Restore best artifacts so the next attempt (or ship) uses them.
+                code = best["code"]
+                video_path = best["video_path"]
+                frame_path = best["frame_path"]
+                frame_source = best["frame_source"]
+                preview_note = best["preview_note"]
+                review = best["review"]
+                _emit(
+                    on_event,
+                    PipelineEventType.status,
+                    f"Kept best {scene.id} at clarity {best['clarity']:.0%} "
+                    f"(r{best['revision']}; attempt {revision_count} did not improve)",
+                    data={
+                        "scene_id": scene.id,
+                        "job_id": job_id,
+                        "best_clarity": best["clarity"],
+                        "attempt_clarity": new_clarity,
+                        "revision": revision_count,
+                    },
+                    job_id=job_id,
+                )
+                if stagnant > max_stagnant:
+                    break
+
+        # Ship the best revision we saw (may be r0).
+        code = best["code"]
+        video_path = best["video_path"]
+        frame_path = best["frame_path"]
+        frame_source = best["frame_source"]
+        preview_note = best["preview_note"]
+        review = best["review"]
+        store.save_code(job_id, scene.id, code, revision=best["revision"])
 
     approved = bool(getattr(review, "approved", False))
     issues = list(getattr(review, "issues", None) or [])
@@ -509,10 +871,12 @@ def _process_one_scene(
     # Mux narration immediately so the UI can play a finished clip per scene
     # (don't wait for the whole pipeline / final compose).
     if video_path:
-        muxed = mux_scene_audio(
+        muxed = _mux_scene_vo(
             video_path,
             audio_path,
             sdir / "scene_vo.mp4",
+            job_id=job_id,
+            narration=scene.narration,
         )
         publish_src = muxed or video_path
         video_url = store.publish_scene_video(job_id, scene.id, publish_src)
@@ -603,10 +967,18 @@ def _compose_and_finish(
     for art in artifacts:
         if not art.video_path:
             continue
-        muxed = mux_scene_audio(
+        vo_path = store.scene_dir(job_id, art.scene_id) / "scene_vo.mp4"
+        # Prefer an already-muxed VO clip so we don't burn subtitles twice.
+        if vo_path.exists() and vo_path.stat().st_size > 0:
+            muxed_clips.append(str(vo_path))
+            art.video_url = store.publish_scene_video(job_id, art.scene_id, str(vo_path))
+            continue
+        muxed = _mux_scene_vo(
             art.video_path,
             art.audio_path,
-            store.scene_dir(job_id, art.scene_id) / "scene_vo.mp4",
+            vo_path,
+            job_id=job_id,
+            narration=art.narration,
         )
         if muxed:
             muxed_clips.append(muxed)
@@ -685,13 +1057,72 @@ def _compose_and_finish(
     return result
 
 
-def _plan_previous_context(plan: ScenePlan, index: int) -> str:
-    """Build continuity context from the plan (safe for parallel scene starts)."""
+def _plan_previous_context(
+    plan: ScenePlan,
+    index: int,
+    artifacts: Optional[dict[int, SceneArtifact]] = None,
+) -> str:
+    """Continuity context for codegen.
+
+    Gives a brief plan-level history of every earlier scene, plus — since
+    generation is sequential — the ACTUAL generated code and narration ending
+    of the scene immediately before this one. That's what really rendered
+    (colors, objects, terminology), not just what the plan intended, so this
+    scene can genuinely continue from it instead of guessing.
+    """
     parts: list[str] = []
     for scene in plan.scenes[:index]:
         desc = (scene.visual_description or "")[:180]
         parts.append(f"- {scene.id}: {scene.title} — {desc}")
-    return "\n".join(parts)
+    history = "\n".join(parts)
+
+    prev = artifacts.get(index - 1) if artifacts and index > 0 else None
+    if not prev or not (prev.code or "").strip():
+        return history
+
+    code_tail = prev.code.strip()[-1600:]
+    last_line = (prev.narration or "").strip()[-220:]
+    detail = (
+        "\n\nImmediately previous scene — REAL generated code + narration ending "
+        f"(this is what was actually rendered for {prev.scene_id}, not just the plan; "
+        "match its colors, object styles, and terminology so this scene continues it "
+        "naturally instead of starting from an unrelated state):\n"
+        f'Ended narration on: "...{last_line}"\n'
+        f"```python\n# ...tail of {prev.scene_id}'s code...\n{code_tail}\n```"
+    )
+    return (history + detail) if history else detail.lstrip()
+
+
+def _plan_next_context(plan: ScenePlan, index: int) -> str:
+    """Brief look-ahead at the following scene, for a smoother hand-off beat."""
+    if index + 1 >= len(plan.scenes):
+        return ""
+    nxt = plan.scenes[index + 1]
+    desc = (nxt.visual_description or "")[:160]
+    opener = (nxt.narration or "")[:120]
+    return f"- {nxt.id}: {nxt.title} — {desc}\n  opens with: \"{opener}\""
+
+
+def _duration_mismatch(
+    video_path: Optional[str],
+    target_duration: float,
+    *,
+    abs_tol: float = 1.2,
+    rel_tol: float = 0.12,
+) -> Optional[float]:
+    """Return the actual rendered duration if it drifts too far from the
+    narration's target duration, else None. Drift here is exactly what causes
+    the video to freeze on a stale frame or run silently past the voiceover.
+    """
+    if not video_path or not Path(video_path).exists() or target_duration <= 0:
+        return None
+    actual = probe_duration(Path(video_path))
+    if actual <= 0:
+        return None
+    tolerance = max(abs_tol, target_duration * rel_tol)
+    if abs(actual - target_duration) > tolerance:
+        return actual
+    return None
 
 
 def _load_existing_scene_artifact(
@@ -721,7 +1152,9 @@ def _load_existing_scene_artifact(
         video_path=str(video_path),
         video_url=video_url,
         preview_note="Reused existing scene artifact",
-        audio_path=str(sdir / "audio.mp3") if (sdir / "audio.mp3").exists() else None,
+        audio_path=(
+            str(p) if (p := _scene_audio_file(sdir)) is not None else None
+        ),
         vlm_frame_urls=[frame_url] if frame_url else [],
         artifact_dir=str(sdir),
     )
@@ -737,8 +1170,10 @@ def _run_scenes_loop(
     user_id: Optional[str],
     prompt: str,
     on_event: Optional[EventCallback],
+    tts_voice: Optional[str] = None,
 ) -> GenerateResult:
     settings = get_settings()
+    voice = tts_voice or _job_tts_voice(job_id)
     work_dir = store.job_dir(job_id)
     total = len(plan.scenes)
     results: dict[int, SceneArtifact] = {}
@@ -780,56 +1215,45 @@ def _run_scenes_loop(
             usage_log=c.drain_usage_log(),
         )
 
-    def _run_one(index: int, scene: SceneSection) -> tuple[int, SceneArtifact]:
-        # Own client per worker — usage_log is not thread-safe.
-        scene_client = OpenRouterClient(settings)
-        try:
-            artifact = _process_one_scene(
-                client=scene_client,
-                job_id=job_id,
-                work_dir=work_dir,
-                plan=plan,
-                scene=scene,
-                index=index,
-                total=total,
-                previous_context=_plan_previous_context(plan, index),
-                resolution=resolution,
-                skip_render=skip_render,
-                on_event=on_event,
-            )
-            return index, artifact
-        finally:
-            _flush_client(scene_client)
-
-    workers = max(1, min(settings.scene_parallelism, len(to_run) or 1))
     if to_run:
         _emit(
             on_event,
             PipelineEventType.status,
-            f"Generating {len(to_run)} scene(s) with parallelism={workers}…",
+            f"Generating {len(to_run)} scene(s) in order — each builds on the "
+            "one before it…",
             data={
                 "job_id": job_id,
-                "scene_parallelism": workers,
                 "pending": [s.id for _, s in to_run],
                 "reused": [plan.scenes[i].id for i in sorted(results)],
+                "tts_voice": voice,
             },
             job_id=job_id,
         )
 
-    if len(to_run) <= 1 or workers == 1:
-        for index, scene in to_run:
-            idx, artifact = _run_one(index, scene)
-            results[idx] = artifact
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [
-                pool.submit(_run_one, index, scene) for index, scene in to_run
-            ]
-            for fut in as_completed(futures):
-                idx, artifact = fut.result()
-                results[idx] = artifact
+    # Strictly sequential: scenes are narratively/visually dependent on one
+    # another, so scene N+1's codegen needs scene N's ACTUAL generated code
+    # and narration (see _plan_previous_context) — running them in parallel
+    # would mean every scene only ever sees the static plan, never what its
+    # predecessor really produced.
+    for index, scene in to_run:
+        artifact = _process_one_scene(
+            client=client,
+            job_id=job_id,
+            work_dir=work_dir,
+            plan=plan,
+            scene=scene,
+            index=index,
+            total=total,
+            previous_context=_plan_previous_context(plan, index, results),
+            next_context=_plan_next_context(plan, index),
+            resolution=resolution,
+            skip_render=skip_render,
+            on_event=on_event,
+            tts_voice=voice,
+        )
+        results[index] = artifact
+        _flush_client(client)
 
-    _flush_client(client)
     artifacts = [results[i] for i in range(total)]
     return _compose_and_finish(
         client=client,
@@ -865,7 +1289,7 @@ def run_pipeline(
         job_id,
         prompt=request.prompt,
         settings_snapshot={
-            "model": settings.openrouter_model,
+            "model": settings.openrouter_model_manim,
             "vlm_model": settings.openrouter_vlm_model,
             "enable_manim_render": settings.enable_manim_render,
             "max_scene_revisions": settings.max_scene_revisions,
@@ -875,6 +1299,10 @@ def run_pipeline(
             "skip_render": request.skip_render,
             "length_preset": request.length_preset,
             "audience": request.audience,
+            "language": request.language,
+            "tts_voice": request.tts_voice,
+            "include_audio": request.include_audio,
+            "include_subtitles": request.include_subtitles,
             "plan_only": request.plan_only,
         },
         user_id=user_id,
@@ -917,6 +1345,7 @@ def run_pipeline(
         request.prompt,
         length_preset=request.length_preset,
         audience=request.audience,
+        language=request.language,
     )
     plan_path = store.save_scene_plan(job_id, plan.model_dump())
     for scene in plan.scenes:
@@ -939,6 +1368,10 @@ def run_pipeline(
         "awaiting_confirm": request.plan_only,
         "length_preset": request.length_preset,
         "audience": request.audience,
+        "language": request.language,
+        "tts_voice": request.tts_voice,
+        "include_audio": request.include_audio,
+        "include_subtitles": request.include_subtitles,
     }
     _emit(
         on_event,
@@ -977,6 +1410,7 @@ def run_pipeline(
         user_id=user_id,
         prompt=request.prompt,
         on_event=on_event,
+        tts_voice=request.tts_voice,
     )
 
 
@@ -1001,6 +1435,15 @@ def continue_pipeline(
     plan = _load_plan(job_id)
     resolution = request.resolution or _job_resolution(job_id)
     skip_render = request.skip_render
+    if request.tts_voice:
+        _persist_job_tts_voice(job_id, request.tts_voice)
+    if request.language:
+        _persist_job_language(job_id, request.language)
+    if request.include_audio is not None:
+        _persist_job_include_audio(job_id, request.include_audio)
+    if request.include_subtitles is not None:
+        _persist_job_include_subtitles(job_id, request.include_subtitles)
+    tts_voice = _job_tts_voice(job_id, fallback=request.tts_voice)
 
     if user_id:
         db.upsert_job(
@@ -1015,7 +1458,7 @@ def continue_pipeline(
         on_event,
         PipelineEventType.status,
         f"Generating {len(plan.scenes)} scenes from storyboard…",
-        data={"job_id": job_id, "title": plan.title},
+        data={"job_id": job_id, "title": plan.title, "tts_voice": tts_voice},
         job_id=job_id,
     )
     return _run_scenes_loop(
@@ -1027,6 +1470,7 @@ def continue_pipeline(
         user_id=user_id or (owner if isinstance(owner, str) else None),
         prompt=prompt,
         on_event=on_event,
+        tts_voice=tts_voice,
     )
 
 
@@ -1037,7 +1481,10 @@ def regenerate_scene(
     *,
     on_event: Optional[EventCallback] = None,
 ) -> dict[str, Any]:
-    """Regenerate a single scene from scratch (not a comment retouch)."""
+    """Regenerate a single scene from scratch (not a comment retouch).
+
+    Skips VLM review and clarity auto-revise — the human is the reviewer.
+    """
     request = request or RegenerateSceneRequest()
     settings = get_settings()
     client = OpenRouterClient(settings=settings)
@@ -1096,19 +1543,24 @@ def regenerate_scene(
         index=index,
         total=len(plan.scenes),
         previous_context="\n".join(prev_parts),
+        next_context=_plan_next_context(plan, index),
         resolution=resolution,
         skip_render=request.skip_render,
         on_event=on_event,
         creative_direction=request.direction,
+        tts_voice=_job_tts_voice(job_id),
+        skip_vlm_review=True,
     )
 
     # Mux + refresh final if we have video
     video_url = artifact.video_url
     if artifact.video_path:
-        muxed = mux_scene_audio(
+        muxed = _mux_scene_vo(
             artifact.video_path,
             artifact.audio_path,
             store.scene_dir(job_id, scene_id) / "scene_vo.mp4",
+            job_id=job_id,
+            narration=artifact.narration,
         )
         if muxed:
             video_url = store.publish_scene_video(job_id, scene_id, muxed)
@@ -1205,16 +1657,18 @@ def retouch_scene(
     retry_count = 0
     max_retries = settings.max_scene_revisions
     target_duration = scene_sec.duration_seconds
-    audio_file = store.scene_dir(job_id, scene_id) / "audio.mp3"
-    if audio_file.exists():
+    audio_file = _scene_audio_file(store.scene_dir(job_id, scene_id))
+    if audio_file is not None:
         target_duration = probe_duration(audio_file) or target_duration
 
+    language = _job_language(job_id)
     new_code = revise_scene_code(
         client,
         code=current_code,
         scene=scene_sec,
         revision_instructions=rev_instructions,
         target_duration_seconds=target_duration,
+        language=language,
     )
 
     ok, err = validate_manim_code(new_code)
@@ -1232,6 +1686,7 @@ def retouch_scene(
                 f"Previous revision had a syntax error:\n{err}\nPlease fix it."
             ),
             target_duration_seconds=target_duration,
+            language=language,
         )
         ok, err = validate_manim_code(new_code)
 
@@ -1276,6 +1731,7 @@ def retouch_scene(
             scene=scene_sec,
             revision_instructions=rev_instructions_err,
             target_duration_seconds=target_duration,
+            language=language,
         )
         rev_count = len(list(sdir.glob("code_r*.py")))
         store.save_code(job_id, scene_id, new_code, revision=rev_count)
@@ -1326,15 +1782,26 @@ def retouch_scene(
 
     video_url = None
     if video_path:
-        if not audio_file.exists():
-            audio_file = work_dir / "audio" / f"{scene_id}.mp3"
+        if audio_file is None or not audio_file.exists():
+            for candidate in (
+                work_dir / "audio" / f"{scene_id}.wav",
+                work_dir / "audio" / f"{scene_id}.mp3",
+            ):
+                if candidate.exists():
+                    audio_file = candidate
+                    break
 
         final_video_path = video_path
-        if audio_file.exists():
-            muxed_path = sdir / "scene_vo.mp4"
-            muxed = mux_scene_audio(video_path, str(audio_file), muxed_path)
-            if muxed:
-                final_video_path = str(muxed_path)
+        muxed_path = sdir / "scene_vo.mp4"
+        muxed = _mux_scene_vo(
+            video_path,
+            str(audio_file) if audio_file is not None and audio_file.exists() else None,
+            muxed_path,
+            job_id=job_id,
+            narration=scene_sec.narration,
+        )
+        if muxed:
+            final_video_path = str(muxed_path)
 
         video_url = store.publish_scene_video(job_id, scene_id, final_video_path)
 
@@ -1410,12 +1877,20 @@ def iter_retouch_scene(
             q.put(None)
 
     Thread(target=worker, daemon=True).start()
+    # Short queue waits + SSE comments so Starlette's iterate_in_threadpool
+    # releases the worker between polls (long .get() timeouts wedge the API).
+    waited = 0.0
     while True:
         try:
-            item = q.get(timeout=300)
+            item = q.get(timeout=0.35)
         except Empty:
-            yield _sse({"type": "error", "message": "Retouch timed out", "data": None})
-            break
+            waited += 0.35
+            if waited >= 300:
+                yield _sse({"type": "error", "message": "Retouch timed out", "data": None})
+                break
+            yield ":\n\n"
+            continue
+        waited = 0.0
         if item is None:
             break
         yield _sse(item.model_dump())
@@ -1458,18 +1933,24 @@ def iter_pipeline_events(
             q.put(None)
 
     Thread(target=worker, daemon=True).start()
+    waited = 0.0
     while True:
         try:
-            item = q.get(timeout=600)
+            item = q.get(timeout=0.35)
         except Empty:
-            yield _sse(
-                {
-                    "type": PipelineEventType.error.value,
-                    "message": "Pipeline timed out waiting for the next event",
-                    "data": None,
-                }
-            )
-            break
+            waited += 0.35
+            if waited >= 600:
+                yield _sse(
+                    {
+                        "type": PipelineEventType.error.value,
+                        "message": "Pipeline timed out waiting for the next event",
+                        "data": None,
+                    }
+                )
+                break
+            yield ":\n\n"
+            continue
+        waited = 0.0
         if item is None:
             break
         yield _sse(item.model_dump())
@@ -1515,6 +1996,45 @@ def iter_continue_events(
     yield from iter_job_event_stream(job_id, after=start_after)
 
 
+async def aiter_continue_events(
+    job_id: str,
+    request: Optional[ContinueRequest] = None,
+    *,
+    user_id: Optional[str] = None,
+    after: Optional[int] = None,
+) -> AsyncIterator[str]:
+    """Async continue stream — job work stays on a daemon thread; SSE polls async."""
+    request = request or ContinueRequest()
+    start_after = (
+        await asyncio.to_thread(job_runner.event_count, job_id)
+        if after is None
+        else max(0, after)
+    )
+
+    def target() -> None:
+        continue_pipeline(job_id, request, on_event=None, user_id=user_id)
+
+    started = await asyncio.to_thread(job_runner.start_job, job_id, target)
+    yield _sse(
+        {
+            "type": PipelineEventType.status.value,
+            "message": (
+                f"Started scene generation for {job_id}"
+                if started
+                else f"Attached to in-flight job {job_id}"
+            ),
+            "data": {
+                "job_id": job_id,
+                "started": started,
+                "running": job_runner.is_running(job_id),
+                "after": start_after,
+            },
+        }
+    )
+    async for chunk in aiter_job_event_stream(job_id, after=start_after):
+        yield chunk
+
+
 def iter_job_event_stream(job_id: str, *, after: int = 0) -> Iterator[str]:
     """Tail durable job events (works across refresh / page changes)."""
     for ev in job_runner.iter_event_tail(job_id, after=after):
@@ -1551,17 +2071,29 @@ def iter_regenerate_scene(
             q.put(None)
 
     Thread(target=worker, daemon=True).start()
+    waited = 0.0
     while True:
         try:
-            item = q.get(timeout=400)
+            item = q.get(timeout=0.35)
         except Empty:
-            yield _sse(
-                {"type": "error", "message": "Regenerate timed out", "data": None}
-            )
-            break
+            waited += 0.35
+            if waited >= 400:
+                yield _sse(
+                    {"type": "error", "message": "Regenerate timed out", "data": None}
+                )
+                break
+            yield ":\n\n"
+            continue
+        waited = 0.0
         if item is None:
             break
         yield _sse(item.model_dump())
+
+
+async def aiter_job_event_stream(job_id: str, *, after: int = 0) -> AsyncIterator[str]:
+    """Async SSE tail — keeps the event loop free during idle polls."""
+    async for ev in job_runner.aiter_event_tail(job_id, after=after):
+        yield _sse(ev)
 
 
 def _sse(payload: dict) -> str:
@@ -1595,10 +2127,24 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
             ),
         }
 
-    audio_p = sdir / "audio.mp3"
-    audio_str = str(audio_p) if audio_p.exists() else None
+    audio_p = _scene_audio_file(sdir)
+    audio_str = str(audio_p) if audio_p is not None else None
     muxed_path = sdir / "scene_vo.mp4"
-    muxed = mux_scene_audio(str(scene_video), audio_str, muxed_path)
+    narration = ""
+    for s in scenes:
+        if s.get("scene_id") == scene_id:
+            narration = str(s.get("narration") or "")
+            section = s.get("section") or {}
+            if not narration and isinstance(section, dict):
+                narration = str(section.get("narration") or "")
+            break
+    muxed = _mux_scene_vo(
+        str(scene_video),
+        audio_str,
+        muxed_path,
+        job_id=job_id,
+        narration=narration,
+    )
 
     muxed_clips: list[str] = []
     for s in scenes:

@@ -1,0 +1,8 @@
+# Deploy as a separate Railway service from this file / Dockerfile.docling
+[build]
+dockerfilePath = "Dockerfile.docling"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"

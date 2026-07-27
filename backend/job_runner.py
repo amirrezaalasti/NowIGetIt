@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, Optional
 
@@ -137,6 +138,49 @@ def iter_event_tail(
             if idle >= idle_rounds_after_stop:
                 return
         time.sleep(poll_seconds)
+
+
+async def aiter_event_tail(
+    job_id: str,
+    *,
+    after: int = 0,
+    poll_seconds: float = 0.45,
+    idle_rounds_after_stop: int = 4,
+) -> AsyncIterator[dict[str, Any]]:
+    """
+    Async variant of iter_event_tail — uses asyncio.sleep so SSE streaming does
+    not pin a Starlette/anyio threadpool worker during idle polls.
+    """
+    idx = max(0, after)
+    idle = 0
+    while True:
+        events = await asyncio.to_thread(read_events, job_id)
+        progressed = False
+        while idx < len(events):
+            ev = events[idx]
+            idx += 1
+            progressed = True
+            idle = 0
+            yield ev
+            et = str(ev.get("type") or "")
+            if et in {"complete", "error"} and not is_running(job_id):
+                return
+        if progressed:
+            continue
+        running = is_running(job_id)
+        if not running:
+            idle += 1
+            err = last_error(job_id)
+            if err and idle == 1:
+                yield {
+                    "type": "error",
+                    "message": err,
+                    "data": {"error": err, "job_id": job_id},
+                }
+                return
+            if idle >= idle_rounds_after_stop:
+                return
+        await asyncio.sleep(poll_seconds)
 
 
 def job_status(job_id: str) -> dict[str, Any]:

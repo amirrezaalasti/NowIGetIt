@@ -30,6 +30,7 @@ class OpenRouterClient:
             },
         )
         self.model = self.settings.openrouter_model
+        self.manim_model = self.settings.openrouter_model_manim
         self.vlm_model = self.settings.openrouter_vlm_model
         self.usage_log: list[dict[str, Any]] = []
 
@@ -80,7 +81,12 @@ class OpenRouterClient:
             kwargs["response_format"] = {"type": "json_object"}
 
         response = self.client.chat.completions.create(**kwargs)
-        kind = "vlm" if resolved_model == self.vlm_model else "llm"
+        if resolved_model == self.vlm_model:
+            kind = "vlm"
+        elif resolved_model == self.manim_model:
+            kind = "manim"
+        else:
+            kind = "llm"
         self._track_usage(response, model=resolved_model, kind=kind)
         content = response.choices[0].message.content or ""
         return content.strip()
@@ -109,21 +115,27 @@ class OpenRouterClient:
         *,
         system: str,
         prompt: str,
-        image_bytes: bytes,
+        image_bytes: bytes | list[bytes],
         mime_type: str = "image/png",
         temperature: float = 0.2,
         max_tokens: int = 2048,
         json_mode: bool = True,
     ) -> dict[str, Any] | str:
         """Image review always uses OPENROUTER_VLM_MODEL (multimodal)."""
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        blobs = image_bytes if isinstance(image_bytes, list) else [image_bytes]
         user_content: list[dict[str, Any]] = [
             {"type": "text", "text": prompt},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime_type};base64,{b64}"},
-            },
         ]
+        for blob in blobs:
+            if not blob:
+                continue
+            b64 = base64.b64encode(blob).decode("utf-8")
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{b64}"},
+                }
+            )
         if json_mode:
             return self.chat_json(
                 system=system,
@@ -326,6 +338,14 @@ def salvage_truncated_json(text: str) -> str | None:
     return out
 
 
+def _strip_markdown_fences(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, count=1)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    return cleaned.strip()
+
+
 def _loads_object(text: str) -> dict[str, Any]:
     """Parse a JSON object, ignoring trailing junk after the first value."""
     decoder = json.JSONDecoder()
@@ -335,12 +355,83 @@ def _loads_object(text: str) -> dict[str, Any]:
     return data
 
 
+_WRAPPER_KEYS = (
+    "plan",
+    "scene_plan",
+    "data",
+    "result",
+    "response",
+    "output",
+    "json",
+    "content",
+)
+
+
+def _looks_like_json_payload(value: str) -> bool:
+    s = value.strip()
+    if not s:
+        return False
+    if s.startswith("```"):
+        return True
+    return s.startswith("{") and "}" in s
+
+
+def _unwrap_nested_json_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Models sometimes wrap the real object as:
+      {"": "```json\\n{...}\\n```"}
+      {"plan": {...}}
+      {"data": "{...}"}
+    Peel those layers so callers get the inner object.
+    """
+    current: Any = data
+    for _ in range(4):
+        if not isinstance(current, dict) or not current:
+            break
+
+        # Already looks like a useful payload (e.g. ScenePlan / VlmReview).
+        if any(
+            k in current
+            for k in ("title", "scenes", "approved", "issues", "ok", "notes")
+        ):
+            break
+
+        next_val: Any = None
+        # Prefer known wrapper keys, then a lone string/dict value.
+        for key in _WRAPPER_KEYS:
+            if key in current:
+                next_val = current[key]
+                break
+        if next_val is None and len(current) == 1:
+            next_val = next(iter(current.values()))
+
+        if isinstance(next_val, dict):
+            current = next_val
+            continue
+        if isinstance(next_val, str) and _looks_like_json_payload(next_val):
+            try:
+                current = _loads_object(_strip_markdown_fences(next_val))
+                continue
+            except (json.JSONDecodeError, ValueError):
+                # Try a deeper extract inside the string.
+                inner = extract_first_json_object(_strip_markdown_fences(next_val))
+                if not inner:
+                    break
+                try:
+                    current = _loads_object(repair_llm_json(inner))
+                    continue
+                except (json.JSONDecodeError, ValueError):
+                    break
+        break
+
+    if not isinstance(current, dict):
+        raise ValueError("Unwrapped JSON root must be an object")
+    return current
+
+
 def parse_json_object(text: str) -> dict[str, Any]:
     """Parse a JSON object from model output, tolerating fenced markdown & LaTeX."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = _strip_markdown_fences(text)
 
     candidates = [cleaned]
     balanced = extract_first_json_object(cleaned)
@@ -362,7 +453,7 @@ def parse_json_object(text: str) -> dict[str, Any]:
                 continue
             seen.add(variant)
             try:
-                return _loads_object(variant)
+                return _unwrap_nested_json_dict(_loads_object(variant))
             except (json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
                 continue

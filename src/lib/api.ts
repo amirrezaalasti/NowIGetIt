@@ -267,12 +267,32 @@ export async function approveScene(
   return res.json();
 }
 
+export type TtsVoiceOption = {
+  id: string;
+  gender: string;
+  label: string;
+};
+
+export type LanguageOption = {
+  id: string;
+  label: string;
+  native_label: string;
+};
+
+export type LengthPreset = "short" | "standard" | "deep";
+export type Audience = "hs" | "undergrad" | "general";
+
 export async function fetchHealth(): Promise<{
   ok: boolean;
   model?: string;
+  manim_model?: string;
   vlm_model?: string;
   openrouter_configured?: boolean;
   tts_configured?: boolean;
+  tts_model?: string;
+  tts_voice?: string;
+  tts_voices?: TtsVoiceOption[];
+  languages?: LanguageOption[];
   manim_render_enabled?: boolean;
   manim_available?: boolean;
   manim_version?: string;
@@ -306,7 +326,7 @@ export type UsageSnapshot = {
   };
 };
 
-export async function fetchMe(): Promise<{
+export async function fetchMe(signal?: AbortSignal): Promise<{
   user: {
     id: string;
     email?: string | null;
@@ -316,12 +336,18 @@ export async function fetchMe(): Promise<{
   usage: UsageSnapshot | null;
   supabase_configured: boolean;
 }> {
-  const res = await fetch(`${apiBase()}/api/me`, {
-    cache: "no-store",
-    headers: await authHeaders(),
-  });
-  if (!res.ok) throw new Error("Failed to load account usage");
-  return res.json();
+  try {
+    const res = await fetch(`${apiBase()}/api/me`, {
+      cache: "no-store",
+      headers: await authHeaders(),
+      signal,
+    });
+    if (!res.ok) throw new Error("Failed to load account usage");
+    return res.json();
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Account usage");
+  }
 }
 
 export async function listJobs(): Promise<JobSummary[]> {
@@ -379,9 +405,6 @@ export async function streamJobEvents(
   }
 }
 
-export type LengthPreset = "short" | "standard" | "deep";
-export type Audience = "hs" | "undergrad" | "general";
-
 export type SceneSectionDraft = {
   id: string;
   title: string;
@@ -409,6 +432,12 @@ export type GenerateOptions = {
   skip_render?: boolean;
   length_preset?: LengthPreset;
   audience?: Audience;
+  language?: string;
+  tts_voice?: string;
+  /** Generate spoken narration (default true). */
+  include_audio?: boolean;
+  /** Burn narration as on-screen subtitles (default true). */
+  include_subtitles?: boolean;
   plan_only?: boolean;
 };
 
@@ -483,6 +512,10 @@ export async function streamGenerate(
         resolution: opts.resolution ?? "720p",
         length_preset: opts.length_preset ?? "standard",
         audience: opts.audience ?? "general",
+        language: opts.language ?? "en",
+        tts_voice: opts.tts_voice ?? "Kore",
+        include_audio: opts.include_audio ?? true,
+        include_subtitles: opts.include_subtitles ?? true,
         plan_only: opts.plan_only ?? true,
       }),
       signal,
@@ -519,7 +552,14 @@ export async function streamContinue(
   jobId: string,
   onEvent: (event: PipelineEvent) => void,
   signal?: AbortSignal,
-  opts?: { resolution?: string; skip_render?: boolean },
+  opts?: {
+    resolution?: string;
+    skip_render?: boolean;
+    language?: string;
+    tts_voice?: string;
+    include_audio?: boolean;
+    include_subtitles?: boolean;
+  },
 ): Promise<void> {
   try {
     const res = await fetch(`${apiBase()}/api/jobs/${jobId}/continue/stream`, {
@@ -531,6 +571,10 @@ export async function streamContinue(
       body: JSON.stringify({
         resolution: opts?.resolution ?? "720p",
         skip_render: opts?.skip_render ?? false,
+        language: opts?.language,
+        tts_voice: opts?.tts_voice,
+        include_audio: opts?.include_audio,
+        include_subtitles: opts?.include_subtitles,
       }),
       signal,
       cache: "no-store",
@@ -578,4 +622,243 @@ export async function streamRegenerateScene(
     throw new Error(detail || `Regenerate failed (${res.status})`);
   }
   await readSseStream(res, onEvent);
+}
+
+export type DocumentAskAction =
+  | "explain"
+  | "explain_figure"
+  | "comment"
+  | "simplify"
+  | "translate"
+  | "quiz"
+  | "deepen"
+  | "relate"
+  | "critique"
+  | "summarize_slide"
+  | "extract_formula"
+  | "key_takeaways"
+  | "misconceptions"
+  | "turn_into_video_prompt"
+  | "freeform";
+
+export type DocumentBlock = {
+  id: string;
+  slide_id: string;
+  type: string;
+  text: string;
+  html_snippet?: string;
+  image_path?: string | null;
+  image_url?: string | null;
+};
+
+export type DocumentSlide = {
+  id: string;
+  index: number;
+  title: string;
+  html?: string;
+  html_url?: string | null;
+  plain_text?: string;
+  block_ids: string[];
+};
+
+export type DocumentManifest = {
+  doc_id: string;
+  title: string;
+  source_filename: string;
+  source_ext: string;
+  status: string;
+  slide_count: number;
+  slides: DocumentSlide[];
+  blocks: Record<string, DocumentBlock>;
+  markdown_url?: string | null;
+  created_at?: string;
+};
+
+export type DocumentListItem = {
+  doc_id: string;
+  title?: string | null;
+  source_filename?: string | null;
+  created_at?: string | null;
+  status?: string | null;
+  slide_count?: number;
+  kind?: string;
+};
+
+export type DocumentAnnotation = {
+  id: string;
+  doc_id: string;
+  slide_id: string;
+  block_id?: string | null;
+  action: string;
+  message: string;
+  reply: string;
+  author: string;
+  created_at: string;
+  pinned?: boolean;
+};
+
+export type DocumentDetail = {
+  doc_id: string;
+  manifest: DocumentManifest;
+  annotations: DocumentAnnotation[];
+  urls?: Record<string, string>;
+};
+
+export type DocumentAskTurn = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type DocumentAskResult = {
+  doc_id: string;
+  slide_id: string;
+  block_id?: string | null;
+  action: DocumentAskAction;
+  reply: string;
+  comment_id?: string | null;
+  video_prompt?: string | null;
+  user_message?: string;
+};
+
+export async function listDocuments(limit = 50): Promise<DocumentListItem[]> {
+  const res = await fetch(`${apiBase()}/api/documents?limit=${limit}`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to list documents");
+  const data = (await res.json()) as { documents: DocumentListItem[] };
+  return data.documents || [];
+}
+
+export async function getDocument(docId: string): Promise<DocumentDetail> {
+  const res = await fetch(`${apiBase()}/api/documents/${docId}`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to load document");
+  return res.json();
+}
+
+export async function deleteDocument(docId: string): Promise<void> {
+  const res = await fetch(`${apiBase()}/api/documents/${docId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Delete failed (${res.status})`);
+  }
+}
+
+export async function uploadDocument(file: File): Promise<{
+  doc_id: string;
+  title: string;
+  slide_count: number;
+  status: string;
+  manifest: DocumentManifest;
+}> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${apiBase()}/api/documents/upload`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: form,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Upload failed (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Progressive upload: emits status / slide_ready / complete as pages convert. */
+export async function uploadDocumentStream(
+  file: File,
+  onEvent: (event: PipelineEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${apiBase()}/api/documents/upload/stream`, {
+    method: "POST",
+    headers: await authHeaders({ Accept: "text/event-stream" }),
+    body: form,
+    signal,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Upload failed (${res.status})`);
+  }
+  await readSseStream(res, onEvent);
+}
+
+export async function askDocument(
+  docId: string,
+  body: {
+    action: DocumentAskAction;
+    slide_id: string;
+    block_id?: string | null;
+    message?: string;
+    language?: string;
+    save_as_comment?: boolean;
+    prior_reply?: string | null;
+    conversation?: DocumentAskTurn[];
+  },
+): Promise<DocumentAskResult> {
+  const res = await fetch(`${apiBase()}/api/documents/${docId}/ask`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Ask failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function saveDocumentComment(
+  docId: string,
+  body: {
+    slide_id: string;
+    block_id?: string | null;
+    action?: string;
+    message?: string;
+    reply: string;
+    author?: string;
+  },
+): Promise<DocumentAnnotation> {
+  const res = await fetch(`${apiBase()}/api/documents/${docId}/comments`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Save comment failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function deleteDocumentComment(
+  docId: string,
+  commentId: string,
+): Promise<void> {
+  const res = await fetch(
+    `${apiBase()}/api/documents/${docId}/comments/${commentId}`,
+    {
+      method: "DELETE",
+      headers: await authHeaders(),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Delete comment failed (${res.status})`);
+  }
 }

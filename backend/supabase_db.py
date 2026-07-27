@@ -127,6 +127,62 @@ def upsert_job(
     )
 
 
+def save_job_state(
+    *,
+    job_id: str,
+    user_id: str,
+    prompt: Optional[str] = None,
+    title: Optional[str] = None,
+    status: Optional[str] = None,
+    meta: Optional[dict[str, Any]] = None,
+    plan: Optional[dict[str, Any]] = None,
+    events: Optional[list[dict[str, Any]]] = None,
+) -> None:
+    """Persist durable job payload (survives Vercel ephemeral /tmp)."""
+    if not supabase_enabled():
+        return
+    try:
+        _rpc(
+            "save_job_state",
+            {
+                "p_id": job_id,
+                "p_user_id": user_id,
+                "p_prompt": prompt,
+                "p_title": title,
+                "p_status": status,
+                "p_meta": meta,
+                "p_plan": plan,
+                "p_events": events,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to save job state for %s", job_id)
+
+
+def get_job_state(job_id: str, user_id: str) -> Optional[dict[str, Any]]:
+    if not supabase_enabled():
+        return None
+    try:
+        data = _rpc("get_job_state", {"p_id": job_id, "p_user_id": user_id})
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to load job state for %s", job_id)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def list_user_jobs(user_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    if not supabase_enabled():
+        return []
+    try:
+        data = _rpc("list_user_jobs", {"p_user_id": user_id, "p_limit": limit})
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to list jobs for user %s", user_id)
+        return []
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    return []
+
+
 def record_llm_usage(
     *,
     user_id: str,
@@ -208,3 +264,14 @@ def sync_job_storage(*, user_id: str, job_id: str, job_path: Path) -> None:
         raise
     except Exception:  # noqa: BLE001
         logger.exception("Failed to sync storage for job %s", job_id)
+
+
+def delete_job(*, job_id: str, user_id: str) -> None:
+    """Remove durable job row via SECURITY DEFINER RPC (releases storage)."""
+    if not supabase_enabled():
+        return
+    try:
+        _rpc("delete_job", {"p_id": job_id, "p_user_id": user_id})
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to delete job row %s via delete_job RPC", job_id)
+        raise

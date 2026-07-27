@@ -13,7 +13,11 @@ from typing import Optional
 
 import httpx
 
-from backend.code_utils import clean_manim_code, extract_scene_name
+from backend.code_utils import (
+    assert_safe_text_shim,
+    clean_manim_code,
+    extract_scene_name,
+)
 from backend.config import get_settings
 
 
@@ -90,8 +94,9 @@ def _render_scene_remote(
     worker_url: str,
     worker_secret: str,
 ) -> tuple[Optional[str], Optional[str], str]:
-    # Ensure Text kerning shim + other normalizations ship with the payload.
+    # Ensure Text safety shim + other normalizations ship with the payload.
     code = clean_manim_code(code)
+    assert_safe_text_shim(code)
     headers = {"Content-Type": "application/json"}
     if worker_secret:
         headers["Authorization"] = f"Bearer {worker_secret}"
@@ -152,6 +157,7 @@ def _render_scene_local(
     scene_id: str,
 ) -> tuple[Optional[str], Optional[str], str]:
     code = clean_manim_code(code)
+    assert_safe_text_shim(code)
     scene_dir = Path(work_dir).resolve() / scene_id
     scene_dir.mkdir(parents=True, exist_ok=True)
     scene_file = scene_dir / "scene.py"
@@ -205,6 +211,42 @@ def _render_scene_local(
     return video_path, frame_path, log[-2500:]
 
 
+def _probe_video_duration(video_path: str) -> Optional[float]:
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if proc.returncode != 0:
+            return None
+        return float((proc.stdout or "").strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _run_ffmpeg_frame(cmd: list[str], frame_path: Path) -> Optional[str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=30)
+        if proc.returncode == 0 and frame_path.exists() and frame_path.stat().st_size > 0:
+            return str(frame_path)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _extract_preview_frame(video_path: str, frame_path: Path) -> Optional[str]:
     """Grab a frame from the last ~0.25s so VLM sees the finished scene."""
     if not shutil.which("ffmpeg"):
@@ -250,13 +292,55 @@ def _extract_preview_frame(video_path: str, frame_path: Path) -> Optional[str]:
         ],
     ]
     for cmd in attempts:
-        try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=30)
-            if proc.returncode == 0 and frame_path.exists() and frame_path.stat().st_size > 0:
-                return str(frame_path)
-        except Exception:  # noqa: BLE001
-            continue
+        path = _run_ffmpeg_frame(cmd, frame_path)
+        if path:
+            return path
     return None
+
+
+def extract_review_frames(video_path: str, out_dir: Path) -> list[str]:
+    """
+    Extract late-mid + end preview frames for VLM review.
+
+    Avoid early midpoints (~40%): titles often use Write() and look "truncated"
+    mid-animation, which caused false VLM rejects. Prefer ~70% (diagram built,
+    labels mostly done) and the finished end hold.
+    Returns paths in chronological order.
+    """
+    if not video_path or not Path(video_path).exists() or not shutil.which("ffmpeg"):
+        return []
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frames: list[str] = []
+
+    duration = _probe_video_duration(video_path) or 0.0
+    if duration >= 2.5:
+        # Late enough that Write/FadeIn titles should be finished in most scenes.
+        mid_t = max(1.0, min(duration - 0.7, duration * 0.72))
+        mid_path = out_dir / "preview_mid.png"
+        mid = _run_ffmpeg_frame(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{mid_t:.2f}",
+                "-i",
+                video_path,
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(mid_path),
+            ],
+            mid_path,
+        )
+        if mid:
+            frames.append(mid)
+
+    end = _extract_preview_frame(video_path, out_dir / "preview.png")
+    if end:
+        frames.append(end)
+    return frames
 
 
 def make_job_dir(job_id: str) -> Path:

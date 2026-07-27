@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import threading
@@ -10,8 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from backend import supabase_db as db
+
 ROOT = Path(__file__).resolve().parent.parent
 _EVENT_LOCK = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def artifacts_root() -> Path:
@@ -49,12 +53,119 @@ def write_json(path: Path, data: Any) -> str:
     return str(path)
 
 
+def _read_json_file(path: Path) -> Optional[Any]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _read_events_list(job_id: str) -> list[dict[str, Any]]:
+    path = artifacts_root() / job_id / "events.jsonl"
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            events.append(item)
+    return events
+
+
+def sync_job_state(
+    job_id: str,
+    *,
+    status: Optional[str] = None,
+) -> None:
+    """Mirror local meta/plan/events into Supabase for durable Vercel jobs."""
+    if not db.supabase_enabled():
+        return
+    root = artifacts_root() / job_id
+    meta = _read_json_file(root / "meta.json")
+    if not isinstance(meta, dict):
+        return
+    user_id = meta.get("user_id")
+    if not isinstance(user_id, str) or not user_id:
+        return
+    plan = _read_json_file(root / "scene_plan.json")
+    plan_dict = plan if isinstance(plan, dict) else None
+    title = None
+    if plan_dict and isinstance(plan_dict.get("title"), str):
+        title = plan_dict["title"]
+    prompt = meta.get("prompt") if isinstance(meta.get("prompt"), str) else None
+    events = _read_events_list(job_id)
+    db.save_job_state(
+        job_id=job_id,
+        user_id=user_id,
+        prompt=prompt,
+        title=title,
+        status=status,
+        meta=meta,
+        plan=plan_dict,
+        events=events,
+    )
+
+
+def hydrate_job_from_db(job_id: str, user_id: str) -> bool:
+    """Rebuild local job folder from Supabase when /tmp was wiped."""
+    row = db.get_job_state(job_id, user_id)
+    if not row:
+        return False
+
+    root = job_dir(job_id)
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else None
+    if not meta:
+        meta = {
+            "job_id": job_id,
+            "prompt": row.get("prompt") or "",
+            "created_at": row.get("created_at"),
+            "settings": {},
+            "user_id": user_id,
+        }
+    else:
+        meta = {**meta, "user_id": user_id, "job_id": job_id}
+    write_json(root / "meta.json", meta)
+
+    plan = row.get("plan")
+    if isinstance(plan, dict):
+        write_json(root / "scene_plan.json", plan)
+        for scene in plan.get("scenes") or []:
+            if isinstance(scene, dict) and isinstance(scene.get("id"), str):
+                write_json(scene_dir(job_id, scene["id"]) / "section.json", scene)
+
+    events = row.get("events")
+    if isinstance(events, list) and events:
+        lines = [
+            json.dumps(ev, ensure_ascii=False)
+            for ev in events
+            if isinstance(ev, dict)
+        ]
+        (root / "events.jsonl").write_text(
+            ("\n".join(lines) + "\n") if lines else "",
+            encoding="utf-8",
+        )
+    logger.info("Hydrated job %s from Supabase for user %s", job_id, user_id)
+    return True
+
+
 def append_event(job_id: str, event: dict[str, Any]) -> None:
     path = job_dir(job_id) / "events.jsonl"
     line = json.dumps(event, ensure_ascii=False) + "\n"
     with _EVENT_LOCK:
         with path.open("a", encoding="utf-8") as f:
             f.write(line)
+        # Durable copy for reconnects across Vercel instances.
+        try:
+            sync_job_state(job_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed syncing events for job %s", job_id)
 
 
 def init_job(
@@ -79,6 +190,8 @@ def init_job(
             "user_name": user_name,
         },
     )
+    if user_id:
+        sync_job_state(job_id, status="running")
     return root
 
 
@@ -98,7 +211,8 @@ def assert_job_owner(job_id: str, user_id: str) -> None:
     """Raise FileNotFoundError if missing, PermissionError if not owned by user."""
     root = artifacts_root() / job_id
     if not root.exists() or not (root / "meta.json").exists():
-        raise FileNotFoundError(job_id)
+        if not hydrate_job_from_db(job_id, user_id):
+            raise FileNotFoundError(job_id)
     owner = job_owner_id(job_id)
     # Legacy jobs without owner are inaccessible once auth is on
     if owner != user_id:
@@ -106,7 +220,9 @@ def assert_job_owner(job_id: str, user_id: str) -> None:
 
 
 def save_scene_plan(job_id: str, plan: dict[str, Any]) -> str:
-    return write_json(job_dir(job_id) / "scene_plan.json", plan)
+    path = write_json(job_dir(job_id) / "scene_plan.json", plan)
+    sync_job_state(job_id)
+    return path
 
 
 def save_scene_section(job_id: str, scene_id: str, section: dict[str, Any]) -> str:
@@ -220,7 +336,27 @@ def save_result(job_id: str, data: dict[str, Any]) -> str:
 
 
 def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[str, Any]]:
+    # Prefer Supabase — local /tmp on Vercel is incomplete across instances.
+    if user_id and db.supabase_enabled():
+        rows = db.list_user_jobs(user_id, limit=limit)
+        if rows:
+            return [
+                {
+                    "job_id": row.get("job_id") or row.get("id"),
+                    "title": row.get("title"),
+                    "prompt": row.get("prompt"),
+                    "created_at": row.get("created_at"),
+                    "has_result": bool(row.get("has_result")),
+                    "user_id": row.get("user_id") or user_id,
+                    "status": row.get("status"),
+                }
+                for row in rows
+                if row.get("job_id") or row.get("id")
+            ]
+
     root = artifacts_root()
+    if not root.exists():
+        return []
     jobs: list[dict[str, Any]] = []
     for path in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         if not path.is_dir() or path.name.startswith("."):
@@ -256,10 +392,13 @@ def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[st
     return jobs
 
 
-def load_job(job_id: str) -> dict[str, Any]:
+def load_job(job_id: str, *, user_id: Optional[str] = None) -> dict[str, Any]:
     root = artifacts_root() / job_id
     if not root.exists() or not (root / "meta.json").exists():
-        raise FileNotFoundError(job_id)
+        if user_id and hydrate_job_from_db(job_id, user_id):
+            root = artifacts_root() / job_id
+        else:
+            raise FileNotFoundError(job_id)
 
     def _read(name: str) -> Any:
         path = root / name

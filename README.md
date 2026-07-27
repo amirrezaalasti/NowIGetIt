@@ -9,50 +9,48 @@
 [![OpenRouter](https://img.shields.io/badge/LLM-OpenRouter-6366f1)](https://openrouter.ai/)
 [![License](https://img.shields.io/badge/License-Proprietary-red)](./LICENSE)
 
-Turn a natural-language prompt into an educational video — plan scenes with an LLM, generate Manim animations, review frames with a VLM, and narrate with TTS.
+Turn a natural-language prompt into an educational video — or upload a PDF/deck and interrogate every section with an LLM.
 
 ## Features
 
-- **LLM scene planning** — structured multi-scene JSON from a single prompt
-- **Manim code generation** — per-scene animation scripts with iterative revision
-- **VLM frame review** — vision model checks rendered (or storyboard) frames for accuracy
-- **Text-to-speech** — narration audio via any OpenAI-compatible TTS API
-- **Live progress** — streaming NDJSON events while the pipeline runs
-- **Debug artifacts** — full job history: plans, code revisions, VLM frames, and results
+- **Create (video)** — LLM scene planning, Manim codegen, VLM review, TTS narration
+- **Understand (documents)** — Docling converts PDF/PPTX/DOCX/… into interactive HTML slides; click any block for explanations, quizzes, figure readouts, and more
+- **Live progress** — streaming events while pipelines run
+- **Debug artifacts** — full job history scoped per user
 - **Google sign-in** — Auth.js sessions; jobs and media are scoped per user
 
 ## Architecture
 
+**Create**
 ```
-Prompt → Plan → [Generate → Render → VLM → Revise] × N → TTS → Final Debug → Video
+Prompt → Plan → [Generate → Render → VLM → Revise] × N → TTS → Video
 ```
 
-| Step | Description |
-|------|-------------|
-| **Plan** | Prompt → structured `ScenePlan` (title, scenes, narration, visuals) |
-| **Per scene** | Manim code → render → VLM review → revise up to `MAX_SCENE_REVISIONS` |
-| **TTS** | Narration → speech (`TTS_*` OpenAI-compatible API) |
-| **Final** | Cross-scene debug pass with optional last code fixes |
+**Understand**
+```
+Upload → Docling (local or Railway) → HTML slides + block ids → LLM/VLM ask on selection
+```
 
 **Deploy split**
-- **Vercel** — Next.js UI + FastAPI orchestration (plan, codegen, VLM, TTS, quotas)
-- **Railway** — Manim Community Edition render worker (`Dockerfile.railway`, `POST /render`)
-- **Local** — set `ENABLE_MANIM_RENDER=true` to render in-process (no Railway needed)
+- **Vercel** — Next.js UI + FastAPI orchestration
+- **Railway (Manim)** — `Dockerfile.railway` / `POST /render`
+- **Railway (Docling)** — `Dockerfile.docling` / `POST /convert`
+- **Local** — Manim via `ENABLE_MANIM_RENDER=true`; Docling via `pip install -r requirements-docling.txt` or `DOCLING_WORKER_URL`
 
-Set `RENDER_WORKER_URL` + `RENDER_WORKER_SECRET` on Vercel to offload Manim to Railway.
-
-**Stack:** Next.js · FastAPI · OpenRouter · Manim CE (Railway/local) · Supabase
+**Stack:** Next.js · FastAPI · OpenRouter · Manim CE · Docling · Supabase
 
 ## Project layout
 
 ```
-├── src/                    # Next.js App Router UI
+├── src/                    # Next.js App Router UI (/ = Create, /understand)
 ├── api/index.py            # FastAPI entry (Vercel)
 ├── render_worker/          # Manim HTTP worker (Railway)
-├── backend/                # Pipeline: plan → generate → VLM → TTS
+├── docling_worker/         # Docling HTTP worker (Railway)
+├── backend/                # Video pipeline + documents/ (Understand)
 ├── Dockerfile.railway      # Railway Manim image
-├── railway.toml
-├── requirements-render.txt # Worker deps
+├── Dockerfile.docling      # Railway Docling image
+├── requirements-render.txt
+├── requirements-docling.txt
 └── vercel.json
 ```
 
@@ -75,9 +73,10 @@ cp .env.example .env
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENROUTER_API_KEY` | Yes | OpenRouter API key |
-| `OPENROUTER_MODEL` | No | Text LLM (default in `.env.example`) |
+| `OPENROUTER_MODEL` | No | General text LLM (documents / Understand) |
+| `OPENROUTER_MODEL_MANIM` | No | Manim pipeline LLM (planning, codegen, code QA; falls back to `OPENROUTER_MODEL`) |
 | `OPENROUTER_VLM_MODEL` | No | Vision model for frame review |
-| `TTS_API_KEY` / `TTS_BASE_URL` / `TTS_MODEL` / `TTS_VOICE` | No | OpenAI-compatible TTS |
+| `TTS_*` | No | OpenRouter TTS (defaults to Gemini 3.1 Flash TTS / voice `Kore`; key falls back to `OPENROUTER_API_KEY`) |
 | `ENABLE_MANIM_RENDER` | No | `true` for local video output |
 | `NEXT_PUBLIC_API_BASE_URL` | No | API origin (local: `http://127.0.0.1:8000`) |
 | `AUTH_SECRET` | Yes | Shared secret for Auth.js + API JWTs (`openssl rand -hex 32`) |
