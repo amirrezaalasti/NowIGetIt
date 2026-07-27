@@ -19,6 +19,7 @@ class AuthUser:
 
 
 def _auth_secret() -> str:
+    from backend.config import get_settings  # noqa: F401
     return (os.getenv("AUTH_SECRET") or os.getenv("NEXTAUTH_SECRET") or "").strip()
 
 

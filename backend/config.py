@@ -51,10 +51,11 @@ class Settings:
 
 
 def get_settings() -> Settings:
+    _load_env_files()
     # Text LLM (planning / codegen). VLM must be multimodal — do not fall back
     # to OPENROUTER_MODEL when it may be text-only (e.g. DeepSeek).
     vlm = (os.getenv("OPENROUTER_VLM_MODEL") or "").strip()
-    if not vlm:
+    if not vlm or "deepseek" in vlm.lower():
         vlm = "google/gemini-2.5-flash-lite"
     return Settings(
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
