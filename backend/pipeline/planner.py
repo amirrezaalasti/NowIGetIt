@@ -18,12 +18,15 @@ LENGTH_TARGET_SECONDS: dict[str, tuple[float, float]] = {
     "deep": (150.0, 210.0),
 }
 
-# (min_scenes, max_scenes) — paired with the duration target above so the
-# model doesn't try to hit the runtime with 2 overlong scenes or 20 tiny ones.
+# Soft floor for a useful scene; longer scenes are fine when the visual idea needs them.
+MIN_SCENE_SECONDS = 7.0
+
+# (min_scenes, max_scenes) — enough beats to reach the duration target without
+# collapsing the whole video into a handful of scenes.
 LENGTH_SCENE_COUNT: dict[str, tuple[int, int]] = {
-    "short": (3, 4),
-    "standard": (4, 6),
-    "deep": (6, 9),
+    "short": (4, 6),
+    "standard": (6, 9),
+    "deep": (9, 14),
 }
 
 LENGTH_GUIDANCE = {
@@ -125,6 +128,12 @@ Rules:
   (they are machine keys). Prefer progressive reveal: introduce → build intuition → summarize.
 - Narration: clear spoken script for TTS in the output language. Match duration_seconds
   to spoken length (~2.5 words/sec for Latin scripts; ~3–4 syllables/sec for others).
+- SCENE LENGTH: aim for at least __SCENE_MIN__ seconds of narration per scene so each
+  beat has room to breathe. Longer scenes are fine when one visual idea genuinely needs
+  the time — do not pad with silence, pulsing shapes, or filler waits; add content or
+  split into another scene only when there are two distinct visual ideas.
+- Each scene's narration must name 2-4 concrete things that will get on-screen labels,
+  so the coder has real content to reveal instead of animating unlabeled shapes.
 - Visuals: concrete Manim-friendly elements (shapes, graphs, equations as Text, arrows, labels).
 
 CONTINUITY (critical — scenes are rendered separately, so the SCRIPT AND VISUAL PLAN are
@@ -220,7 +229,30 @@ Return ONLY a JSON object with this shape:
     }
   ]
 }
-"""
+""".replace("__SCENE_MIN__", f"{MIN_SCENE_SECONDS:.0f}")
+
+
+# Full multi-scene plans (esp. non-English) routinely exceed 4k completion
+# tokens; truncating mid-JSON yields metadata-only objects missing `scenes`.
+PLANNER_MAX_TOKENS: dict[str, int] = {
+    "short": 8192,
+    "standard": 12288,
+    "deep": 16384,
+}
+
+
+def _require_scenes_payload(data: dict) -> None:
+    """Fail fast when the model truncated before emitting the scenes array."""
+    scenes = data.get("scenes") if isinstance(data, dict) else None
+    if isinstance(scenes, list) and scenes:
+        return
+    keys = sorted(data.keys()) if isinstance(data, dict) else []
+    raise ValueError(
+        "JSON is missing a non-empty 'scenes' array "
+        f"(got keys {keys}). The previous response was likely truncated — "
+        "return the COMPLETE object including every scene, and keep each "
+        "scene's narration concise enough to fit."
+    )
 
 
 def create_scene_plan(
@@ -239,6 +271,7 @@ def create_scene_plan(
         length_preset, LENGTH_TARGET_SECONDS["standard"]
     )
     min_scenes, max_scenes = LENGTH_SCENE_COUNT.get(length_preset, (3, 6))
+    max_tokens = PLANNER_MAX_TOKENS.get(length_preset, PLANNER_MAX_TOKENS["standard"])
     user = f"""Learner prompt:
 {prompt}
 
@@ -249,8 +282,12 @@ land between {min_target:.0f} and {max_target:.0f} seconds total, across
 {min_scenes}-{max_scenes} scenes. Write full, complete narration sentences —
 not short filler lines — so the natural spoken duration reaches this target;
 padding with silence/wait time does not count, only actual narration length.
+Individual scenes may run longer when the idea needs it.
 Audience ({audience}): {aud}
 Output language ({lang}): Write ALL learner-facing text in {lang_name}.
+CRITICAL: the JSON MUST include a top-level "scenes" array with
+{min_scenes}-{max_scenes} scene objects. Do not stop after title/summary/
+palette — emit every scene before ending the response.
 """
     last_err = None
     for attempt in range(3):
@@ -259,9 +296,10 @@ Output language ({lang}): Write ALL learner-facing text in {lang_name}.
                 system=PLANNER_SYSTEM,
                 user=user,
                 temperature=0.4 + (attempt * 0.1),
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 model=client.manim_model,
             )
+            _require_scenes_payload(data)
             plan = ScenePlan.model_validate(data)
             _validate_plan_length(plan, length_preset=length_preset, language=lang)
             return plan
@@ -317,6 +355,7 @@ def revise_scene_plan(
         length_preset, LENGTH_TARGET_SECONDS["standard"]
     )
     min_scenes, max_scenes = LENGTH_SCENE_COUNT.get(length_preset, (3, 6))
+    max_tokens = PLANNER_MAX_TOKENS.get(length_preset, PLANNER_MAX_TOKENS["standard"])
     plan_json = plan.model_dump_json(indent=2)
     user = f"""Existing scene plan (JSON):
 {plan_json}
@@ -332,6 +371,8 @@ between {min_target:.0f} and {max_target:.0f} seconds total, across
 {min_scenes}-{max_scenes} scenes.
 Audience ({audience}): {aud}
 Output language ({lang}): Write ALL learner-facing text in {lang_name}.
+CRITICAL: return the FULL updated plan JSON including a non-empty "scenes"
+array — never omit scenes.
 """
     last_err = None
     for attempt in range(3):
@@ -340,12 +381,11 @@ Output language ({lang}): Write ALL learner-facing text in {lang_name}.
                 system=REVISE_PLAN_SYSTEM,
                 user=user,
                 temperature=0.35 + (attempt * 0.1),
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 model=client.manim_model,
             )
+            _require_scenes_payload(data)
             revised = ScenePlan.model_validate(data)
-            if not revised.scenes:
-                raise ValueError("Revised plan has no scenes.")
             return revised
         except Exception as e:
             last_err = e

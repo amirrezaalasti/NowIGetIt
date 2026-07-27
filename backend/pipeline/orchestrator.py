@@ -611,9 +611,11 @@ def _process_one_scene(
                 f"{'Shorten' if diff > 0 else 'Lengthen'} the animation so TOTAL "
                 f"self.play(run_time=...) + self.wait(...) time (excluding the final "
                 f"0.5s hold) lands within 0.5s of {target_duration:.1f}s. Spread the "
-                "change proportionally across every beat's run_time/wait — never solve "
-                "this with one giant self.wait() or by deleting a beat. Keep the same "
-                "visuals, layout, and beat order; only retime them."
+                "change proportionally across every beat's run_time — never solve this "
+                "with waits, pulse/opacity loops, repeated plays, or by deleting a "
+                "beat. If run_time alone cannot cover it, add a substantive step (a new "
+                "labeled annotation the narration mentions), not decorative motion. "
+                "Keep the same visuals, layout, and beat order; only retime them."
             )
             prev_good = (code, video_path, frame_path, frame_source)
             code = revise_scene_code(
