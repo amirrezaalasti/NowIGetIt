@@ -138,11 +138,19 @@ Length preset ({length_preset}): {length}
 Audience ({audience}): {aud}
 Output language ({lang}): Write ALL learner-facing text in {lang_name}.
 """
-    data = client.chat_json(
-        system=PLANNER_SYSTEM,
-        user=user,
-        temperature=0.4,
-        max_tokens=4096,
-        model=client.manim_model,
-    )
-    return ScenePlan.model_validate(data)
+    last_err = None
+    for attempt in range(3):
+        try:
+            data = client.chat_json(
+                system=PLANNER_SYSTEM,
+                user=user,
+                temperature=0.4 + (attempt * 0.1),
+                max_tokens=4096,
+                model=client.manim_model,
+            )
+            return ScenePlan.model_validate(data)
+        except Exception as e:
+            last_err = e
+            user += f"\n\nERROR on last attempt: {e}\nPlease ensure you return a valid JSON object matching the requested schema."
+    
+    raise ValueError(f"Failed to generate valid ScenePlan after 3 attempts: {last_err}") from last_err

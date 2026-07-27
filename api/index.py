@@ -7,6 +7,7 @@ import mimetypes
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +35,7 @@ from backend.pipeline.orchestrator import (
     run_pipeline,
     update_scene_plan,
 )
+from backend.pipeline.tts import synthesize_narration
 from backend.documents import store as doc_store
 from backend.documents.pipeline import (
     ask_document_block,
@@ -115,7 +117,7 @@ def health() -> dict:
         artifacts_path = str(store.artifacts_root())
     except OSError:
         artifacts_path = "unavailable"
-    worker_ok: bool | None = None
+    worker_ok: Optional[bool] = None
     worker_detail = None
     if settings.render_worker_url:
         try:
@@ -133,7 +135,7 @@ def health() -> dict:
             worker_ok = False
             worker_detail = f"unreachable: {exc}"
 
-    docling_ok: bool | None = None
+    docling_ok: Optional[bool] = None
     docling_detail = None
     docling_local = False
     try:
@@ -203,6 +205,43 @@ async def me(user: CurrentUser) -> dict:
         "usage": usage,
         "supabase_configured": db.supabase_enabled(),
     }
+
+
+@app.get("/api/tts/preview")
+def preview_tts(voice: str, user: MediaUser) -> FileResponse:
+    """Generate or return a cached audio preview for a specific voice."""
+    try:
+        _prepare_user(user)
+        # Use a short standard phrase
+        text = f"Hi, I am {voice}. Let's make learning click."
+        previews_dir = store.artifacts_root() / "previews"
+        previews_dir.mkdir(parents=True, exist_ok=True)
+        # We don't know yet if it will be mp3 or wav, but synthesize_narration
+        # will save it with the correct extension if we pass a base name.
+        output_base = previews_dir / f"{voice}_preview"
+        
+        # Check if cache exists
+        for ext in [".wav", ".mp3"]:
+            if output_base.with_suffix(ext).exists():
+                path = output_base.with_suffix(ext)
+                media_type, _ = mimetypes.guess_type(str(path))
+                return FileResponse(path, media_type=media_type or "application/octet-stream")
+        
+        # Generate new preview
+        output_path, skipped = synthesize_narration(
+            text=text,
+            output_path=output_base.with_suffix(".wav"),
+            voice=voice,
+        )
+        
+        if skipped or not output_path:
+            raise HTTPException(status_code=500, detail="TTS generation skipped or failed")
+            
+        path = Path(output_path)
+        media_type, _ = mimetypes.guess_type(str(path))
+        return FileResponse(path, media_type=media_type or "application/octet-stream")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/generate", response_model=GenerateResult)
@@ -515,7 +554,7 @@ def delete_document_endpoint(doc_id: str, user: CurrentUser) -> dict:
 def get_document_annotations(
     doc_id: str,
     user: CurrentUser,
-    slide_id: str | None = None,
+    slide_id: Optional[str] = None,
 ) -> dict:
     _require_job_owner(doc_id, user.id)
     if slide_id:
@@ -588,7 +627,7 @@ async def upload_document(
         raise _quota_http(exc) from exc
 
     suffix = ext or ".bin"
-    tmp_path: Path | None = None
+    tmp_path: Optional[Path] = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = Path(tmp.name)

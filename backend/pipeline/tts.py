@@ -22,7 +22,7 @@ def _is_gemini_tts(model: str) -> bool:
     return "gemini" in m and "tts" in m
 
 
-def _parse_pcm_params(content_type: str | None) -> tuple[int, int]:
+def _parse_pcm_params(content_type: Optional[str]) -> tuple[int, int]:
     """Parse sample rate / channels from audio/pcm;rate=24000;channels=1."""
     rate, channels = 24000, 1
     if not content_type:
@@ -97,6 +97,11 @@ def synthesize_narration(
     )
     use_pcm = _is_gemini_tts(settings.tts_model)
     response_format = "pcm" if use_pcm else "mp3"
+
+    if not use_pcm:
+        is_openai = "gpt" in settings.tts_model.lower() or "tts-1" in settings.tts_model.lower() or "openai" in settings.tts_model.lower()
+        if is_openai and resolved_voice not in {"alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "verse", "ballad", "ash", "sage", "marin", "cedar"}:
+            resolved_voice = "alloy"
 
     headers = {
         "Authorization": f"Bearer {settings.tts_api_key}",

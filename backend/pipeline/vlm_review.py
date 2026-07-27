@@ -178,8 +178,8 @@ def review_scene(
     *,
     scene: SceneSection,
     code: str,
-    frame_path: str | None = None,
-    frame_paths: list[str] | None = None,
+    frame_path: Optional[str] = None,
+    frame_paths: Optional[list[str]] = None,
     frame_source: str = "none",
 ) -> VlmReview:
     # Keep prompt lean so the model has room to finish JSON.

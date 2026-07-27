@@ -9,7 +9,7 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from backend import artifacts as base
 from backend import supabase_db as db
@@ -67,7 +67,7 @@ def init_document(
     return root
 
 
-def save_manifest(doc_id: str, manifest: DocumentManifest | dict[str, Any]) -> str:
+def save_manifest(doc_id: str, manifest: Union[DocumentManifest, dict[str, Any]]) -> str:
     data = (
         manifest.model_dump()
         if isinstance(manifest, DocumentManifest)

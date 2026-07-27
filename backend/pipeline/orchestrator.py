@@ -1851,7 +1851,7 @@ def iter_retouch_scene(
     from queue import Empty, Queue
     from threading import Thread
 
-    q: Queue[PipelineEvent | None] = Queue()
+    q: Queue[Optional[PipelineEvent]] = Queue()
 
     def on_event(event: PipelineEvent) -> None:
         q.put(event)
@@ -1907,7 +1907,7 @@ def iter_pipeline_events(
     from queue import Empty, Queue
     from threading import Thread
 
-    q: Queue[PipelineEvent | None] = Queue()
+    q: Queue[Optional[PipelineEvent]] = Queue()
 
     def on_event(event: PipelineEvent) -> None:
         q.put(event)
@@ -2049,7 +2049,7 @@ def iter_regenerate_scene(
     from queue import Empty, Queue
     from threading import Thread
 
-    q: Queue[PipelineEvent | None] = Queue()
+    q: Queue[Optional[PipelineEvent]] = Queue()
 
     def on_event(event: PipelineEvent) -> None:
         q.put(event)

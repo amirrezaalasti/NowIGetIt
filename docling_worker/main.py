@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from typing import Optional
+
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,7 +27,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="NowIGetIt Docling Worker", version="0.1.0")
 
 
-def _check_secret(authorization: str | None) -> None:
+def _check_secret(authorization: Optional[str]) -> None:
     expected = (os.getenv("DOCLING_WORKER_SECRET") or "").strip()
     if not expected:
         return
@@ -60,9 +62,9 @@ def health() -> dict:
 @app.post("/convert")
 async def convert(
     file: UploadFile = File(...),
-    authorization: str | None = Header(default=None),
-    page_from: str | None = Form(default=None),
-    page_to: str | None = Form(default=None),
+    authorization: Optional[str] = Header(default=None),
+    page_from: Optional[str] = Form(default=None),
+    page_to: Optional[str] = Form(default=None),
 ) -> dict:
     _check_secret(authorization)
     filename = file.filename or "document.bin"

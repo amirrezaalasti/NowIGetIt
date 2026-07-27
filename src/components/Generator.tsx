@@ -8,6 +8,7 @@ import { AuthMedia } from "@/components/AuthMedia";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import {
   ensureApiToken,
+  assetUrl,
   fetchHealth,
   fetchJob,
   getStoredActiveJobId,
@@ -197,6 +198,8 @@ export function Generator() {
   const [promptFocused, setPromptFocused] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [restoring, setRestoring] = useState(true);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
   const eventsLenRef = useRef(0);
@@ -237,6 +240,12 @@ export function Generator() {
               : "";
         if (h.tts_voices?.length) {
           setTtsVoices(h.tts_voices);
+          setTtsVoice((current) => {
+            if (!h.tts_voices!.find((v) => v.id === current)) {
+              return h.tts_voices![0].id;
+            }
+            return current;
+          });
         }
         if (h.languages?.length) {
           setLanguages(h.languages);
@@ -666,6 +675,30 @@ export function Generator() {
     setLiveMessage("");
     setRegenDirection({});
     setLogOpen(false);
+    if (audioRef.current) {
+      audioRef.current.pause();
+      setIsPlayingPreview(false);
+    }
+  }
+
+  async function playVoicePreview(voiceId: string) {
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
+    
+    setIsPlayingPreview(true);
+    await ensureApiToken();
+    const src = assetUrl(`/api/tts/preview?voice=${encodeURIComponent(voiceId)}`);
+    const audio = new Audio(src);
+    audioRef.current = audio;
+    
+    audio.onended = () => setIsPlayingPreview(false);
+    audio.onerror = () => setIsPlayingPreview(false);
+    
+    audio.play().catch((err) => {
+      console.error("Failed to play preview", err);
+      setIsPlayingPreview(false);
+    });
   }
 
   async function onGenerate() {
@@ -911,18 +944,36 @@ export function Generator() {
                 <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
                   Narrator
                 </span>
-                <select
-                  value={ttsVoice}
-                  onChange={(e) => setTtsVoice(e.target.value)}
-                  disabled={running || !includeAudio}
-                  className="rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {ttsVoices.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.label}
-                    </option>
-                  ))}
-                </select>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={ttsVoice}
+                    onChange={(e) => setTtsVoice(e.target.value)}
+                    disabled={running || !includeAudio}
+                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {ttsVoices.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    title="Test Voice"
+                    disabled={running || !includeAudio || isPlayingPreview}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      playVoicePreview(ttsVoice);
+                    }}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
+                  >
+                    {isPlayingPreview ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    )}
+                  </button>
+                </div>
               </label>
               <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink-muted)]">
                 <input
@@ -1031,18 +1082,36 @@ export function Generator() {
               <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
                 Narrator voice
               </span>
-              <select
-                value={ttsVoice}
-                onChange={(e) => setTtsVoice(e.target.value)}
-                disabled={running}
-                className="rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {ttsVoices.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.label}
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-2">
+                <select
+                  value={ttsVoice}
+                  onChange={(e) => setTtsVoice(e.target.value)}
+                  disabled={running}
+                  className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {ttsVoices.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  title="Test Voice"
+                  disabled={running || isPlayingPreview}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    playVoicePreview(ttsVoice);
+                  }}
+                  className="flex h-[34px] w-[34px] items-center justify-center rounded-lg border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
+                >
+                  {isPlayingPreview ? (
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                  )}
+                </button>
+              </div>
             </label>
 
             <ol className="mt-8 space-y-10">

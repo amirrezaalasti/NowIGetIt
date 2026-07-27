@@ -91,25 +91,49 @@ def iter_convert_pages(
     assert total is not None
     start = max(1, page_from)
     end = min(total, page_to or total)
+
+    if not use_remote:
+        full_payload = _convert_local(source_path)
+        if not full_payload.ok:
+            yield 1, total, full_payload
+            return
+
+        pages_html = full_payload.pages_html or []
+        actual_total = max(total, len(pages_html)) if pages_html else total
+        if pages_html:
+            for page_no in range(start, min(end, len(pages_html)) + 1):
+                idx = page_no - 1
+                page_html = pages_html[idx]
+                page_payload = ConvertWorkerPayload(
+                    ok=True,
+                    html=page_html,
+                    markdown=full_payload.markdown if page_no == start else "",
+                    pages_html=[page_html],
+                    assets=full_payload.assets if page_no == start else [],
+                    title=full_payload.title,
+                )
+                yield page_no, actual_total, page_payload
+            return
+        else:
+            yield 1, 1, full_payload
+            return
+
     for page_no in range(start, end + 1):
-        if use_remote:
-            payload = _convert_remote(
+        payload = _convert_remote(
+            source_path,
+            worker_url=worker_url,
+            worker_secret=settings.docling_worker_secret,
+            page_range=(page_no, page_no),
+        )
+        if not payload.ok and page_no == start:
+            # Worker may not support page_range — fall back to full remote once.
+            full = _convert_remote(
                 source_path,
                 worker_url=worker_url,
                 worker_secret=settings.docling_worker_secret,
-                page_range=(page_no, page_no),
             )
-            if not payload.ok and page_no == start:
-                # Worker may not support page_range — fall back to full remote once.
-                full = _convert_remote(
-                    source_path,
-                    worker_url=worker_url,
-                    worker_secret=settings.docling_worker_secret,
-                )
-                yield page_no, total, full
-                return
-        else:
-            payload = _convert_local(source_path, page_range=(page_no, page_no))
+            yield page_no, total, full
+            return
         yield page_no, total, payload
 
 

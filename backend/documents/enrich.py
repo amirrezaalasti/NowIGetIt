@@ -50,7 +50,7 @@ def html_to_text(html: str) -> str:
     return parser.get_text()
 
 
-def split_pages_html(full_html: str, pages_html: list[str] | None = None) -> list[str]:
+def split_pages_html(full_html: str, pages_html: Optional[list[str]] = None) -> list[str]:
     if pages_html:
         cleaned = [p.strip() for p in pages_html if p and p.strip()]
         if cleaned:

@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from typing import Optional
+
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
@@ -29,18 +31,18 @@ class RenderRequest(BaseModel):
     code: str = Field(..., min_length=10)
     resolution: str = Field(default="720p", pattern="^(480p|720p|1080p)$")
     scene_id: str = Field(default="scene", min_length=1, max_length=120)
-    job_id: str | None = None
+    job_id: Optional[str] = None
 
 
 class RenderResponse(BaseModel):
     ok: bool
-    video_base64: str | None = None
-    frame_base64: str | None = None
+    video_base64: Optional[str] = None
+    frame_base64: Optional[str] = None
     log: str = ""
-    error: str | None = None
+    error: Optional[str] = None
 
 
-def _check_secret(authorization: str | None) -> None:
+def _check_secret(authorization: Optional[str]) -> None:
     expected = (os.getenv("RENDER_WORKER_SECRET") or "").strip()
     if not expected:
         return  # open worker (local/dev only)
@@ -76,7 +78,7 @@ def health() -> dict:
 @app.post("/render", response_model=RenderResponse)
 def render(
     body: RenderRequest,
-    authorization: str | None = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
 ) -> RenderResponse:
     _check_secret(authorization)
 

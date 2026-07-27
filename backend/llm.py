@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from openai import OpenAI
 
@@ -60,7 +60,7 @@ class OpenRouterClient:
         self,
         *,
         system: str,
-        user: str | list[dict[str, Any]],
+        user: Union[str, list[dict[str, Any]]],
         temperature: float = 0.4,
         max_tokens: int = 4096,
         json_mode: bool = False,
@@ -95,7 +95,7 @@ class OpenRouterClient:
         self,
         *,
         system: str,
-        user: str | list[dict[str, Any]],
+        user: Union[str, list[dict[str, Any]]],
         temperature: float = 0.3,
         max_tokens: int = 4096,
         model: Optional[str] = None,
@@ -115,12 +115,12 @@ class OpenRouterClient:
         *,
         system: str,
         prompt: str,
-        image_bytes: bytes | list[bytes],
+        image_bytes: Union[bytes, list[bytes]],
         mime_type: str = "image/png",
         temperature: float = 0.2,
         max_tokens: int = 2048,
         json_mode: bool = True,
-    ) -> dict[str, Any] | str:
+    ) -> Union[dict[str, Any], str]:
         """Image review always uses OPENROUTER_VLM_MODEL (multimodal)."""
         blobs = image_bytes if isinstance(image_bytes, list) else [image_bytes]
         user_content: list[dict[str, Any]] = [
@@ -255,7 +255,7 @@ def repair_llm_json(text: str) -> str:
     return "".join(out)
 
 
-def extract_first_json_object(text: str) -> str | None:
+def extract_first_json_object(text: str) -> Optional[str]:
     """Return the first balanced `{...}` slice, respecting JSON string escapes."""
     start = text.find("{")
     if start < 0:
@@ -286,7 +286,7 @@ def extract_first_json_object(text: str) -> str | None:
     return None
 
 
-def salvage_truncated_json(text: str) -> str | None:
+def salvage_truncated_json(text: str) -> Optional[str]:
     """
     Close JSON cut off mid-response (unterminated strings / missing ] }).
 
@@ -389,21 +389,23 @@ def _unwrap_nested_json_dict(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(current, dict) or not current:
             break
 
-        # Already looks like a useful payload (e.g. ScenePlan / VlmReview).
-        if any(
-            k in current
-            for k in ("title", "scenes", "approved", "issues", "ok", "notes")
-        ):
-            break
-
         next_val: Any = None
         # Prefer known wrapper keys, then a lone string/dict value.
         for key in _WRAPPER_KEYS:
             if key in current:
                 next_val = current[key]
                 break
-        if next_val is None and len(current) == 1:
-            next_val = next(iter(current.values()))
+
+        if next_val is None:
+            # Already looks like a useful payload (e.g. ScenePlan / VlmReview).
+            if any(
+                k in current
+                for k in ("title", "scenes", "approved", "issues", "ok", "notes")
+            ):
+                break
+
+            if len(current) == 1:
+                next_val = next(iter(current.values()))
 
         if isinstance(next_val, dict):
             current = next_val
@@ -445,7 +447,7 @@ def parse_json_object(text: str) -> dict[str, Any]:
     if salvaged:
         candidates.append(salvaged)
 
-    last_error: Exception | None = None
+    last_error: Optional[Exception] = None
     seen: set[str] = set()
     for candidate in candidates:
         for variant in (candidate, repair_llm_json(candidate)):
