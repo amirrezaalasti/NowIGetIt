@@ -1,0 +1,5 @@
+# This file is used internally by FFMPEG.
+file 'file:/Users/amirrezaalasti/Desktop/selfprojects/NowIGetIt/media/videos/SineCurve/1080p60/partial_movie_files/SineCurve/3544663784_3797991481_223132457.mp4'
+file 'file:/Users/amirrezaalasti/Desktop/selfprojects/NowIGetIt/media/videos/SineCurve/1080p60/partial_movie_files/SineCurve/260329756_597055683_1783097860.mp4'
+file 'file:/Users/amirrezaalasti/Desktop/selfprojects/NowIGetIt/media/videos/SineCurve/1080p60/partial_movie_files/SineCurve/260329756_587397288_2665243628.mp4'
+file 'file:/Users/amirrezaalasti/Desktop/selfprojects/NowIGetIt/media/videos/SineCurve/1080p60/partial_movie_files/SineCurve/260329756_2574473371_320916117.mp4'
