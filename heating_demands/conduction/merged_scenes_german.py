@@ -8,16 +8,14 @@ class Scene1(Scene):
     def construct(self):
         # Background setup
         self.camera.background_color = "#0B0C10"
+        Text.set_default(font="Serif")
 
         # --- TITLE & SUBTITLE ---
         title = Text("Makroskopische und Mikroskopische Wärmeleitung", font_size=28, color=WHITE)
         title.to_edge(UP, buff=0.35)
-        self.add(title)
+        self.play(Write(title))
 
-        subtitle = Text("Makroskopisches Thermisches Gleichgewicht", font_size=18, color=GREY_A)
-        subtitle.next_to(title, DOWN, buff=0.15)
-        self.play(FadeIn(subtitle), run_time=1.0)
-        self.wait(0.8)
+      
 
         # --- BEAT 1: MACROSCOPIC BLOCKS ---
         # Touching hot pastel red and cold pastel blue blocks
@@ -55,14 +53,14 @@ class Scene1(Scene):
         self.wait(1.5)
 
         # --- BEAT 3: TRANSITION TO MICROSCOPIC VIEW ---
-        new_subtitle = Text("Mikroskopisches Gitter & Wärmebarriere", font_size=18, color=GREY_A)
-        new_subtitle.next_to(title, DOWN, buff=0.15)
+        new_subtitle = Text("Mikroskopisches Gitter & Wärmebarriere", font_size=20, color=GREY_A)
+        new_subtitle.next_to(title, DOWN, buff=0.3)
 
         self.play(
             FadeOut(left_block),
             FadeOut(right_block),
             FadeOut(eq_label),
-            Transform(subtitle, new_subtitle),
+            FadeIn(new_subtitle),
             run_time=1.0
         )
 
@@ -132,19 +130,8 @@ class Scene1(Scene):
             stroke_width=2
         ).move_to(np.array([insulation_x, start_y - (num_rows - 1) * dy / 2, 0]))
 
-        # Architectural cross-hatching inside insulation panel
-        hatch_group = VGroup()
         y_min = barrier_rect.get_bottom()[1]
         y_max = barrier_rect.get_top()[1]
-        for y_c in np.linspace(y_min + 0.15, y_max - 0.15, 12):
-            line = Line(
-                start=np.array([insulation_x - 0.18, y_c - 0.1, 0]),
-                end=np.array([insulation_x + 0.18, y_c + 0.1, 0]),
-                color="#F2C94C",
-                stroke_width=1.5,
-                stroke_opacity=0.8
-            )
-            hatch_group.add(line)
 
         # Air pockets within the thermal barrier
         air_gaps = VGroup()
@@ -161,7 +148,7 @@ class Scene1(Scene):
         ins_text = Text("Dämmschicht (DIN 4108)", font_size=14, color="#F2C94C")
         ins_text.next_to(barrier_rect, UP, buff=0.15)
 
-        insulation_barrier = VGroup(barrier_rect, hatch_group, air_gaps, ins_text)
+        insulation_barrier = VGroup(barrier_rect, air_gaps, ins_text)
 
         self.play(Create(insulation_barrier), run_time=1.2)
         self.wait(1.0)
@@ -208,12 +195,12 @@ class Scene1(Scene):
 
         # Explanatory callout text
         blocked_text = Text("Lufteinschlüsse stoppen die Wärmeleitung", font_size=16, color="#FF9F43")
-        blocked_text.move_to(np.array([0, -2.4, 0]))
+        blocked_text.next_to(barrier_rect, DOWN, buff=0.2)
 
         self.play(Write(blocked_text), run_time=1.0)
 
         # Final hold showing energetic kinetic atoms on left and quiet blue atoms on right
-        self.wait(2.5)
+        self.wait(3)
 
 
 
@@ -361,7 +348,7 @@ class Scene3(Scene):
         self.play(FadeIn(r_text, shift=UP * 0.2), run_time=0.8)
         self.wait(0.5)
         
-        u_eq = Text("Wärmedurchgangskoeffizient: U = 1 / R (GEG)", font_size=30, color=WHITE)
+        u_eq = Text("Wärmedurchgangskoeffizient: U = 1 / R", font_size=30, color=WHITE)
         u_eq.move_to(UP * 1.2)
         
         u_subtext = Text("U-Wert misst den Wärmestrom pro Fläche und Temperaturdifferenz", font_size=16, color=pastel_blue)
@@ -483,7 +470,7 @@ class Scene3(Scene):
         
         brace = BraceBetweenPoints(b_top, b_bot, direction=RIGHT, color=pastel_yellow)
         brace_label = Text("ΔT = 25°C", font_size=16, color=pastel_yellow)
-        brace_label.next_to(brace, RIGHT, buff=0.2)
+        brace_label.next_to(brace, RIGHT, buff=1.2)
         
         self.play(
             Create(brace),
@@ -537,11 +524,11 @@ class Scene4(Scene):
         pastel_yellow = "#DCEDC1"
 
         # --- Title & Master Equation ---
-        title = Text("Die thermische Gebäudehülle (GEG)", font_size=32, color=pastel_cyan)
+        title = Text("Die thermische Gebäudehülle", font_size=32, color=pastel_cyan)
         title.to_edge(UP, buff=0.3)
 
         eq_text = Text("Transmissionswärmeverlust = Σ ( U_i × A_i × ΔT_i ) (DIN EN ISO 13789)", font_size=20, color=pastel_white)
-        eq_text.next_to(title, DOWN, buff=0.25)
+        eq_text.next_to(title, DOWN, buff=0.4)
 
         self.play(Write(title), run_time=1.2)
         self.play(FadeIn(eq_text, shift=DOWN * 0.15), run_time=1.2)

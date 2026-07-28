@@ -61,6 +61,7 @@ function SceneVideoPlayer({
   const [videoCacheBust, setVideoCacheBust] = useState(() => Date.now());
   // Latest concept frame from retouch (when Manim not available)
   const [latestFrameUrl, setLatestFrameUrl] = useState<string | null>(null);
+  const [latestVideoUrl, setLatestVideoUrl] = useState<string | null>(null);
 
   useEffect(() => {
     setComments(initialComments);
@@ -145,6 +146,7 @@ function SceneVideoPlayer({
           const data = (event as PipelineEvent & { data?: Record<string, unknown> }).data;
           const frameUrl = typeof data?.frame_url === "string" ? data.frame_url : null;
           const hasVideo = typeof data?.video_url === "string" && Boolean(data.video_url);
+          const newVideoUrl = typeof data?.video_url === "string" ? data.video_url : null;
 
           const isDone =
             event.type === "complete" ||
@@ -172,6 +174,7 @@ function SceneVideoPlayer({
 
           if (isDone) {
             if (frameUrl) setLatestFrameUrl(frameUrl);
+            if (newVideoUrl) setLatestVideoUrl(newVideoUrl);
             setVideoCacheBust(Date.now());
             onRefresh?.();
           }
@@ -194,7 +197,8 @@ function SceneVideoPlayer({
     }
   };
 
-  const videoSrc = `${assetUrl(videoUrl)}${videoUrl.includes("?") ? "&" : "?"}cb=${videoCacheBust}`;
+  const currentVideoUrl = latestVideoUrl ? assetUrl(latestVideoUrl) : videoUrl;
+  const videoSrc = `${currentVideoUrl}${currentVideoUrl.includes("?") ? "&" : "?"}cb=${videoCacheBust}`;
 
   return (
     <div className="mt-4 space-y-3">

@@ -8,16 +8,14 @@ class Scene1(Scene):
     def construct(self):
         # Background setup
         self.camera.background_color = "#0B0C10"
+        Text.set_default(font="Serif")
 
         # --- TITLE & SUBTITLE ---
-        title = Text("Macroscopic and Microscopic Conduction", font_size=28, color=WHITE)
+        title = Text("Conduction", font_size=32, color=WHITE)
         title.to_edge(UP, buff=0.35)
-        self.add(title)
+        self.play(Write(title))
 
-        subtitle = Text("Macroscopic Thermal Equilibrium", font_size=18, color=GREY_A)
-        subtitle.next_to(title, DOWN, buff=0.15)
-        self.play(FadeIn(subtitle), run_time=1.0)
-        self.wait(0.8)
+    
 
         # --- BEAT 1: MACROSCOPIC BLOCKS ---
         # Touching hot pastel red and cold pastel blue blocks
@@ -62,7 +60,7 @@ class Scene1(Scene):
             FadeOut(left_block),
             FadeOut(right_block),
             FadeOut(eq_label),
-            Transform(subtitle, new_subtitle),
+            FadeIn(new_subtitle),
             run_time=1.0
         )
 

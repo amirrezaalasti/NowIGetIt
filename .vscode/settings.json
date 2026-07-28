@@ -1,0 +1,10 @@
+{
+  "manim-side-view.executablePath": "/Users/niloufarghandehariyoon/Nowgetit/NowIGetIt/.venv/bin/manim",
+  "manim-side-view.commandLineArgs": "-ql",
+  "editor.colorDecorators": true,
+  "editor.colorDecorators.limit": 5000,
+  "editor.hover.enabled": "on",
+  "[python]": {
+    "editor.colorDecorators": true
+  }
+}

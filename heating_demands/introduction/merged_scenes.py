@@ -23,7 +23,7 @@ class Scene1(Scene):
             start=[-7, -2, 0], end=[7, -2, 0], color="#C5C6C7", stroke_width=2
         )
 
-        title = Text("Thermal Boundary and Heat Loss", font_size=32, color=WHITE).to_edge(UP, buff=0.4)
+        title = Text("Thermische Hülle und Wärmeverlust", font="Arial", font_size=32, color=WHITE).to_edge(UP, buff=0.4)
 
         self.play(
             Create(grid, run_time=1.2),
@@ -51,8 +51,8 @@ class Scene1(Scene):
         )
 
         # 3. Temperature Labels
-        t_in = Text("T_in = 20 °C", font_size=24, color="#FF6B35").move_to([0, -0.8, 0])
-        t_out = Text("T_out = -5 °C", font_size=24, color="#00B4D8").move_to([3.2, 0.8, 0])
+        t_in = Text("T_innen = 20 °C", font="Arial", font_size=24, color="#FF6B35").move_to([0, -0.8, 0])
+        t_out = Text("T_außen = -5 °C", font="Arial", font_size=24, color="#00B4D8").move_to([3.2, 0.8, 0])
 
         self.play(
             Write(t_in),
@@ -62,7 +62,7 @@ class Scene1(Scene):
         self.wait(0.5)
 
         # 4. Leakage Title
-        leak_label = Text("Warm Air Leaking Out", font_size=22, color="#FF9F1C").next_to(title, DOWN, buff=0.3)
+        leak_label = Text("Warme Luft entweicht", font="Arial", font_size=22, color="#FF9F1C").next_to(title, DOWN, buff=0.3)
         self.play(Write(leak_label))
 
         # 5. Warm Air Leakage Animation (Particles escaping house)
@@ -155,7 +155,7 @@ class Scene2(Scene):
             stroke_color="#00E5FF",
             stroke_width=3
         )
-        water_label = Text("1 Liter\nWater", font_size=20, color=WHITE, line_spacing=1.1).move_to(water_square.get_center())
+        water_label = Text("1 Liter\nWasser", font="Arial", font_size=20, color=WHITE, line_spacing=1.1).move_to(water_square.get_center())
         water_group = VGroup(water_square, water_label).move_to(LEFT * 2.5 + UP * 0.6)
 
         # Single Thermometer setup
@@ -192,7 +192,7 @@ class Scene2(Scene):
             fill_opacity=0.9
         ).next_to(bulb.get_center(), UP, buff=0)
 
-        temp_display = Text("20.0 °C", font_size=22, color=WHITE, weight=BOLD).next_to(thermo_frame, UP, buff=0.3)
+        temp_display = Text("20.0 °C", font="Arial", font_size=22, color=WHITE, weight=BOLD).next_to(thermo_frame, UP, buff=0.3)
         single_thermo = VGroup(thermo_frame, bulb, fluid_bulb, fluid_stem, temp_display).move_to(RIGHT * 2 + UP * 0.4)
 
         self.play(
@@ -231,11 +231,11 @@ class Scene2(Scene):
             fill_opacity=0.9
         ).next_to(bulb.get_center(), UP, buff=0)
         
-        new_temp_display = Text("21.0 °C", font_size=22, color=WHITE, weight=BOLD).next_to(thermo_frame, UP, buff=0.3)
+        new_temp_display = Text("21.0 °C", font="Arial", font_size=22, color=WHITE, weight=BOLD).next_to(thermo_frame, UP, buff=0.3)
 
         self.play(
             heat_waves.animate.set_opacity(0.3),
-            water_square.animate.set_fill(opacity=0.12),
+            water_square.animate.set_fill(color=ORANGE, opacity=0.1),
             Transform(fluid_stem, new_fluid_stem),
             Transform(temp_display, new_temp_display),
             run_time=2.0
@@ -260,8 +260,8 @@ class Scene2(Scene):
         c_line = Line(DOWN * 1.8, UP * 2.2, stroke_width=4, color="#00E5FF").move_to(RIGHT * c_x + UP * 0.2)
         k_line = Line(DOWN * 1.8, UP * 2.2, stroke_width=4, color=ORANGE).move_to(RIGHT * k_x + UP * 0.2)
 
-        c_header = Text("Celsius (°C)", font_size=20, color="#00E5FF", weight=BOLD).next_to(c_line, UP, buff=0.3)
-        k_header = Text("Kelvin (K)", font_size=20, color=ORANGE, weight=BOLD).next_to(k_line, UP, buff=0.3)
+        c_header = Text("Celsius (°C)", font="Arial", font_size=20, color="#00E5FF", weight=BOLD).next_to(c_line, UP, buff=0.3)
+        k_header = Text("Kelvin (K)", font="Arial", font_size=20, color=ORANGE, weight=BOLD).next_to(k_line, UP, buff=0.3)
 
         # Vertical positions
         y_abs = -1.4
@@ -295,7 +295,7 @@ class Scene2(Scene):
             FadeIn(dual_scales),
             run_time=1.8
         )
-        self.wait(1.2)
+        self.wait(1.4)
 
         # Dashed horizontal alignment lines
         dash1 = DashedLine(np.array([c_x, y_abs, 0]), np.array([k_x, y_abs, 0]), color=GREY, stroke_width=1.5)
@@ -308,7 +308,7 @@ class Scene2(Scene):
             Create(dashed_connectors),
             run_time=1.8
         )
-        self.wait(1.2)
+        self.wait(1.5)
 
         # ----------------------------------------------------
         # Phase 3: Step Size Comparison & Pulsing Brackets
@@ -318,15 +318,15 @@ class Scene2(Scene):
         # Brackets highlighting identical intervals
         c_b_start = np.array([c_x + 0.15, y_frz, 0])
         c_b_end = np.array([c_x + 0.15, y_step_top, 0])
-        c_bracket = Brace(Line(c_b_start, c_b_end), RIGHT, color=YELLOW)
-        c_bracket_label = Text("Δ 1°C", font_size=15, color=YELLOW).next_to(c_bracket, RIGHT, buff=0.1)
+        c_bracket = Brace(Line(c_b_start, c_b_end), RIGHT, color=WHITE)
+        c_bracket_label = Text("Δ 1°C", font="Arial", font_size=15, color=WHITE).next_to(c_bracket, RIGHT, buff=0.1)
 
         k_b_start = np.array([k_x - 0.15, y_frz, 0])
         k_b_end = np.array([k_x - 0.15, y_step_top, 0])
-        k_bracket = Brace(Line(k_b_start, k_b_end), LEFT, color=YELLOW)
-        k_bracket_label = Text("Δ 1 K", font_size=15, color=YELLOW).next_to(k_bracket, LEFT, buff=0.1)
+        k_bracket = Brace(Line(k_b_start, k_b_end), LEFT, color=WHITE)
+        k_bracket_label = Text("Δ 1 K", font="Arial", font_size=15, color=WHITE).next_to(k_bracket, LEFT, buff=0.1)
 
-        step_dash = DashedLine(np.array([c_x, y_step_top, 0]), np.array([k_x, y_step_top, 0]), color=YELLOW, stroke_width=1.5)
+        step_dash = DashedLine(np.array([c_x, y_step_top, 0]), np.array([k_x, y_step_top, 0]), color=WHITE, stroke_width=1.5)
 
         self.play(
             Create(step_dash),
@@ -355,12 +355,12 @@ class Scene2(Scene):
             corner_radius=0.15,
             height=0.7,
             width=3.2,
-            fill_color="#0B0C10",
+            fill_color="#000000",
             fill_opacity=0.95,
-            stroke_color=YELLOW,
+            stroke_color=WHITE,
             stroke_width=2
         ).move_to(UP * 1.1)
-        eq_text = Text("1 °C Step = 1 K Step", font_size=16, color=YELLOW, weight=BOLD).move_to(eq_box)
+        eq_text = Text("1 °C Schritt = 1 K Schritt", font="Arial", font_size=16, color=WHITE, weight=BOLD).move_to(eq_box)
         eq_group = VGroup(eq_box, eq_text)
 
         self.play(
@@ -382,7 +382,7 @@ class Scene3(Scene):
         CYAN_COLOR = "#00E5FF"
 
         # Section Title
-        title = Text("The Specific Heat Capacity Race", font_size=28, color=WHITE)
+        title = Text("Das Rennen um die spezifische Wärmekapazität", font="Arial", font_size=28, color=WHITE)
         title.to_edge(UP, buff=0.3)
         self.add(title)
 
@@ -395,19 +395,19 @@ class Scene3(Scene):
         # Water (Cyan medium square)
         water_box = Square(side_length=1.5, color=CYAN_COLOR, fill_opacity=0.4, stroke_width=2)
         water_box.move_to([x_water, y_mat, 0])
-        water_label = Text("Water (1 kg)", font_size=16, color=CYAN_COLOR)
+        water_label = Text("Wasser (1 kg)", font="Arial", font_size=16, color=CYAN_COLOR)
         water_label.next_to(water_box, DOWN, buff=0.2)
 
         # Concrete (Gray dense block)
         concrete_box = Square(side_length=1.1, color=GREY_B, fill_opacity=0.75, stroke_color=LIGHT_GREY, stroke_width=2)
         concrete_box.move_to([x_concrete, y_mat, 0])
-        concrete_label = Text("Concrete (1 kg)", font_size=16, color=LIGHT_GREY)
+        concrete_label = Text("Beton (1 kg)", font="Arial", font_size=16, color=LIGHT_GREY)
         concrete_label.next_to(concrete_box, DOWN, buff=0.2)
 
         # Air (Large diffuse faint-blue box)
         air_box = Rectangle(width=2.2, height=1.9, color=BLUE_B, fill_opacity=0.15, stroke_width=2)
         air_box.move_to([x_air, y_mat, 0])
-        air_label = Text("Air (1 kg)", font_size=16, color=BLUE_B)
+        air_label = Text("Luft (1 kg)", font="Arial", font_size=16, color=BLUE_B)
         air_label.next_to(air_box, DOWN, buff=0.2)
 
         materials_group = VGroup(water_box, water_label, concrete_box, concrete_label, air_box, air_label)
@@ -452,7 +452,7 @@ class Scene3(Scene):
         def create_orb(x_pos):
             core = Dot(point=[x_pos, 2.9, 0], radius=0.14, color=ORANGE)
             glow = Dot(point=[x_pos, 2.9, 0], radius=0.28, color=YELLOW, fill_opacity=0.35)
-            lbl = Text("1 kJ", font_size=12, color=WHITE)
+            lbl = Text("1 kJ", font="Arial", font_size=12, color=WHITE)
             lbl.move_to(core.get_center())
             return VGroup(glow, core, lbl)
 
@@ -515,13 +515,13 @@ class Scene3(Scene):
         self.wait(0.8)
 
         # Add Capacity Labels above columns
-        cap_w = Text("c = 4.18 kJ/(kg K)\n(High Capacity)", font_size=13, color=CYAN_COLOR)
+        cap_w = Text("c = 4.18 kJ/(kg K)\n(Hohe Kapazität)", font="Arial", font_size=13, color=CYAN_COLOR)
         cap_w.next_to(therm_w_frame, UP, buff=0.15)
 
-        cap_c = Text("c = 0.88 kJ/(kg K)\n(Moderate)", font_size=13, color=LIGHT_GREY)
+        cap_c = Text("c = 0.88 kJ/(kg K)\n(Moderat)", font="Arial", font_size=13, color=LIGHT_GREY)
         cap_c.next_to(therm_c_frame, UP, buff=0.15)
 
-        cap_a = Text("c = 1.00 kJ/(kg K)\n(Rapid Rise)", font_size=13, color=BLUE_B)
+        cap_a = Text("c = 1.00 kJ/(kg K)\n(Schneller Anstieg)", font="Arial", font_size=13, color=BLUE_B)
         cap_a.next_to(therm_a_frame, UP, buff=0.15)
 
         self.play(
@@ -543,10 +543,10 @@ class Scene4(Scene):
         # --- 1. Water Square & Base Heat Equation Intro ---
         water_box = Square(side_length=2.0, color=TEAL, fill_opacity=0.3)
         water_box.set_stroke(TEAL, width=3)
-        water_label = Text("1 kg Water", font_size=22, color=TEAL).move_to(water_box)
+        water_label = Text("1 kg Wasser", font="Arial", font_size=22, color=TEAL).move_to(water_box)
         water_group = VGroup(water_box, water_label).shift(UP * 1.3)
 
-        eq1 = Text("E = m * c * ΔT", font_size=40, color=WHITE)
+        eq1 = Text("E = m * c * ΔT", font="Arial", font_size=40, color=WHITE)
         eq1.next_to(water_group, DOWN, buff=0.5)
 
         self.play(
@@ -560,7 +560,7 @@ class Scene4(Scene):
         self.wait(1.5)
 
         # --- 2. Variable Substitution ---
-        eq2 = Text("E = (1 kg) * (4.184 kJ/kg·K) * (1 K)", font_size=23, color=WHITE)
+        eq2 = Text("E = (1 kg) * (4.184 kJ/kg·K) * (1 K)", font="Arial", font_size=23, color=WHITE)
         eq2.move_to(eq1)
 
         self.play(
@@ -570,7 +570,7 @@ class Scene4(Scene):
         self.wait(1.5)
 
         # Result calculation
-        eq3 = Text("E = 4.184 kJ", font_size=38, color=YELLOW)
+        eq3 = Text("E = 4.184 kJ", font="Arial", font_size=38, color=YELLOW)
         eq3.move_to(eq1)
 
         self.play(Transform(eq1, eq3), run_time=1.8)
@@ -589,10 +589,10 @@ class Scene4(Scene):
         power_box = Rectangle(height=2.8, width=7.2, color=BLUE_D, fill_color="#121824", fill_opacity=0.9)
         power_box.shift(RIGHT * 1.5 + UP * 0.9)
 
-        p_title = Text("Continuous Power", font_size=26, color=TEAL).move_to(power_box.get_top() + DOWN * 0.4)
-        p_def = Text("1 Watt = 1 Joule / second", font_size=24, color=BLUE_A).next_to(p_title, DOWN, buff=0.25)
-        p_rate = Text("To heat 1 K every second:", font_size=22, color=WHITE).next_to(p_def, DOWN, buff=0.25)
-        p_watts = Text("4.184 kJ/s = 4,184 Watts", font_size=30, color=ORANGE).next_to(p_rate, DOWN, buff=0.25)
+        p_title = Text("Kontinuierliche Leistung", font="Arial", font_size=26, color=TEAL).move_to(power_box.get_top() + DOWN * 0.4)
+        p_def = Text("1 Watt = 1 Joule / Sekunde", font="Arial", font_size=24, color=BLUE_A).next_to(p_title, DOWN, buff=0.25)
+        p_rate = Text("Um 1 K pro Sekunde zu erhitzen:", font="Arial", font_size=22, color=WHITE).next_to(p_def, DOWN, buff=0.25)
+        p_watts = Text("4.184 kJ/s = 4.184 Watt", font="Arial", font_size=30, color=ORANGE).next_to(p_rate, DOWN, buff=0.25)
 
         self.play(
             FadeIn(power_box),
@@ -614,13 +614,13 @@ class Scene4(Scene):
             body = RoundedRectangle(corner_radius=0.12, height=0.85, width=1.1, color=GREY_B, fill_color=GREY_D, fill_opacity=0.8)
             slot = Line(LEFT * 0.28, RIGHT * 0.28, color=DARK_GREY, stroke_width=3.5).shift(UP * 0.28)
             knob = Circle(radius=0.06, color=RED, fill_opacity=1).shift(DOWN * 0.18 + RIGHT * 0.28)
-            label = Text("1,000 W", font_size=12, color=YELLOW).shift(DOWN * 0.18 + LEFT * 0.12)
+            label = Text("1.000 W", font="Arial", font_size=12, color=YELLOW).shift(DOWN * 0.18 + LEFT * 0.12)
             return VGroup(body, slot, knob, label)
 
         toasters = VGroup(*[make_toaster() for _ in range(4)]).arrange(RIGHT, buff=0.4)
         toasters.shift(DOWN * 1.7 + RIGHT * 0.2)
 
-        toast_title = Text("4 Toasters = 4,000 W", font_size=20, color=GREY_A).next_to(toasters, UP, buff=0.2)
+        toast_title = Text("4 Toaster = 4.000 W", font="Arial", font_size=20, color=GREY_A).next_to(toasters, UP, buff=0.2)
 
         self.play(
             FadeIn(toast_title),
@@ -630,7 +630,7 @@ class Scene4(Scene):
         self.wait(1.5)
 
         # Energetic red comparison text
-        comp_text = Text("4,184 W > 4 Toasters!", font_size=32, color=RED)
+        comp_text = Text("4.184 W > 4 Toaster!", font="Arial", font_size=32, color=RED)
         comp_text.next_to(toasters, DOWN, buff=0.3)
 
         self.play(Write(comp_text), run_time=1.8)
