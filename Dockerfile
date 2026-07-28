@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgif-dev \
     librsvg2-bin \
     fontconfig \
+    fonts-noto-core \
+    fonts-liberation \
     fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 

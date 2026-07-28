@@ -17,6 +17,7 @@ import {
   streamGenerate,
   streamJobEvents,
   streamRegenerateScene,
+  revisePlanWithAI,
   updateJobPlan,
   type Audience,
   type JobDetail,
@@ -56,12 +57,14 @@ function AutoTextarea({
   placeholder,
   className,
   minRows = 2,
+  disabled,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   className?: string;
   minRows?: number;
+  disabled?: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
@@ -77,7 +80,8 @@ function AutoTextarea({
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
       rows={minRows}
-      className={`block w-full resize-none overflow-hidden bg-transparent outline-none ${className || ""}`}
+      disabled={disabled}
+      className={`block w-full resize-none overflow-hidden bg-transparent outline-none disabled:cursor-not-allowed disabled:opacity-60 ${className || ""}`}
     />
   );
 }
@@ -157,7 +161,12 @@ function scenesFromPlan(plan: ScenePlanDraft): ScenePreview[] {
 }
 
 function sceneStatusTone(status?: string, approved?: boolean) {
-  if (approved === false || status === "needs work" || status === "render failed") {
+  if (
+    approved === false ||
+    status === "needs work" ||
+    status === "render failed" ||
+    status === "regenerate failed"
+  ) {
     return "text-[var(--accent-hot)]";
   }
   if (approved === true || status === "done" || status === "approved") {
@@ -195,12 +204,40 @@ export function Generator() {
   const [regenDirection, setRegenDirection] = useState<Record<string, string>>(
     {},
   );
+  const [regeneratingSceneId, setRegeneratingSceneId] = useState<
+    string | null
+  >(null);
+  const [sceneRegenError, setSceneRegenError] = useState<
+    Record<string, string>
+  >({});
+  const [sceneRegenMessage, setSceneRegenMessage] = useState<
+    Record<string, string>
+  >({});
+  // Bumped whenever a scene's video is (re)published so <AuthMedia> is forced
+  // to refetch — the published file path never changes on regenerate/retouch.
+  const [videoVersion, setVideoVersion] = useState<Record<string, number>>({});
+  const [finalVideoVersion, setFinalVideoVersion] = useState(0);
+
+  function bumpVideoVersion(sceneId: string) {
+    setVideoVersion((prev) => ({ ...prev, [sceneId]: (prev[sceneId] ?? 0) + 1 }));
+  }
   const [promptFocused, setPromptFocused] = useState(false);
+  const [revisePrompt, setRevisePrompt] = useState("");
+  const [revising, setRevising] = useState(false);
+  const [reviseError, setReviseError] = useState<string | null>(null);
+  const [reviseElapsed, setReviseElapsed] = useState(0);
+  const [reviseSuccessMessage, setReviseSuccessMessage] = useState<
+    string | null
+  >(null);
   const [logOpen, setLogOpen] = useState(false);
   const [restoring, setRestoring] = useState(true);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const reviseAbortRef = useRef<AbortController | null>(null);
+  // Kept in sync with regeneratingSceneId so SSE handlers see the live value
+  // (applyPipelineEvent closes over state and would otherwise go stale).
+  const regeneratingSceneIdRef = useRef<string | null>(null);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
   const eventsLenRef = useRef(0);
   const didInitialRestoreRef = useRef(false);
@@ -219,6 +256,19 @@ export function Generator() {
   useEffect(() => {
     eventsLenRef.current = events.length;
   }, [events.length]);
+
+  // The AI storyboard-revise call is a single blocking request (up to 3 LLM
+  // attempts server-side) with no progress stream — tick a visible timer so
+  // it doesn't look frozen for the 10-60s it can realistically take.
+  // Elapsed is reset to 0 when revise starts (in onRevisePlan), not here —
+  // avoids a synchronous setState on the !revising cleanup path.
+  useEffect(() => {
+    if (!revising) return;
+    const id = window.setInterval(() => {
+      setReviseElapsed((s) => s + 1);
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [revising]);
 
   useEffect(() => {
     if (jobId) setStoredActiveJobId(jobId);
@@ -303,6 +353,24 @@ export function Generator() {
       setJobId(event.data.job_id);
       setStoredActiveJobId(event.data.job_id);
     }
+    const eventSceneId =
+      typeof event.data?.scene_id === "string" ? event.data.scene_id : null;
+    const activeRegenId = regeneratingSceneIdRef.current;
+    if (eventSceneId && eventSceneId === activeRegenId) {
+      setSceneRegenMessage((prev) => ({
+        ...prev,
+        [eventSceneId]: event.message,
+      }));
+    }
+    if (event.type === "error") {
+      if (activeRegenId) {
+        setSceneRegenError((prev) => ({
+          ...prev,
+          [activeRegenId]: event.message,
+        }));
+      }
+      setError(event.message);
+    }
     if (
       (event.type === "plan" || event.type === "plan_ready") &&
       event.data
@@ -352,6 +420,9 @@ export function Generator() {
       );
     }
     if (event.type === "scene_vlm" && event.data?.scene_id) {
+      if (typeof event.data.frame_url === "string") {
+        bumpVideoVersion(event.data.scene_id as string);
+      }
       setScenes((prev) =>
         prev.map((s) =>
           s.id === event.data?.scene_id
@@ -373,21 +444,26 @@ export function Generator() {
       );
     }
     if (event.type === "scene_done" && event.data?.scene_id) {
+      const newVideoUrl =
+        typeof event.data?.video_url === "string"
+          ? event.data.video_url
+          : undefined;
+      if (newVideoUrl) bumpVideoVersion(event.data.scene_id as string);
       setScenes((prev) =>
         prev.map((s) =>
           s.id === event.data?.scene_id
             ? {
                 ...s,
-                status: "done",
+                // A scene can finish its pipeline without ever producing a
+                // clip (render kept failing) — don't report "done" in that
+                // case, or a failed regenerate silently looks successful.
+                status: newVideoUrl || s.videoUrl ? "done" : "render failed",
                 approved: Boolean(event.data?.vlm_approved),
                 clarity:
                   typeof event.data?.clarity_score === "number"
                     ? event.data.clarity_score
                     : s.clarity,
-                videoUrl:
-                  typeof event.data?.video_url === "string"
-                    ? event.data.video_url
-                    : s.videoUrl,
+                videoUrl: newVideoUrl ?? s.videoUrl,
                 frameUrl:
                   typeof event.data?.frame_url === "string"
                     ? event.data.frame_url
@@ -403,6 +479,7 @@ export function Generator() {
     if (event.type === "complete" && event.data) {
       if (typeof event.data.final_video_url === "string") {
         setFinalVideoUrl(event.data.final_video_url);
+        setFinalVideoVersion((v) => v + 1);
       }
       const completedScenes = event.data.scenes as
         | Array<Record<string, unknown>>
@@ -414,14 +491,14 @@ export function Generator() {
               (c) => c.scene_id === s.id || c.id === s.id,
             );
             if (!match) return s;
+            const newVideoUrl =
+              typeof match.video_url === "string" ? match.video_url : undefined;
+            if (newVideoUrl) bumpVideoVersion(s.id);
             return {
               ...s,
-              status: "done",
+              status: newVideoUrl || s.videoUrl ? "done" : "render failed",
               approved: Boolean(match.vlm_approved),
-              videoUrl:
-                typeof match.video_url === "string"
-                  ? match.video_url
-                  : s.videoUrl,
+              videoUrl: newVideoUrl ?? s.videoUrl,
               frameUrl:
                 typeof match.frame_url === "string"
                   ? match.frame_url
@@ -430,17 +507,30 @@ export function Generator() {
           }),
         );
       }
-      if (
-        typeof event.data.scene_id === "string" &&
-        typeof event.data.video_url === "string"
-      ) {
+      // "complete" from a single-scene regenerate: has scene_id + video_url
+      // (video_url may be null if the re-render failed — surface that
+      // instead of silently reporting success with the old clip).
+      if (typeof event.data.scene_id === "string") {
+        const sceneId = event.data.scene_id;
+        const newVideoUrl =
+          typeof event.data.video_url === "string"
+            ? event.data.video_url
+            : undefined;
+        if (newVideoUrl) bumpVideoVersion(sceneId);
+        else {
+          setSceneRegenError((prev) => ({
+            ...prev,
+            [sceneId]:
+              "Regenerate finished but the scene failed to render — kept the previous clip.",
+          }));
+        }
         setScenes((prev) =>
           prev.map((s) =>
-            s.id === event.data?.scene_id
+            s.id === sceneId
               ? {
                   ...s,
-                  status: "done",
-                  videoUrl: event.data?.video_url as string,
+                  status: newVideoUrl || s.videoUrl ? "done" : "regenerate failed",
+                  videoUrl: newVideoUrl ?? s.videoUrl,
                   frameUrl:
                     typeof event.data?.frame_url === "string"
                       ? event.data.frame_url
@@ -455,11 +545,9 @@ export function Generator() {
         );
         if (typeof event.data.final_video_url === "string") {
           setFinalVideoUrl(event.data.final_video_url);
+          setFinalVideoVersion((v) => v + 1);
         }
       }
-    }
-    if (event.type === "error") {
-      setError(event.message);
     }
   }
 
@@ -661,6 +749,7 @@ export function Generator() {
   function resetToCompose() {
     // Stop watching this job in the UI, but leave the backend job running.
     abortRef.current?.abort();
+    reviseAbortRef.current?.abort();
     setRunning(false);
     setAwaitingPlan(false);
     setEditingPlan(null);
@@ -674,6 +763,17 @@ export function Generator() {
     setError(null);
     setLiveMessage("");
     setRegenDirection({});
+    regeneratingSceneIdRef.current = null;
+    setRegeneratingSceneId(null);
+    setSceneRegenError({});
+    setSceneRegenMessage({});
+    setVideoVersion({});
+    setFinalVideoVersion(0);
+    setRevisePrompt("");
+    setRevising(false);
+    setReviseElapsed(0);
+    setReviseError(null);
+    setReviseSuccessMessage(null);
     setLogOpen(false);
     if (audioRef.current) {
       audioRef.current.pause();
@@ -783,6 +883,65 @@ export function Generator() {
     );
   }
 
+  async function onRevisePlan() {
+    if (!jobId || !revisePrompt.trim() || running || revising) return;
+    setRevising(true);
+    setReviseElapsed(0);
+    setReviseError(null);
+    setReviseSuccessMessage(null);
+    const previousSceneCount = editingPlan?.scenes.length ?? 0;
+    // This is a single blocking call (no progress stream) that can take a
+    // while server-side (up to 3 LLM attempts) — bound it so a network hiccup
+    // doesn't leave the UI stuck on "Revising…" forever with no way out.
+    const controller = new AbortController();
+    reviseAbortRef.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 120_000);
+    try {
+      await ensureApiToken();
+      const plan = await revisePlanWithAI(
+        jobId,
+        revisePrompt.trim(),
+        controller.signal,
+      );
+      setEditingPlan(plan);
+      setPlanTitle(plan.title);
+      setScenes(scenesFromPlan(plan));
+      setRevisePrompt("");
+      const delta = plan.scenes.length - previousSceneCount;
+      const deltaLabel =
+        delta > 0
+          ? ` (+${delta} scene${delta === 1 ? "" : "s"})`
+          : delta < 0
+            ? ` (${delta} scene${delta === -1 ? "" : "s"})`
+            : "";
+      setReviseSuccessMessage(
+        `Storyboard updated${deltaLabel} — review the changes below.`,
+      );
+      window.setTimeout(() => setReviseSuccessMessage(null), 6000);
+      // Bring the revised scenes into view so the update isn't invisible.
+      window.requestAnimationFrame(() => {
+        document
+          .getElementById("storyboard-scenes")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    } catch (err) {
+      const e = err as Error;
+      setReviseError(
+        e.name === "AbortError"
+          ? "That took too long and was cancelled. Try a shorter, more specific instruction, or try again."
+          : e.message,
+      );
+    } finally {
+      window.clearTimeout(timeout);
+      reviseAbortRef.current = null;
+      setRevising(false);
+    }
+  }
+
+  function onCancelRevisePlan() {
+    reviseAbortRef.current?.abort();
+  }
+
   async function onConfirmPlan() {
     if (!jobId || !editingPlan || running) return;
     setRunning(true);
@@ -818,7 +977,18 @@ export function Generator() {
   async function onRegenerateScene(sceneId: string) {
     if (!jobId || running) return;
     setRunning(true);
+    regeneratingSceneIdRef.current = sceneId;
+    setRegeneratingSceneId(sceneId);
     setError(null);
+    setSceneRegenError((prev) => {
+      const next = { ...prev };
+      delete next[sceneId];
+      return next;
+    });
+    setSceneRegenMessage((prev) => ({
+      ...prev,
+      [sceneId]: "Starting regeneration…",
+    }));
     setLiveMessage(`Regenerating ${sceneId}…`);
     setScenes((prev) =>
       prev.map((s) =>
@@ -839,10 +1009,25 @@ export function Generator() {
       });
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
-        setError((err as Error).message);
+        const message = (err as Error).message;
+        setError(message);
+        setSceneRegenError((prev) => ({ ...prev, [sceneId]: message }));
+        // The stream broke before we could tell whether a clip was ever
+        // produced — don't leave the scene stuck on "regenerating…" forever.
+        setScenes((prev) =>
+          prev.map((s) =>
+            s.id === sceneId && s.status === "regenerating"
+              ? { ...s, status: s.videoUrl ? "done" : "regenerate failed" }
+              : s,
+          ),
+        );
       }
     } finally {
       setRunning(false);
+      if (regeneratingSceneIdRef.current === sceneId) {
+        regeneratingSceneIdRef.current = null;
+      }
+      setRegeneratingSceneId((current) => (current === sceneId ? null : current));
     }
   }
 
@@ -1114,7 +1299,76 @@ export function Generator() {
               </div>
             </label>
 
-            <ol className="mt-8 space-y-10">
+            <div className="mt-6 rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-4">
+              <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+                Ask AI to revise the storyboard
+              </span>
+              <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                e.g. &ldquo;add a scene about X&rdquo;, &ldquo;remove scene
+                3&rdquo;, &ldquo;merge the last two scenes&rdquo;, &ldquo;make
+                it longer&rdquo;.
+              </p>
+              <div className="mt-2 flex flex-wrap items-start gap-2">
+                <AutoTextarea
+                  value={revisePrompt}
+                  onChange={setRevisePrompt}
+                  minRows={1}
+                  disabled={revising || running}
+                  className="min-w-[12rem] flex-1 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--ink)]"
+                  placeholder="Describe the change you want…"
+                />
+                <button
+                  type="button"
+                  disabled={running || revising || !revisePrompt.trim()}
+                  onClick={onRevisePlan}
+                  className="flex items-center gap-2 rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
+                >
+                  {revising && (
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  )}
+                  {revising ? "Revising…" : "Apply"}
+                </button>
+                {revising && (
+                  <button
+                    type="button"
+                    onClick={onCancelRevisePlan}
+                    className="text-sm text-[var(--ink-muted)] underline-offset-4 hover:underline"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+              {revising && (
+                <p className="mt-2 flex items-center gap-1.5 text-xs text-[var(--accent)]">
+                  <span className="inline-flex gap-0.5">
+                    {[0, 150, 300].map((delay) => (
+                      <span
+                        key={delay}
+                        className="inline-block h-1 w-1 rounded-full bg-[var(--accent)] animate-bounce"
+                        style={{ animationDelay: `${delay}ms` }}
+                      />
+                    ))}
+                  </span>
+                  AI is rewriting the storyboard…{" "}
+                  {reviseElapsed > 0 ? `${reviseElapsed}s` : ""}
+                  {reviseElapsed > 20
+                    ? " · this can take up to a minute or two"
+                    : ""}
+                </p>
+              )}
+              {!revising && reviseSuccessMessage && (
+                <p className="mt-2 text-xs text-[var(--accent)]">
+                  ✓ {reviseSuccessMessage}
+                </p>
+              )}
+              {reviseError && (
+                <p className="mt-2 text-xs text-[var(--danger-ink)]">
+                  {reviseError}
+                </p>
+              )}
+            </div>
+
+            <ol id="storyboard-scenes" className="mt-8 space-y-10">
               {editingPlan.scenes.map((scene, i) => (
                 <li
                   key={scene.id}
@@ -1198,7 +1452,7 @@ export function Generator() {
             <div className="mt-8 flex flex-wrap gap-3">
               <button
                 type="button"
-                disabled={running || !prompt.trim()}
+                disabled={running || revising || !prompt.trim()}
                 onClick={onGenerate}
                 className="text-sm text-[var(--ink-muted)] underline-offset-4 hover:underline disabled:opacity-40"
               >
@@ -1281,6 +1535,7 @@ export function Generator() {
               <div className="mt-8">
                 <AuthMedia
                   src={finalVideoUrl}
+                  cacheBust={finalVideoVersion}
                   className="w-full overflow-hidden rounded-2xl border border-[var(--line)]"
                 />
                 {jobId && (
@@ -1303,80 +1558,122 @@ export function Generator() {
             )}
 
             <ul className="mt-10 space-y-8">
-              {scenes.map((scene, i) => (
-                <li key={scene.id} className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-                    <span className="font-mono text-xs text-[var(--accent)]">
-                      {String(i + 1).padStart(2, "0")}
-                    </span>
-                    <span className="font-medium text-[var(--ink)]">
-                      {scene.title}
-                    </span>
-                    {scene.status && (
-                      <span className={sceneStatusTone(scene.status, scene.approved)}>
-                        · {scene.status}
+              {scenes.map((scene, i) => {
+                const isRegeneratingThis = regeneratingSceneId === scene.id;
+                const settledStatuses = new Set([
+                  "done",
+                  "approved",
+                  "needs work",
+                  "render failed",
+                  "regenerate failed",
+                ]);
+                const canShowRegenControls =
+                  mode === "result" &&
+                  jobId &&
+                  scene.status &&
+                  settledStatuses.has(scene.status);
+                return (
+                  <li key={scene.id} className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                      <span className="font-mono text-xs text-[var(--accent)]">
+                        {String(i + 1).padStart(2, "0")}
                       </span>
-                    )}
-                    {typeof scene.clarity === "number" && (
-                      <span className="text-[var(--ink-muted)]">
-                        · clarity {Math.round(scene.clarity * 100)}%
+                      <span className="font-medium text-[var(--ink)]">
+                        {scene.title}
                       </span>
+                      {scene.status && (
+                        <span className={sceneStatusTone(scene.status, scene.approved)}>
+                          · {isRegeneratingThis ? "regenerating" : scene.status}
+                        </span>
+                      )}
+                      {typeof scene.clarity === "number" && (
+                        <span className="text-[var(--ink-muted)]">
+                          · clarity {Math.round(scene.clarity * 100)}%
+                        </span>
+                      )}
+                    </div>
+
+                    {mode === "result" && scene.narration && (
+                      <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
+                        {scene.narration}
+                      </p>
                     )}
-                  </div>
 
-                  {mode === "result" && scene.narration && (
-                    <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
-                      {scene.narration}
-                    </p>
-                  )}
+                    <div className="relative mt-3">
+                      {scene.videoUrl ? (
+                        <AuthMedia
+                          src={scene.videoUrl}
+                          poster={scene.frameUrl}
+                          cacheBust={videoVersion[scene.id]}
+                          className="w-full overflow-hidden rounded-xl border border-[var(--line)]"
+                        />
+                      ) : scene.frameUrl ? (
+                        <AuthMedia
+                          src={scene.frameUrl}
+                          kind="image"
+                          alt={`${scene.title} preview`}
+                          cacheBust={videoVersion[scene.id]}
+                          className="w-full overflow-hidden rounded-xl border border-[var(--line)]"
+                        />
+                      ) : scene.status &&
+                        scene.status !== "queued" &&
+                        scene.status !== "done" ? (
+                        <div className="flex aspect-video items-center justify-center rounded-xl border border-dashed border-[var(--line)] bg-[var(--surface)] text-sm text-[var(--ink-muted)]">
+                          {scene.status}…
+                        </div>
+                      ) : null}
 
-                  {scene.videoUrl ? (
-                    <AuthMedia
-                      src={scene.videoUrl}
-                      poster={scene.frameUrl}
-                      className="mt-3 w-full overflow-hidden rounded-xl border border-[var(--line)]"
-                    />
-                  ) : scene.frameUrl ? (
-                    <AuthMedia
-                      src={scene.frameUrl}
-                      kind="image"
-                      alt={`${scene.title} preview`}
-                      className="mt-3 w-full overflow-hidden rounded-xl border border-[var(--line)]"
-                    />
-                  ) : scene.status &&
-                    scene.status !== "queued" &&
-                    scene.status !== "done" ? (
-                    <div className="mt-3 flex aspect-video items-center justify-center rounded-xl border border-dashed border-[var(--line)] bg-[var(--surface)] text-sm text-[var(--ink-muted)]">
-                      {scene.status}…
+                      {isRegeneratingThis && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-xl bg-black/60 backdrop-blur-sm">
+                          <span className="h-7 w-7 animate-spin rounded-full border-2 border-white/70 border-t-transparent" />
+                          <span className="max-w-[85%] text-center text-xs text-white/90">
+                            {sceneRegenMessage[scene.id] || "Regenerating scene…"}
+                          </span>
+                        </div>
+                      )}
                     </div>
-                  ) : null}
 
-                  {mode === "result" && jobId && scene.status === "done" && (
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <input
-                        value={regenDirection[scene.id] ?? ""}
-                        onChange={(e) =>
-                          setRegenDirection((prev) => ({
-                            ...prev,
-                            [scene.id]: e.target.value,
-                          }))
-                        }
-                        placeholder="e.g. more visual, less text"
-                        className="min-w-[12rem] flex-1 border-b border-[var(--line)] bg-transparent px-0 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-                        disabled={running}
-                      />
-                      <button
-                        type="button"
-                        disabled={running}
-                        onClick={() => onRegenerateScene(scene.id)}
-                        className="text-sm font-medium text-[var(--accent)] underline-offset-4 hover:underline disabled:opacity-40"
-                      >
-                        Regenerate scene
-                      </button>
-                    </div>
-                  )}
-                </li>
-              ))}
+                    {sceneRegenError[scene.id] && !isRegeneratingThis && (
+                      <p className="mt-2 text-xs text-[var(--danger-ink)]">
+                        {sceneRegenError[scene.id]}
+                      </p>
+                    )}
+
+                    {canShowRegenControls && (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <input
+                          value={regenDirection[scene.id] ?? ""}
+                          onChange={(e) =>
+                            setRegenDirection((prev) => ({
+                              ...prev,
+                              [scene.id]: e.target.value,
+                            }))
+                          }
+                          placeholder="What should change? e.g. more visual, less text"
+                          className="min-w-[12rem] flex-1 border-b border-[var(--line)] bg-transparent px-0 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)] disabled:opacity-50"
+                          disabled={running}
+                        />
+                        <button
+                          type="button"
+                          disabled={running}
+                          onClick={() => onRegenerateScene(scene.id)}
+                          className="flex items-center gap-1.5 text-sm font-medium text-[var(--accent)] underline-offset-4 hover:underline disabled:opacity-40"
+                        >
+                          {isRegeneratingThis && (
+                            <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                          )}
+                          {isRegeneratingThis
+                            ? "Regenerating…"
+                            : scene.status === "render failed" ||
+                                scene.status === "regenerate failed"
+                              ? "Try again"
+                              : "Regenerate scene"}
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
 
             {finalNotes && mode === "result" && (
@@ -1441,7 +1738,9 @@ export function Generator() {
         <div className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--line)] bg-[var(--bg-deep)]/90 backdrop-blur-md">
           <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center justify-between gap-3 px-6 py-4">
             <p className="text-sm text-[var(--ink-muted)]">
-              {editingPlan.scenes.length} scenes ready to render
+              {revising
+                ? "Applying your storyboard changes…"
+                : `${editingPlan.scenes.length} scenes ready to render`}
             </p>
             <div className="flex flex-wrap items-center gap-3">
               {running && (
@@ -1455,8 +1754,13 @@ export function Generator() {
               )}
               <button
                 type="button"
-                disabled={running || !editingPlan}
+                disabled={running || revising || !editingPlan}
                 onClick={onConfirmPlan}
+                title={
+                  revising
+                    ? "Wait for the storyboard revision to finish first"
+                    : undefined
+                }
                 className="rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-semibold text-[var(--on-accent)] transition hover:brightness-110 disabled:opacity-40"
               >
                 {running ? "Working…" : "Confirm & generate video"}

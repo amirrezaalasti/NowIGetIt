@@ -55,6 +55,7 @@ function SceneVideoPlayer({
   const [newComment, setNewComment] = useState("");
   const [useTimestamp, setUseTimestamp] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   // Map of commentId → AI reply data
   const [aiReplies, setAiReplies] = useState<Record<string, AIReply>>({});
   // Stable cache-bust — only changes when a retouch with a new VIDEO succeeds
@@ -119,6 +120,7 @@ function SceneVideoPlayer({
     abortRef.current = abort;
 
     setSubmitting(true);
+    setSubmitError(null);
     setNewComment("");
 
     // Step 1: save comment immediately → get its ID
@@ -128,6 +130,8 @@ function SceneVideoPlayer({
       setComments((prev) => [...prev, savedComment]);
     } catch (err) {
       setSubmitting(false);
+      setNewComment(commentText);
+      setSubmitError((err as Error).message || "Failed to save feedback");
       return;
     }
 
@@ -385,9 +389,15 @@ function SceneVideoPlayer({
 
         {/* Input form */}
         <div className="border-t border-[var(--line)] px-4 py-3 space-y-2">
+          {submitError && (
+            <p className="text-[11px] text-red-400">{submitError}</p>
+          )}
           <textarea
             value={newComment}
-            onChange={(e) => setNewComment(e.target.value)}
+            onChange={(e) => {
+              setNewComment(e.target.value);
+              if (submitError) setSubmitError(null);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
@@ -396,7 +406,8 @@ function SceneVideoPlayer({
             }}
             placeholder="Describe what to change… (⌘↵ to send)"
             rows={2}
-            className="w-full rounded-lg border border-[var(--line)] bg-[var(--surface-strong)] p-2 text-xs text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] resize-none"
+            disabled={submitting}
+            className="w-full rounded-lg border border-[var(--line)] bg-[var(--surface-strong)] p-2 text-xs text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] resize-none disabled:opacity-60"
           />
           <div className="flex items-center justify-between gap-2">
             <label className="flex items-center gap-1.5 text-xs text-[var(--ink-muted)] cursor-pointer">
@@ -404,6 +415,7 @@ function SceneVideoPlayer({
                 type="checkbox"
                 checked={useTimestamp}
                 onChange={(e) => setUseTimestamp(e.target.checked)}
+                disabled={submitting}
                 className="rounded border-[var(--line)]"
               />
               Pin video timestamp
@@ -412,8 +424,11 @@ function SceneVideoPlayer({
               type="button"
               onClick={handleSubmit}
               disabled={!newComment.trim() || submitting}
-              className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-xs font-semibold text-[var(--on-accent)] transition hover:opacity-90 disabled:opacity-40"
+              className="shrink-0 flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-xs font-semibold text-[var(--on-accent)] transition hover:opacity-90 disabled:opacity-40"
             >
+              {submitting && (
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              )}
               {submitting ? "Retouching…" : "Send"}
             </button>
           </div>

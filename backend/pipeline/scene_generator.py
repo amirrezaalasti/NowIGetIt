@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
-from backend.code_utils import clean_manim_code, validate_manim_code
+from backend.code_utils import clean_manim_code, lint_scene_code, validate_manim_code
 from backend.languages import language_display_name, normalize_language
 from backend.llm import OpenRouterClient
 from backend.pipeline.templates import format_templates_for_prompt, retrieve_templates
@@ -30,12 +31,15 @@ Treat these as the real APIs you are calling:
   Text / MarkupText / Paragraph
   - Born centered at ORIGIN (auto-recentered after create). No host width-cap,
     soft-wrap, font-size upscaling, or scale_to_fit_width — you own sizing.
-  - Default font is DejaVu Sans. Do not set exotic fonts.
+  - Default font is Noto Sans (host-enforced with Liberation/DejaVu fallback).
+    Do not set font= or disable_ligatures= — the host overrides both.
   - Do NOT use width=/height= on Text, stretch_to_fit_*, scale_to_fit_width,
     per-letter Text pieces, NBSP padding, or `_ManimText` (bypasses are rewritten).
   - Keep formulas COMPLETE. If a line is long: smaller font_size or an explicit
     two-line Text("line one\\nline two") — never truncate words.
   - Prefer FadeIn for on-screen text (Write looks cut off mid-animation).
+  - Prefer font_size ≥ 24 for body labels (titles 36–44). The host re-renders
+    small text at a higher Pango size then scales it down for even letter spacing.
 
   to_edge(UP) / to_edge(DOWN)
   - After the edge move, X is forced to 0 (horizontally centered). No frame clamp
@@ -45,6 +49,10 @@ Treat these as the real APIs you are calling:
   Layout intent
   - Titles: Text(...).to_edge(UP, buff=0.3) + FadeIn (not Write — Write looks cut off
     mid-animation). Prefer readable full phrases over cramped micro-titles.
+  - Never hand-place a title at hardcoded corner coordinates (e.g.
+    move_to(UP*3.5 + LEFT*5)) to dodge the to_edge centering: the frame is only
+    ~14.2 x 8 units, so that pushes long titles off-screen. A horizontally centered
+    title at the top is correct — accept it.
   - Captions: to_edge(DOWN, buff=0.35) or next_to(diagram, DOWN, buff=0.3) + FadeIn.
   - Side labels: next_to(obj, LEFT/RIGHT, buff=0.25).
   - Keep large Sphere / dense diagrams from covering the title band.
@@ -55,7 +63,7 @@ CRITICAL RULES (Manim Community / `manim`, NOT ManimGL):
 3. ALWAYS use `Text("...")` for ALL labels, titles, and mathematical equations.
    DO NOT use `MathTex`, `Tex`, or `TexText`. LaTeX/dvisvgm is not configured on the rendering host.
    For math expressions, write them in plain text inside `Text()`, e.g., `Text("E = mc²")` or `Text("loss = (y - ŷ)²")`.
-   Prefer `font_size` ≥ 28 for body labels (titles 36–44). Prefer FadeIn/Write on whole
+   Prefer `font_size` ≥ 24 for body labels (titles 36–44). Prefer FadeIn on whole
    Text mobjects; avoid TransformMatchingShapes on long labels.
 4. Axes: use `x_length` / `y_length` (not width/height). Example:
    Axes(x_range=[-3, 3, 1], y_range=[-1, 5, 1], x_length=7, y_length=5)
@@ -94,13 +102,33 @@ CRITICAL RULES (Manim Community / `manim`, NOT ManimGL):
 13. TIMING + MOTION (critical): Map EVERY animation_beat to an explicit self.play(...)
     with real motion (not only wait). TOTAL construct time (sum of play/wait, excluding
     a final 0.5s hold) must match the target narration duration within ±0.5s.
-    Fill long gaps with ongoing motion (tracker, Indicate, slow .animate) — never a
-    multi-second static freeze mid-scene. End with self.wait(0.5) on the teaching frame.
-14. Apply the provided palette colors via Manim color constants or hex strings
+    Spend that time on NEW INFORMATION: every self.play must reveal, label, move or
+    change something the narration is describing at that moment. If the time budget is
+    larger than your beats seem to need, break the beats into smaller SUBSTANTIVE steps
+    (label the next part, annotate the next arrow, walk a tracker further along the
+    curve, transform the formula) and give meaningful animations longer run_time.
+    End with exactly one self.wait(0.5) on the teaching frame.
+14. BANNED TIME-FILLERS — a scene doing any of these is a FAILURE even if it renders
+    and matches the duration:
+    - "Breathing" loops: obj.animate.scale(1.1) then back down, or set_opacity
+      oscillating 0.4 → 0.6 → 0.4, purely to consume seconds.
+    - `.scale(1.0)` — a NO-OP that does not undo an earlier scale. Never write it.
+      (If an object must return to its size, use scale(1/1.1) — but prefer not to.)
+    - Unexplained objects flying in and back out (dots, particles, arrows) with no label
+      and no role in the explanation.
+    - Repeating the same self.play to burn budget, or re-animating an object that has
+      already made its point.
+    - A trailing self.wait(N) beyond the single 0.5s hold to "reach" the target time.
+    - Timing arithmetic in comments (`# total 6.78s`, `# adjust to reach 40.7s total`,
+      `# Total runtime check`). Never write runtime math in comments.
+15. LABEL DENSITY: every element the narration names gets a short Text label (≤3 words)
+    when it appears, revealed progressively. A scene longer than ~12s carrying only a
+    title is a failure — aim for 2-4 short labels/captions besides the title.
+16. Apply the provided palette colors via Manim color constants or hex strings
     (e.g. "#e8a87c"). Set background with config.background_color or self.camera.background_color.
-15. When reference templates/samples are provided, adapt their motion + layout patterns
+17. When reference templates/samples are provided, adapt their motion + layout patterns
     to THIS scene — do not copy verbatim, and keep the RUNTIME CONTRACT (Text / to_edge).
-16. Output ONLY valid Python code — no markdown, checklists, or commentary.
+18. Output ONLY valid Python code — no markdown, checklists, or commentary.
 """
 
 
@@ -121,6 +149,10 @@ def generate_scene_code(
     # Budget: leave a short final hold; distribute the rest across beats
     beat_count = max(len(scene.animation_beats), 1)
     per_beat = max(0.6, (duration - 0.5) / beat_count)
+    # Density floor: long scenes need many *substantive* steps, otherwise the
+    # model stretches a few animations and pads the rest with decorative motion.
+    min_plays = max(beat_count, math.ceil(duration / 4.0))
+    min_labels = 2 if duration < 20 else 3
     lang = normalize_language(language)
     lang_name = language_display_name(lang)
 
@@ -130,6 +162,12 @@ def generate_scene_code(
         if palette
         else "  (use style_notes colors)"
     )
+    recurring = list(plan.recurring_elements or [])
+    recurring_block = (
+        "\n".join(f"  - {r}" for r in recurring)
+        if recurring
+        else "  (none specified — still reuse the palette + visual_identity consistently)"
+    )
 
     user = f"""Video title: {plan.title}
 Concept: {plan.concept_summary}
@@ -137,6 +175,11 @@ Style: {plan.style_notes}
 Visual identity: {plan.visual_identity or "(none)"}
 Palette:
 {palette_lines}
+Recurring visual elements (CRITICAL — reuse these in THIS scene with the exact
+SAME shape, color, label, and screen role they have elsewhere in the video, so
+every scene visually reads as part of one continuous video, not a disconnected
+clip. Adapt only their position if the layout requires it):
+{recurring_block}
 Output language: {lang_name} — ALL on-screen Text(...) titles/labels/captions/formulas
 must be written in this language (ASCII math symbols OK).
 
@@ -167,6 +210,11 @@ Reference Manim patterns (adapt to this scene):
 {template_block}
 
 Composition contract:
+- VISUAL CONSISTENCY IS NON-NEGOTIABLE: use the palette hex values above verbatim (not
+  approximations) for background/accent/text/highlight, keep title placement/typography
+  the same style as other scenes (top, FadeIn, similar font_size), and render every
+  recurring element listed above so a viewer scrubbing between scenes sees the same
+  visual language, not a new color scheme or layout convention each time.
 - Build a clean teaching frame that MOVES: each animation_beat → at least one self.play
   with Create/Write/GrowArrow/Indicate/.animate/ValueTracker (not only FadeIn + wait).
 - Center the main diagram; keep every label fully inside the frame (no clipped letters).
@@ -181,6 +229,13 @@ Composition contract:
   the video will freeze or run silent against the voiceover. Distribute the budget
   roughly evenly across the beats above (~{per_beat:.1f}s each); do not dump the whole
   budget into one giant self.wait().
+- DENSITY FLOOR for this {duration:.1f}s scene: at least {min_plays} distinct self.play
+  calls, each advancing the explanation (a new element, a new label, a real state
+  change), and at least {min_labels} short Text labels besides the title. Total
+  self.wait() time must stay under {max(1.0, 0.15 * duration):.1f}s including the final
+  0.5s hold. Reaching the duration with pulse/opacity loops, objects flying in and out,
+  or a padding wait at the end counts as a failed scene — if you run out of things to
+  show, reveal more of the narration's named parts as labeled annotations instead.
 
 Return one complete runnable Manim Community Scene file.
 """
@@ -194,7 +249,13 @@ Return one complete runnable Manim Community Scene file.
     code = clean_manim_code(raw)
     ok, err = validate_manim_code(code)
     if ok:
-        return code
+        return _fix_filler_motion(
+            client,
+            code=code,
+            scene=scene,
+            duration=duration,
+            language=lang,
+        )
     return revise_scene_code(
         client,
         code=code,
@@ -207,6 +268,47 @@ Return one complete runnable Manim Community Scene file.
         surgical=False,
         language=lang,
     )
+
+
+def _fix_filler_motion(
+    client: OpenRouterClient,
+    *,
+    code: str,
+    scene: SceneSection,
+    duration: float,
+    language: str,
+) -> str:
+    """One cheap pre-render pass against time-filling, information-free scenes.
+
+    Static lint catches what the duration check cannot: a clip that runs the
+    right length but spends it on pulsing shapes, no-op scale reverts, unlabeled
+    objects and padding waits. Only keep the rewrite if it is valid AND actually
+    fixes more than it breaks.
+    """
+    issues = lint_scene_code(code, target_duration=duration)
+    if not issues:
+        return code
+    revised = revise_scene_code(
+        client,
+        code=code,
+        scene=scene,
+        revision_instructions=(
+            "This scene fills its runtime with motion that teaches nothing. Keep the "
+            "visual idea, layout and total duration, but replace the filler with "
+            "substantive steps (new labeled elements, annotations of the parts the "
+            "narration names, tracker/transform motion that shows change). Fix:\n- "
+            + "\n- ".join(issues)
+        ),
+        target_duration_seconds=duration,
+        surgical=True,
+        language=language,
+    )
+    ok, _ = validate_manim_code(revised)
+    if not ok:
+        return code
+    if len(lint_scene_code(revised, target_duration=duration)) >= len(issues):
+        return code
+    return revised
 
 
 def revise_scene_code(

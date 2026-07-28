@@ -548,6 +548,55 @@ export async function updateJobPlan(
   }
 }
 
+export async function revisePlanWithAI(
+  jobId: string,
+  instructions: string,
+  signal?: AbortSignal,
+): Promise<ScenePlanDraft> {
+  try {
+    const res = await fetch(`${apiBase()}/api/jobs/${jobId}/plan/revise`, {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ instructions }),
+      signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `Revise plan failed (${res.status})`);
+    }
+    const data = (await res.json()) as { plan: Record<string, unknown> };
+    return planDraftFromRecord(data.plan);
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Revise storyboard");
+  }
+}
+
+function planDraftFromRecord(data: Record<string, unknown>): ScenePlanDraft {
+  const scenes = (data.scenes as Array<Record<string, unknown>>) || [];
+  return {
+    title: String(data.title || "Untitled"),
+    concept_summary: String(data.concept_summary || ""),
+    style_notes: String(data.style_notes || ""),
+    visual_identity: String(data.visual_identity || ""),
+    palette: (data.palette as Record<string, string>) || {},
+    scenes: scenes.map((s, i) => ({
+      id: String(s.id || s.scene_id || `scene_${i + 1}`),
+      title: String(s.title || `Scene ${i + 1}`),
+      narration: String(s.narration || ""),
+      visual_description: String(s.visual_description || ""),
+      animation_beats: Array.isArray(s.animation_beats)
+        ? (s.animation_beats as string[])
+        : [],
+      duration_seconds: Number(s.duration_seconds) || 8,
+      camera_notes: String(s.camera_notes || ""),
+      visual_device: String(s.visual_device || ""),
+      style_tags: Array.isArray(s.style_tags) ? (s.style_tags as string[]) : [],
+    })),
+  };
+}
+
 export async function streamContinue(
   jobId: string,
   onEvent: (event: PipelineEvent) => void,

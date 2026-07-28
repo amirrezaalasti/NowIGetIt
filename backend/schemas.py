@@ -94,6 +94,9 @@ class ScenePlan(BaseModel):
     style_notes: str = ""
     # Visual identity: palette + metaphor direction for consistent look
     visual_identity: str = ""
+    # Concrete visual anchors (named object/shape/color role) reused verbatim
+    # across every scene so scenes look like one video, not disconnected clips.
+    recurring_elements: list[str] = Field(default_factory=list)
     palette: dict[str, str] = Field(
         default_factory=dict,
         description="Named colors e.g. background, accent, text, highlight",
@@ -103,6 +106,12 @@ class ScenePlan(BaseModel):
 
 class UpdatePlanRequest(BaseModel):
     plan: ScenePlan
+
+
+class RevisePlanRequest(BaseModel):
+    """Ask the AI planner to add/remove/edit scenes via natural language."""
+
+    instructions: str = Field(..., min_length=2, max_length=2000)
 
 
 class RegenerateSceneRequest(BaseModel):

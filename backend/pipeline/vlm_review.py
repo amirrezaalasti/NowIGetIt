@@ -41,6 +41,11 @@ Reject for real code problems OR obvious layout disasters in the code:
 - dangerous/incomplete expressions cut mid-line
 - many absolute overlapping Text/Arrow placements with no FadeOut between beats
 - dumping long narration/bitstreams onto the frame
+- TIME-FILLING with no information (reject these — they waste the whole scene):
+  scale/opacity "breathing" loops on the same object, `.scale(1.0)` no-op reverts,
+  unlabeled objects flying in and back out, repeated identical plays, a trailing
+  self.wait() beyond the 0.5s hold, or timing-arithmetic comments
+- a scene longer than ~12s whose only Text is the title (unlabeled shapes teach nothing)
 
 CRITICAL CONSTRAINTS for revision_instructions:
 - NEVER suggest MathTex, Tex, TexText, or LaTeX — the render host has no LaTeX.
@@ -56,6 +61,8 @@ CRITICAL CONSTRAINTS for revision_instructions:
 Also score teaching quality (0–1):
 - clarity_score: how clearly the code would teach the concept
   (penalize clutter AND meaningless decorative shapes; do not penalize complete formulas)
+  Score below 0.4 when most of the runtime goes to motion that adds no information,
+  or when the frame carries no labels for the things the narration names.
 - misconception_risk: how likely a learner is to walk away confused
 
 {_JSON_SHAPE}
@@ -75,6 +82,9 @@ REJECT (approved=false) when ANY of these are true:
 - illegible text, broken letter spacing, empty frame, off-brief
 - clutter that would confuse a learner in a pause-frame screenshot
 - decorative filler shapes (random morphs, unexplained geometry) that obscure the idea
+- shapes carrying no label for what the narration names — e.g. a long scene showing only
+  a title plus unlabeled geometry, or the attached code spending its runtime on
+  scale/opacity pulsing, `.scale(1.0)` no-ops, objects flying in and out, or padding waits
 
 Do NOT reject for:
 - clean layouts with intentional white space
@@ -112,6 +122,8 @@ CRITICAL CONSTRAINTS for revision_instructions:
 Also score teaching quality (0–1):
 - clarity_score: how clearly the frames teach the concept
   (penalize clutter and meaningless shapes; do not penalize complete formulas)
+  Score below 0.4 when the frames are mostly unlabeled shapes, or when the code spends
+  most of its runtime on motion that adds no information.
 - misconception_risk: how likely a learner is to walk away confused
 
 {_JSON_SHAPE}
