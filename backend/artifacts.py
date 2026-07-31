@@ -347,6 +347,7 @@ def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[st
                     "prompt": row.get("prompt"),
                     "created_at": row.get("created_at"),
                     "has_result": bool(row.get("has_result")),
+                    "has_final_video": bool(row.get("has_final_video")),
                     "user_id": row.get("user_id") or user_id,
                     "status": row.get("status"),
                 }
@@ -377,14 +378,24 @@ def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[st
                 title = json.loads(plan_path.read_text(encoding="utf-8")).get("title")
             except json.JSONDecodeError:
                 pass
+        has_result = (path / "result.json").exists()
+        has_final_video = (path / "final.mp4").exists()
+        if has_result or has_final_video:
+            status = "complete"
+        elif (path / "scene_plan.json").exists():
+            status = "running"
+        else:
+            status = meta.get("status") or "unknown"
         jobs.append(
             {
                 "job_id": path.name,
                 "title": title,
                 "prompt": meta.get("prompt"),
                 "created_at": meta.get("created_at"),
-                "has_result": (path / "result.json").exists(),
+                "has_result": has_result,
+                "has_final_video": has_final_video,
                 "user_id": meta.get("user_id"),
+                "status": status,
             }
         )
         if len(jobs) >= limit:

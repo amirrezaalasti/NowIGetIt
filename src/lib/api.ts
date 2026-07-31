@@ -10,6 +10,8 @@ export type JobSummary = {
   prompt?: string | null;
   created_at?: string | null;
   has_result?: boolean;
+  has_final_video?: boolean;
+  status?: string | null;
 };
 
 export type HumanComment = {
@@ -688,11 +690,15 @@ export type DocumentAskAction =
   | "relate"
   | "critique"
   | "summarize_slide"
+  | "summarize_document"
+  | "outline_document"
   | "extract_formula"
   | "key_takeaways"
   | "misconceptions"
   | "turn_into_video_prompt"
   | "freeform";
+
+export type DocumentAskScope = "slide" | "document";
 
 export type DocumentBlock = {
   id: string;
@@ -856,6 +862,7 @@ export async function askDocument(
     block_id?: string | null;
     message?: string;
     language?: string;
+    scope?: DocumentAskScope;
     save_as_comment?: boolean;
     prior_reply?: string | null;
     conversation?: DocumentAskTurn[];

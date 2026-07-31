@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import {
   addSceneComment,
@@ -16,6 +17,74 @@ import {
   type PipelineEvent,
   type JobSummary,
 } from "@/lib/api";
+
+type JobFilter = "all" | "ready" | "in_progress";
+type StatusTone = "ready" | "live" | "warn" | "muted";
+
+function formatRelativeDate(iso?: string | null): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const diffMs = Date.now() - date.getTime();
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: date.getFullYear() !== new Date().getFullYear() ? "numeric" : undefined,
+  });
+}
+
+function formatAbsoluteDate(iso?: string | null): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function jobStatusMeta(job: JobSummary): { label: string; tone: StatusTone } {
+  const status = (job.status || "").toLowerCase();
+  if (job.has_result || status === "complete") {
+    return { label: job.has_final_video ? "Ready" : "Complete", tone: "ready" };
+  }
+  if (status === "running") return { label: "Generating", tone: "live" };
+  if (status === "awaiting_plan") return { label: "Awaiting plan", tone: "warn" };
+  if (status === "interrupted") return { label: "Interrupted", tone: "warn" };
+  if (status === "unknown" || !status) return { label: "Draft", tone: "muted" };
+  return { label: status.replace(/_/g, " "), tone: "muted" };
+}
+
+function matchesFilter(job: JobSummary, filter: JobFilter): boolean {
+  if (filter === "all") return true;
+  const status = (job.status || "").toLowerCase();
+  const ready = Boolean(job.has_result) || status === "complete";
+  if (filter === "ready") return ready;
+  return !ready;
+}
+
+function statusToneClass(tone: StatusTone): string {
+  if (tone === "ready") {
+    return "bg-[var(--accent)]/15 text-[var(--accent)]";
+  }
+  if (tone === "live") {
+    return "bg-[var(--accent-hot)]/15 text-[var(--accent-hot)]";
+  }
+  if (tone === "warn") {
+    return "bg-[var(--danger-bg)] text-[var(--danger-ink)]";
+  }
+  return "bg-[var(--surface-strong)] text-[var(--ink-muted)]";
+}
 
 // ---- SceneVideoPlayer -------------------------------------------------------
 
@@ -450,28 +519,61 @@ const POLL_MS = 1500;
 
 export function DebugInspector({ activeJobId, live = false }: Props) {
   const { status: authStatus } = useSession();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [job, setJob] = useState<JobDetail | null>(null);
   const [tab, setTab] = useState<"scenes" | "advanced">("scenes");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<JobFilter>("all");
+  const [copiedId, setCopiedId] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const hasLoadedRef = useRef(false);
   const loadedForIdRef = useRef<string | null>(null);
   const signedIn = authStatus === "authenticated";
 
+  const syncJobToUrl = useCallback(
+    (jobId: string | null) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (jobId) params.set("job", jobId);
+      else params.delete("job");
+      const next = params.toString();
+      router.replace(next ? `${pathname}?${next}` : pathname, { scroll: false });
+    },
+    [pathname, router, searchParams],
+  );
+
+  const selectJob = useCallback(
+    (jobId: string) => {
+      setSelectedId(jobId);
+      setTab("scenes");
+      syncJobToUrl(jobId);
+    },
+    [syncJobToUrl],
+  );
+
   const refreshJobs = useCallback(async () => {
     if (!signedIn) {
       setJobs([]);
+      setListLoading(false);
       return;
     }
     try {
       await ensureApiToken();
       const list = await listJobs();
       setJobs(list);
-    } catch {
-      /* API may be offline or session expired */
+      setListError(null);
+    } catch (err) {
+      setListError((err as Error).message || "Failed to load library");
+    } finally {
+      setListLoading(false);
     }
   }, [signedIn]);
 
@@ -484,8 +586,13 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
   }, [refreshJobs, activeJobId]);
 
   useEffect(() => {
-    if (activeJobId) setSelectedId(activeJobId);
-  }, [activeJobId]);
+    if (activeJobId) {
+      setSelectedId(activeJobId);
+      return;
+    }
+    const fromUrl = searchParams.get("job");
+    if (fromUrl) setSelectedId(fromUrl);
+  }, [activeJobId, searchParams]);
 
   useEffect(() => {
     if (!selectedId || !signedIn) {
@@ -542,15 +649,70 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
     wasLiveRef.current = live;
   }, [live, selectedId, bumpRefresh, refreshJobs]);
 
-  function onRefresh() {
-    void refreshJobs();
-    bumpRefresh();
+  async function onRefresh() {
+    setRefreshing(true);
+    try {
+      await refreshJobs();
+      bumpRefresh();
+    } finally {
+      setRefreshing(false);
+    }
   }
+
+  const filteredJobs = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return jobs
+      .filter((j) => matchesFilter(j, filter))
+      .filter((j) => {
+        if (!q) return true;
+        const haystack = [j.title, j.prompt, j.job_id]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(q);
+      })
+      .sort((a, b) => {
+        const aTime = a.created_at ? Date.parse(a.created_at) : 0;
+        const bTime = b.created_at ? Date.parse(b.created_at) : 0;
+        return bTime - aTime;
+      });
+  }, [jobs, filter, query]);
+
+  const filterCounts = useMemo(() => {
+    const counts = { all: jobs.length, ready: 0, in_progress: 0 };
+    for (const j of jobs) {
+      if (matchesFilter(j, "ready")) counts.ready += 1;
+      else counts.in_progress += 1;
+    }
+    return counts;
+  }, [jobs]);
 
   const selectedSummary = useMemo(
     () => jobs.find((j) => j.job_id === selectedId) || null,
     [jobs, selectedId],
   );
+
+  const selectedStatus = selectedSummary
+    ? jobStatusMeta(selectedSummary)
+    : job?.runtime?.status
+      ? jobStatusMeta({
+          job_id: job.job_id,
+          status: job.runtime.status,
+          has_result: job.runtime.has_result,
+          has_final_video: job.runtime.has_final_video,
+        })
+      : null;
+
+  async function copyJobId() {
+    if (!selectedId) return;
+    try {
+      await navigator.clipboard.writeText(selectedId);
+      setCopiedId(true);
+      window.setTimeout(() => setCopiedId(false), 1600);
+    } catch {
+      /* clipboard may be unavailable */
+    }
+  }
 
   if (!signedIn) {
     return (
@@ -572,10 +734,16 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
     );
   }
 
+  const filterOptions: { id: JobFilter; label: string }[] = [
+    { id: "all", label: `All (${filterCounts.all})` },
+    { id: "ready", label: `Ready (${filterCounts.ready})` },
+    { id: "in_progress", label: `In progress (${filterCounts.in_progress})` },
+  ];
+
   return (
-    <section className="relative mx-auto w-full max-w-4xl px-6 pb-28">
-      <div className="mb-8 flex flex-wrap items-end justify-between gap-3">
-        <div>
+    <section className="relative mx-auto w-full max-w-6xl px-6 pb-28">
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-4 animate-rise">
+        <div className="min-w-0">
           <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">
             Library
             {live && selectedId === activeJobId && (
@@ -584,63 +752,186 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
               </span>
             )}
           </p>
-          <h1 className="mt-1 font-[family-name:var(--font-display)] text-3xl tracking-tight">
+          <h1 className="mt-1 font-[family-name:var(--font-display)] text-3xl tracking-tight sm:text-4xl">
             Past explanations
           </h1>
-          <p className="mt-2 max-w-lg text-sm text-[var(--ink-muted)]">
-            Open a job to watch the final video, leave scene feedback, or dig into
-            advanced artifacts.
+          <p className="mt-2 max-w-xl text-sm text-[var(--ink-muted)]">
+            Browse finished videos, resume in-progress work, leave scene feedback,
+            or inspect pipeline artifacts.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onRefresh}
-          className="text-sm text-[var(--ink-muted)] underline-offset-4 hover:underline"
-        >
-          Refresh
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/"
+            className="rounded-lg border border-[var(--line)] px-3.5 py-2 text-sm text-[var(--ink-muted)] transition hover:border-[var(--accent)] hover:text-[var(--ink)]"
+          >
+            New explanation
+          </Link>
+          <button
+            type="button"
+            onClick={() => void onRefresh()}
+            disabled={refreshing || listLoading}
+            className="inline-flex items-center gap-2 rounded-lg bg-[var(--surface)] px-3.5 py-2 text-sm text-[var(--ink)] transition hover:bg-[var(--bg-lift)] disabled:opacity-50"
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 rounded-full border-2 border-current border-t-transparent ${
+                refreshing ? "animate-spin" : "opacity-40"
+              }`}
+              aria-hidden
+            />
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
       </div>
 
-      <div className="grid gap-8 lg:grid-cols-[16rem_1fr]">
-        <aside>
-          <p className="mb-3 text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
-            Jobs
-          </p>
-          {jobs.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-6 text-sm text-[var(--ink-muted)]">
-              Nothing here yet.{" "}
+      <div className="mb-5 flex flex-col gap-3 animate-rise-delay sm:flex-row sm:items-center sm:justify-between">
+        <label className="relative block min-w-0 flex-1 sm:max-w-md">
+          <span className="sr-only">Search explanations</span>
+          <svg
+            viewBox="0 0 20 20"
+            fill="none"
+            aria-hidden
+            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-muted)]"
+          >
+            <path
+              d="M8.5 14.5a6 6 0 1 1 0-12 6 6 0 0 1 0 12Zm5.3-1.2 3.4 3.4"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          </svg>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by title, prompt, or id…"
+            className="w-full rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] py-2.5 pl-9 pr-3 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] outline-none transition focus:border-[var(--accent)]"
+          />
+        </label>
+        <div
+          role="radiogroup"
+          aria-label="Filter by status"
+          className="inline-flex max-w-full flex-wrap rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] p-0.5"
+        >
+          {filterOptions.map((opt) => {
+            const selected = filter === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => setFilter(opt.id)}
+                className={`rounded-md px-3 py-1.5 text-sm transition ${
+                  selected
+                    ? "bg-[var(--bg-lift)] text-[var(--ink)] shadow-sm"
+                    : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[20rem_minmax(0,1fr)] xl:grid-cols-[22rem_minmax(0,1fr)]">
+        <aside className="min-w-0 lg:sticky lg:top-20 lg:self-start">
+          <div className="mb-3 flex items-baseline justify-between gap-2">
+            <p className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+              Explanations
+            </p>
+            {!listLoading && (
+              <p className="text-xs text-[var(--ink-muted)]">
+                {filteredJobs.length}
+                {filteredJobs.length !== jobs.length ? ` of ${jobs.length}` : ""}
+              </p>
+            )}
+          </div>
+
+          {listError && (
+            <p className="mb-3 rounded-lg border border-[var(--danger-line)] bg-[var(--danger-bg)] px-3 py-2 text-sm text-[var(--danger-ink)]">
+              {listError}
+            </p>
+          )}
+
+          {listLoading ? (
+            <ul className="space-y-2" aria-hidden>
+              {Array.from({ length: 6 }).map((_, i) => (
+                <li
+                  key={i}
+                  className="h-[4.5rem] animate-pulse rounded-xl bg-[var(--surface)]"
+                />
+              ))}
+            </ul>
+          ) : jobs.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-8 text-sm text-[var(--ink-muted)]">
+              <p className="font-medium text-[var(--ink)]">Nothing here yet</p>
+              <p className="mt-1.5">
+                Create an explanation and it will appear in your library.
+              </p>
               <Link
                 href="/"
-                className="text-[var(--accent)] underline-offset-4 hover:underline"
+                className="mt-4 inline-flex rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[var(--on-accent)] transition hover:brightness-110"
               >
-                Create an explanation
-              </Link>{" "}
-              and it will show up here.
+                Create explanation
+              </Link>
+            </div>
+          ) : filteredJobs.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-6 text-sm text-[var(--ink-muted)]">
+              No matches
+              {query.trim() ? ` for “${query.trim()}”` : ""}.
+              <button
+                type="button"
+                onClick={() => {
+                  setQuery("");
+                  setFilter("all");
+                }}
+                className="mt-3 block text-[var(--accent)] underline-offset-4 hover:underline"
+              >
+                Clear filters
+              </button>
             </div>
           ) : (
-            <ul className="space-y-1">
-              {jobs.map((j) => {
+            <ul className="max-h-[min(70vh,40rem)] space-y-1 overflow-y-auto pr-1">
+              {filteredJobs.map((j) => {
                 const active = selectedId === j.job_id;
+                const status = jobStatusMeta(j);
+                const relative = formatRelativeDate(j.created_at);
                 return (
                   <li key={j.job_id}>
                     <button
                       type="button"
-                      onClick={() => {
-                        setSelectedId(j.job_id);
-                        setTab("scenes");
-                      }}
-                      className={`w-full rounded-lg px-3 py-2.5 text-left transition ${
+                      onClick={() => selectJob(j.job_id)}
+                      aria-current={active ? "true" : undefined}
+                      className={`group w-full rounded-xl px-3 py-3 text-left transition ${
                         active
-                          ? "bg-[var(--surface)] text-[var(--ink)]"
-                          : "text-[var(--ink-muted)] hover:bg-[var(--surface)]/60 hover:text-[var(--ink)]"
+                          ? "bg-[var(--surface)] ring-1 ring-[var(--accent)]/35"
+                          : "hover:bg-[var(--surface)]/70"
                       }`}
                     >
-                      <span className="block truncate text-sm font-medium">
-                        {j.title || "Untitled"}
-                      </span>
-                      <span className="mt-0.5 block truncate font-mono text-[10px] opacity-60">
-                        {j.job_id.slice(0, 10)}
-                        {j.has_result ? " · ready" : ""}
+                      <div className="flex items-start justify-between gap-2">
+                        <span
+                          className={`min-w-0 flex-1 text-sm font-medium leading-snug ${
+                            active ? "text-[var(--ink)]" : "text-[var(--ink)]/90"
+                          }`}
+                        >
+                          <span className="line-clamp-2">
+                            {j.title?.trim() || "Untitled explanation"}
+                          </span>
+                        </span>
+                        <span
+                          className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium capitalize ${statusToneClass(status.tone)}`}
+                        >
+                          {status.label}
+                        </span>
+                      </div>
+                      <span className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--ink-muted)]">
+                        {relative ? <span>{relative}</span> : null}
+                        {relative ? <span aria-hidden>·</span> : null}
+                        <span className="font-mono opacity-70">
+                          {j.job_id.slice(0, 8)}
+                        </span>
                       </span>
                     </button>
                   </li>
@@ -650,59 +941,106 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
           )}
         </aside>
 
-        <div className="min-w-0">
+        <div className="min-w-0 animate-rise-delay-2">
           {error && (
-            <p className="mb-4 text-sm text-[var(--danger-ink)]">{error}</p>
-          )}
-          {loading && (
-            <p className="mb-4 text-sm text-[var(--ink-muted)]">Loading job…</p>
+            <p className="mb-4 rounded-lg border border-[var(--danger-line)] bg-[var(--danger-bg)] px-3 py-2 text-sm text-[var(--danger-ink)]">
+              {error}
+            </p>
           )}
 
-          {!selectedId && jobs.length > 0 && (
-            <p className="text-sm text-[var(--ink-muted)]">
-              Select a job from the list to open it.
-            </p>
+          {!selectedId && !listLoading && jobs.length > 0 && (
+            <div className="flex min-h-[22rem] flex-col items-center justify-center rounded-2xl border border-dashed border-[var(--line)] bg-[var(--surface)]/40 px-6 py-16 text-center">
+              <p className="font-[family-name:var(--font-display)] text-xl tracking-tight text-[var(--ink)]">
+                Select an explanation
+              </p>
+              <p className="mt-2 max-w-sm text-sm text-[var(--ink-muted)]">
+                Pick one from the list to watch the final video, leave scene
+                feedback, or inspect advanced artifacts.
+              </p>
+            </div>
+          )}
+
+          {selectedId && loading && !job && (
+            <div className="space-y-4" aria-busy aria-label="Loading explanation">
+              <div className="h-8 w-2/3 animate-pulse rounded-lg bg-[var(--surface)]" />
+              <div className="h-4 w-full animate-pulse rounded bg-[var(--surface)]" />
+              <div className="aspect-video w-full animate-pulse rounded-2xl bg-[var(--surface)]" />
+            </div>
           )}
 
           {job && (
             <>
               <div className="mb-6">
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <h2 className="font-[family-name:var(--font-display)] text-2xl tracking-tight">
-                    {String(job.scene_plan?.title || selectedSummary?.title || job.job_id)}
-                  </h2>
-                  <Link
-                    href={`/?job=${encodeURIComponent(job.job_id)}`}
-                    className="shrink-0 text-sm text-[var(--accent)] underline-offset-4 hover:underline"
-                  >
-                    Open in Create
-                  </Link>
+                  <div className="min-w-0">
+                    <h2 className="font-[family-name:var(--font-display)] text-2xl tracking-tight sm:text-3xl">
+                      {String(
+                        job.scene_plan?.title ||
+                          selectedSummary?.title ||
+                          "Untitled explanation",
+                      )}
+                    </h2>
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                      {selectedStatus ? (
+                        <span
+                          className={`rounded-md px-2 py-1 font-medium capitalize ${statusToneClass(selectedStatus.tone)}`}
+                        >
+                          {selectedStatus.label}
+                          {job.runtime?.running ? " · generating…" : ""}
+                        </span>
+                      ) : null}
+                      {job.scenes.length > 0 ? (
+                        <span className="rounded-md bg-[var(--surface-strong)] px-2 py-1 text-[var(--ink-muted)]">
+                          {job.scenes.length} scene
+                          {job.scenes.length === 1 ? "" : "s"}
+                        </span>
+                      ) : null}
+                      {selectedSummary?.created_at ? (
+                        <span
+                          className="rounded-md bg-[var(--surface-strong)] px-2 py-1 text-[var(--ink-muted)]"
+                          title={formatAbsoluteDate(selectedSummary.created_at)}
+                        >
+                          {formatAbsoluteDate(selectedSummary.created_at)}
+                        </span>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => void copyJobId()}
+                        className="rounded-md bg-[var(--surface-strong)] px-2 py-1 font-mono text-[var(--ink-muted)] transition hover:text-[var(--ink)]"
+                        title="Copy job id"
+                      >
+                        {copiedId ? "Copied" : `${job.job_id.slice(0, 10)}…`}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Link
+                      href={`/?job=${encodeURIComponent(job.job_id)}`}
+                      className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] transition hover:border-[var(--accent)] hover:text-[var(--ink)]"
+                    >
+                      Open in Create
+                    </Link>
+                    {(job.final_video_url || job.urls?.final_video) && (
+                      <a
+                        href={assetUrl(job.final_video_url || job.urls?.final_video)}
+                        download
+                        className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[var(--on-accent)] transition hover:brightness-110"
+                      >
+                        Download
+                      </a>
+                    )}
+                  </div>
                 </div>
                 {selectedSummary?.prompt ? (
-                  <p className="mt-2 line-clamp-2 text-sm text-[var(--ink-muted)]">
+                  <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-[var(--ink-muted)]">
                     {selectedSummary.prompt}
-                  </p>
-                ) : null}
-                {job.runtime?.status && job.runtime.status !== "complete" ? (
-                  <p className="mt-2 text-xs text-[var(--ink-muted)]">
-                    Status: {job.runtime.status}
-                    {job.runtime.running ? " · generating…" : ""}
                   </p>
                 ) : null}
               </div>
 
-              {(job.final_video_url || job.urls?.final_video) && (
+              {(job.final_video_url || job.urls?.final_video) ? (
                 <div className="mb-10">
-                  <div className="mb-2 flex items-center justify-between gap-3">
-                    <p className="text-sm text-[var(--ink)]">Final video</p>
-                    <a
-                      href={assetUrl(job.final_video_url || job.urls?.final_video)}
-                      download
-                      className="text-sm text-[var(--accent)] underline-offset-4 hover:underline"
-                    >
-                      Download
-                    </a>
-                  </div>
+                  <p className="mb-2 text-sm text-[var(--ink)]">Final video</p>
                   <video
                     key={job.final_video_url || job.urls?.final_video}
                     className="w-full rounded-2xl border border-[var(--line)] bg-[var(--surface-video)]"
@@ -712,6 +1050,23 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                     preload="metadata"
                   />
                 </div>
+              ) : (
+                !loading && (
+                  <div className="mb-10 rounded-2xl border border-dashed border-[var(--line)] bg-[var(--surface)]/30 px-5 py-8 text-sm text-[var(--ink-muted)]">
+                    No final video yet
+                    {job.runtime?.running
+                      ? " — generation is still running."
+                      : selectedSummary && !selectedSummary.has_result
+                        ? " — this explanation is still in progress."
+                        : "."}
+                    <Link
+                      href={`/?job=${encodeURIComponent(job.job_id)}`}
+                      className="mt-2 block text-[var(--accent)] underline-offset-4 hover:underline"
+                    >
+                      Resume in Create
+                    </Link>
+                  </div>
+                )
               )}
 
               <div className="mb-6 flex gap-4 border-b border-[var(--line)] text-sm">
@@ -725,6 +1080,7 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                   }`}
                 >
                   Scenes
+                  {job.scenes.length > 0 ? ` (${job.scenes.length})` : ""}
                 </button>
                 <button
                   type="button"
@@ -746,14 +1102,19 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                       No scenes recorded for this job yet.
                     </p>
                   )}
-                  {job.scenes.map((scene) => (
+                  {job.scenes.map((scene, sceneIndex) => (
                     <article
                       key={scene.scene_id}
                       className="border-t border-[var(--line)] pt-6 first:border-t-0 first:pt-0"
                     >
-                      <h3 className="text-lg font-medium">
-                        {String(scene.section?.title || scene.scene_id)}
-                      </h3>
+                      <div className="mb-1 flex flex-wrap items-baseline gap-2">
+                        <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+                          Scene {sceneIndex + 1}
+                        </span>
+                        <h3 className="text-lg font-medium">
+                          {String(scene.section?.title || scene.scene_id)}
+                        </h3>
+                      </div>
                       <p className="mt-1 text-sm text-[var(--ink-muted)]">
                         {String(scene.section?.visual_description || "")}
                       </p>

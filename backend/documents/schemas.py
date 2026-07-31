@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +58,8 @@ class DocumentAskAction(str, Enum):
     relate = "relate"
     critique = "critique"
     summarize_slide = "summarize_slide"
+    summarize_document = "summarize_document"
+    outline_document = "outline_document"
     extract_formula = "extract_formula"
     key_takeaways = "key_takeaways"
     misconceptions = "misconceptions"
@@ -109,6 +111,8 @@ class DocumentAskRequest(BaseModel):
     block_id: Optional[str] = Field(default=None, max_length=120)
     message: str = Field(default="", max_length=4000)
     language: str = Field(default="en", max_length=16)
+    # "slide" = current slide/block; "document" = entire deck/PDF.
+    scope: Literal["slide", "document"] = "slide"
     # Default off — UI offers an explicit "Save as comment" on the reply.
     save_as_comment: bool = False
     # Prior assistant answer when asking a follow-up about the reply itself.

@@ -23,6 +23,7 @@ import {
   type DocumentAnnotation,
   type DocumentAskAction,
   type DocumentAskResult,
+  type DocumentAskScope,
   type DocumentAskTurn,
   type DocumentDetail,
   type DocumentListItem,
@@ -39,7 +40,7 @@ type BlockSelection = {
   imageSrc?: string | null;
 };
 
-const PRIMARY_ACTIONS: { id: DocumentAskAction; label: string }[] = [
+const SLIDE_PRIMARY_ACTIONS: { id: DocumentAskAction; label: string }[] = [
   { id: "explain", label: "Explain" },
   { id: "explain_figure", label: "Figure" },
   { id: "simplify", label: "Simplify" },
@@ -48,7 +49,7 @@ const PRIMARY_ACTIONS: { id: DocumentAskAction; label: string }[] = [
   { id: "summarize_slide", label: "Summary" },
 ];
 
-const MORE_ACTIONS: { id: DocumentAskAction; label: string }[] = [
+const SLIDE_MORE_ACTIONS: { id: DocumentAskAction; label: string }[] = [
   { id: "key_takeaways", label: "Takeaways" },
   { id: "misconceptions", label: "Misconceptions" },
   { id: "critique", label: "Critique" },
@@ -60,8 +61,31 @@ const MORE_ACTIONS: { id: DocumentAskAction; label: string }[] = [
   { id: "freeform", label: "Ask anything" },
 ];
 
+const DOC_PRIMARY_ACTIONS: { id: DocumentAskAction; label: string }[] = [
+  { id: "summarize_document", label: "Summarize" },
+  { id: "explain", label: "Explain" },
+  { id: "outline_document", label: "Outline" },
+  { id: "key_takeaways", label: "Takeaways" },
+  { id: "quiz", label: "Quiz" },
+  { id: "deepen", label: "Deeper" },
+  { id: "freeform", label: "Ask anything" },
+];
+
+const DOC_MORE_ACTIONS: { id: DocumentAskAction; label: string }[] = [
+  { id: "critique", label: "Critique" },
+  { id: "misconceptions", label: "Misconceptions" },
+  { id: "simplify", label: "Simplify" },
+  { id: "translate", label: "Translate" },
+  { id: "turn_into_video_prompt", label: "Video prompt" },
+];
+
 const ACTION_LABEL: Record<string, string> = Object.fromEntries(
-  [...PRIMARY_ACTIONS, ...MORE_ACTIONS].map((a) => [a.id, a.label]),
+  [
+    ...SLIDE_PRIMARY_ACTIONS,
+    ...SLIDE_MORE_ACTIONS,
+    ...DOC_PRIMARY_ACTIONS,
+    ...DOC_MORE_ACTIONS,
+  ].map((a) => [a.id, a.label]),
 );
 
 export function Understand() {
@@ -70,6 +94,7 @@ export function Understand() {
   const [slideIndex, setSlideIndex] = useState(0);
   const [selection, setSelection] = useState<BlockSelection | null>(null);
   const [action, setAction] = useState<DocumentAskAction>("explain");
+  const [askScope, setAskScope] = useState<DocumentAskScope>("slide");
   const [message, setMessage] = useState("");
   const [language, setLanguage] = useState("en");
   const [busy, setBusy] = useState(false);
@@ -116,6 +141,8 @@ export function Understand() {
           setReply(null);
           setThread([]);
           setFollowUp("");
+          setAskScope("slide");
+          setAction("explain");
         }
         setConverting(data.manifest.status === "converting");
       } catch (err) {
@@ -173,6 +200,7 @@ export function Understand() {
     function onMessage(event: MessageEvent) {
       const data = event.data;
       if (!data || data.type !== "nig-block-select") return;
+      setAskScope("slide");
       setSelection({
         slideId: String(data.slideId || currentSlide?.id || ""),
         blockId: String(data.blockId || ""),
@@ -354,9 +382,10 @@ export function Understand() {
       const result = await askDocument(manifest.doc_id, {
         action,
         slide_id: selection?.slideId || currentSlide.id,
-        block_id: selection?.blockId || null,
+        block_id: askScope === "document" ? null : selection?.blockId || null,
         message,
         language,
+        scope: askScope,
         save_as_comment: false,
       });
       const userText = message.trim() || ACTION_LABEL[action] || action;
@@ -388,9 +417,13 @@ export function Understand() {
       const result = await askDocument(manifest.doc_id, {
         action: "freeform",
         slide_id: reply.slide_id || selection?.slideId || currentSlide.id,
-        block_id: reply.block_id || selection?.blockId || null,
+        block_id:
+          askScope === "document"
+            ? null
+            : reply.block_id || selection?.blockId || null,
         message: q,
         language,
+        scope: askScope,
         save_as_comment: false,
         prior_reply: reply.reply,
         conversation,
@@ -469,6 +502,7 @@ export function Understand() {
         deleting={deletingId === manifest.doc_id}
         selection={selection}
         action={action}
+        askScope={askScope}
         message={message}
         language={language}
         reply={reply}
@@ -503,10 +537,24 @@ export function Understand() {
           setSelection(null);
           setFocusMode(false);
           setSavedCommentId(null);
+          setAskScope("slide");
+          setAction("explain");
         }}
         onFocusToggle={() => setFocusMode((v) => !v)}
         onDelete={() => void removeDoc(manifest.doc_id)}
         onAction={setAction}
+        onAskScope={(scope) => {
+          setAskScope(scope);
+          setSelection(null);
+          if (scope === "document") {
+            setAction("summarize_document");
+          } else if (
+            action === "summarize_document" ||
+            action === "outline_document"
+          ) {
+            setAction("explain");
+          }
+        }}
         onMessage={setMessage}
         onLanguage={setLanguage}
         onRun={() => void runAsk()}
@@ -541,8 +589,9 @@ export function Understand() {
           Interrogate any deck
         </h1>
         <p className="max-w-2xl text-sm leading-relaxed text-[var(--ink-muted)]">
-          Upload a lecture PDF or slide deck. Click any section for
-          explanations, quizzes, figure readouts, and more.
+          Upload a lecture PDF or slide deck. Ask about a selection, a slide, or
+          the whole document — summaries, explanations, outlines, quizzes, and
+          more.
         </p>
       </header>
 
@@ -634,6 +683,7 @@ function DocumentStudio(props: {
   deleting: boolean;
   selection: BlockSelection | null;
   action: DocumentAskAction;
+  askScope: DocumentAskScope;
   message: string;
   language: string;
   reply: DocumentAskResult | null;
@@ -651,6 +701,7 @@ function DocumentStudio(props: {
   onFocusToggle: () => void;
   onDelete: () => void;
   onAction: (a: DocumentAskAction) => void;
+  onAskScope: (scope: DocumentAskScope) => void;
   onMessage: (v: string) => void;
   onLanguage: (v: string) => void;
   onRun: () => void;
@@ -675,6 +726,7 @@ function DocumentStudio(props: {
     deleting,
     selection,
     action,
+    askScope,
     message,
     language,
     reply,
@@ -692,6 +744,7 @@ function DocumentStudio(props: {
     onFocusToggle,
     onDelete,
     onAction,
+    onAskScope,
     onMessage,
     onLanguage,
     onRun,
@@ -825,6 +878,7 @@ function DocumentStudio(props: {
           <AssistantPanel
             selection={selection}
             action={action}
+            askScope={askScope}
             message={message}
             language={language}
             busy={busy}
@@ -837,6 +891,7 @@ function DocumentStudio(props: {
             savingComment={savingComment}
             savedCommentId={savedCommentId}
             onAction={onAction}
+            onAskScope={onAskScope}
             onMessage={onMessage}
             onLanguage={onLanguage}
             onRun={onRun}
@@ -887,6 +942,7 @@ function ToolbarButton({
 function AssistantPanel(props: {
   selection: BlockSelection | null;
   action: DocumentAskAction;
+  askScope: DocumentAskScope;
   message: string;
   language: string;
   busy: boolean;
@@ -899,6 +955,7 @@ function AssistantPanel(props: {
   savingComment: boolean;
   savedCommentId: string | null;
   onAction: (a: DocumentAskAction) => void;
+  onAskScope: (scope: DocumentAskScope) => void;
   onMessage: (v: string) => void;
   onLanguage: (v: string) => void;
   onRun: () => void;
@@ -913,6 +970,7 @@ function AssistantPanel(props: {
   const {
     selection,
     action,
+    askScope,
     message,
     language,
     busy,
@@ -925,6 +983,7 @@ function AssistantPanel(props: {
     savingComment,
     savedCommentId,
     onAction,
+    onAskScope,
     onMessage,
     onLanguage,
     onRun,
@@ -941,9 +1000,10 @@ function AssistantPanel(props: {
     savedCommentId || (reply?.comment_id && reply.comment_id),
   );
 
-  const actions = showMoreActions
-    ? [...PRIMARY_ACTIONS, ...MORE_ACTIONS]
-    : PRIMARY_ACTIONS;
+  const primary =
+    askScope === "document" ? DOC_PRIMARY_ACTIONS : SLIDE_PRIMARY_ACTIONS;
+  const more = askScope === "document" ? DOC_MORE_ACTIONS : SLIDE_MORE_ACTIONS;
+  const actions = showMoreActions ? [...primary, ...more] : primary;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -956,7 +1016,38 @@ function AssistantPanel(props: {
             {ACTION_LABEL[action] || action}
           </span>
         </div>
-        {selection ? (
+
+        <div className="mt-2.5 flex rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] p-0.5">
+          <button
+            type="button"
+            onClick={() => onAskScope("slide")}
+            className={`flex-1 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition ${
+              askScope === "slide"
+                ? "bg-[var(--surface-panel)] text-[var(--ink)] shadow-sm"
+                : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
+            }`}
+          >
+            This slide
+          </button>
+          <button
+            type="button"
+            onClick={() => onAskScope("document")}
+            className={`flex-1 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition ${
+              askScope === "document"
+                ? "bg-[var(--surface-panel)] text-[var(--ink)] shadow-sm"
+                : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
+            }`}
+          >
+            Whole document
+          </button>
+        </div>
+
+        {askScope === "document" ? (
+          <p className="mt-2 text-xs leading-relaxed text-[var(--ink-muted)]">
+            Ask about the entire document — summary, outline, explanation, and
+            more.
+          </p>
+        ) : selection ? (
           <div className="mt-2 rounded-xl border border-[var(--accent)]/25 bg-[var(--accent)]/8 px-3 py-2">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
@@ -1012,7 +1103,11 @@ function AssistantPanel(props: {
           value={message}
           onChange={(e) => onMessage(e.target.value)}
           rows={2}
-          placeholder="Add a question or note…"
+          placeholder={
+            askScope === "document"
+              ? "Ask about the whole document…"
+              : "Add a question or note…"
+          }
           className="w-full resize-none rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-2.5 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)] focus:border-[var(--accent)]"
         />
 
@@ -1123,7 +1218,9 @@ function AssistantPanel(props: {
           </div>
         ) : (
           <div className="flex h-full min-h-[8rem] items-center justify-center text-center text-xs leading-relaxed text-[var(--ink-muted)]">
-            Ask something, then save the answer as a comment on this slide.
+            {askScope === "document"
+              ? "Ask about the whole document, then save the answer as a comment on this slide."
+              : "Ask something, then save the answer as a comment on this slide."}
           </div>
         )}
       </div>
