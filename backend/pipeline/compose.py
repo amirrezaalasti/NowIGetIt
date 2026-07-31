@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -124,6 +127,29 @@ def write_narration_srt(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines), encoding="utf-8")
+    return output_path
+
+
+def concat_audio_files(input_paths: list[Path], output_path: Path) -> Path:
+    """Concatenate multiple audio files into one."""
+    if not input_paths:
+        raise ValueError("No input paths provided")
+    
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    concat_list = output_path.parent / f"{output_path.stem}_concat.txt"
+    lines = [f"file '{p.resolve()}'" for p in input_paths]
+    concat_list.write_text("\n".join(lines), encoding="utf-8")
+    
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", str(concat_list),
+        "-c", "copy",
+        str(output_path)
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    concat_list.unlink(missing_ok=True)
     return output_path
 
 

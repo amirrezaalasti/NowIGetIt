@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.languages import DEFAULT_LANGUAGE, normalize_language
 from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
@@ -70,17 +70,42 @@ class ContinueRequest(BaseModel):
         return normalize_language(value)
 
 
+class AnimationBeat(BaseModel):
+    visual_action: str = Field(
+        ..., description="What happens on screen during this exact beat"
+    )
+    narration: str = Field(
+        ..., description="The spoken narration for this exact beat"
+    )
+    audio_duration_seconds: float = Field(
+        default=0.0, description="Injected post-TTS to guide scene generation"
+    )
+
+
 class SceneSection(BaseModel):
     id: str
     title: str
-    narration: str = Field(
-        ..., description="Voiceover script for TTS for this section"
+    beats: list[AnimationBeat] = Field(
+        default_factory=list,
+        description="List of paired visual actions and spoken narration chunks"
     )
-    visual_description: str = Field(
-        default="", description="What should appear on screen in this scene"
-    )
-    animation_beats: list[str] = Field(default_factory=list)
-    duration_seconds: float = Field(default=8.0, ge=2.0, le=60.0)
+    duration_seconds: float = Field(default=8.0, ge=2.0, le=120.0)
+    visual_description: str = ""
+
+    @property
+    def narration(self) -> str:
+        return " ".join(b.narration for b in self.beats if b.narration)
+
+    @property
+    def animation_beats(self) -> list[str]:
+        return [b.visual_action for b in self.beats if b.visual_action]
+
+    @model_validator(mode="after")
+    def _fill_visual_description(self) -> SceneSection:
+        if not self.visual_description and self.beats:
+            self.visual_description = " ".join(b.visual_action for b in self.beats if b.visual_action)
+        return self
+
     camera_notes: str = ""
     # Pedagogical visual device, e.g. number_line, equation_reveal, particle_flow
     visual_device: str = ""

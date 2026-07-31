@@ -56,3 +56,4 @@ artifacts/*
 
 # Ignore heating_demands folder locally
 heating_demands/
+media/

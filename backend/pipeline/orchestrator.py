@@ -55,6 +55,16 @@ from backend.schemas import (
 EventCallback = Callable[[PipelineEvent], None]
 
 
+class JobCancelledError(Exception):
+    """Raised when the user cancels an ongoing generation job."""
+    pass
+
+
+def _check_cancel(job_id: str) -> None:
+    if job_runner.is_cancelled(job_id):
+        raise JobCancelledError("Generation cancelled by user")
+
+
 def _needs_visual_revision(review: Any, *, clarity_threshold: float) -> bool:
     """True when VLM/code review says the scene is cluttered, unclear, or rejected."""
     approved = bool(getattr(review, "approved", False))
@@ -429,6 +439,8 @@ def _process_one_scene(
 
     sdir = store.scene_dir(job_id, scene.id)
 
+    _check_cancel(job_id)
+
     # --- TTS first so codegen can match narration length (unless audio disabled) ---
     # Gemini returns PCM→WAV (no ffmpeg); other providers may return MP3.
     audio_path: Optional[str] = None
@@ -481,6 +493,7 @@ def _process_one_scene(
         job_id=job_id,
     )
 
+    _check_cancel(job_id)
     code = generate_scene_code(
         client,
         plan=plan,
@@ -510,6 +523,7 @@ def _process_one_scene(
     preview_note = None
 
     if not skip_render:
+        _check_cancel(job_id)
         video_path, frame_path, render_log = render_scene(
             code,
             work_dir=work_dir / "render" / scene.id,
@@ -533,6 +547,7 @@ def _process_one_scene(
                 )
             ):
                 break
+            _check_cancel(job_id)
             revision_count += 1
             _emit(
                 on_event,
@@ -587,6 +602,7 @@ def _process_one_scene(
         resync_budget = max(0, settings.max_scene_revisions - revision_count)
         resync_attempts = 0
         while mismatch is not None and resync_attempts < min(2, resync_budget):
+            _check_cancel(job_id)
             resync_attempts += 1
             revision_count += 1
             diff = mismatch - target_duration
@@ -1297,6 +1313,7 @@ def _run_scenes_loop(
     # would mean every scene only ever sees the static plan, never what its
     # predecessor really produced.
     for index, scene in to_run:
+        _check_cancel(job_id)
         artifact = _process_one_scene(
             client=client,
             job_id=job_id,
@@ -1982,6 +1999,14 @@ def iter_pipeline_events(
                 user_email=user_email,
                 user_name=user_name,
             )
+        except JobCancelledError as exc:
+            q.put(
+                PipelineEvent(
+                    type=PipelineEventType.error,
+                    message=str(exc),
+                    data={"error": "cancelled"},
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             q.put(
                 PipelineEvent(
@@ -2119,6 +2144,14 @@ def iter_regenerate_scene(
         try:
             regenerate_scene(
                 job_id, scene_id, request, on_event=on_event
+            )
+        except JobCancelledError as exc:
+            q.put(
+                PipelineEvent(
+                    type=PipelineEventType.error,
+                    message=str(exc),
+                    data={"error": "cancelled"},
+                )
             )
         except Exception as exc:  # noqa: BLE001
             q.put(

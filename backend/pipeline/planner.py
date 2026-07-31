@@ -76,7 +76,11 @@ def estimate_narration_seconds(text: str, language: str = "en") -> float:
 
 
 def _plan_total_narration_seconds(plan: ScenePlan, language: str) -> float:
-    return sum(estimate_narration_seconds(s.narration, language) for s in plan.scenes)
+    total = 0.0
+    for s in plan.scenes:
+        for b in s.beats:
+            total += estimate_narration_seconds(b.narration, language)
+    return total
 
 
 def _validate_plan_length(plan: ScenePlan, *, length_preset: str, language: str) -> None:
@@ -120,22 +124,23 @@ Given a learner's prompt, produce a JSON scene plan for a short explanatory vide
 Rules:
 - Break the explanation into sequential scenes based on complexity. Keep each scene
   simple enough for one short Manim class — one clear visual idea per scene.
-- Each scene must include: id, title, narration, visual_description,
-  animation_beats, duration_seconds, camera_notes, visual_device, style_tags.
-- LANGUAGE (critical): Write title, concept_summary, narration, visual_description,
-  and animation_beats in the requested output language. On-screen labels implied by
+- IMPORTANT: It is highly recommended to generate between 4 and 7 scenes based on the context to maintain optimal pacing.
+- Each scene must include: id, title, visual_description,
+  beats (a list of objects with 'visual_action' and 'narration'), duration_seconds, camera_notes, visual_device, style_tags.
+- LANGUAGE (critical): Write title, concept_summary, narration (inside beats), visual_description,
+  and visual_action (inside beats) in the requested output language. On-screen labels implied by
   the plan must also be in that language. Keep visual_device / style_tags in English
   (they are machine keys). Prefer progressive reveal: introduce → build intuition → summarize.
 - Narration: clear spoken script for TTS in the output language. Match duration_seconds
-  to spoken length (~2.5 words/sec for Latin scripts; ~3–4 syllables/sec for others).
-- SCENE LENGTH: aim for at least __SCENE_MIN__ seconds of narration per scene so each
+  to the total spoken length of all beats (~2.5 words/sec for Latin scripts; ~3–4 syllables/sec for others).
+- SCENE LENGTH: aim for at least __SCENE_MIN__ seconds of total narration per scene so each
   beat has room to breathe. Longer scenes are fine when one visual idea genuinely needs
   the time — do not pad with silence, pulsing shapes, or filler waits; add content or
   split into another scene only when there are two distinct visual ideas.
 - Each scene's narration must name 2-4 concrete things that will get on-screen labels,
   so the coder has real content to reveal instead of animating unlabeled shapes.
 - Visuals: concrete Manim-friendly elements (shapes, graphs, equations as Text, arrows, labels).
-
+- CONTEXT & AESTHETICS (critical): Deeply understand the context and semantics of the explanation to generate vivid, highly relatable visual metaphors. Explicitly prescribe beautiful, harmonious pastel color themes (e.g., soft pinks, mint greens, baby blues, etc.) and engaging, organic animations for objects in the `style_tags` and `visual_description`. Avoid generic, harsh colors.
 CONTINUITY (critical — scenes are rendered separately, so the SCRIPT AND VISUAL PLAN are
 what glue them into one video; without them the video feels like disconnected clips with
 mismatched, random-looking styles from scene to scene):
@@ -219,9 +224,13 @@ Return ONLY a JSON object with this shape:
     {
       "id": "scene_1",
       "title": string,
-      "narration": string,
       "visual_description": string,
-      "animation_beats": [string],
+      "beats": [
+        {
+          "visual_action": string,
+          "narration": string
+        }
+      ],
       "duration_seconds": number,
       "camera_notes": string,
       "visual_device": string,

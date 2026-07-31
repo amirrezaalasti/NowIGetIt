@@ -15,6 +15,17 @@ from backend import artifacts as store
 _lock = threading.RLock()
 _threads: dict[str, threading.Thread] = {}
 _errors: dict[str, str] = {}
+_cancelled: set[str] = set()
+
+
+def cancel_job(job_id: str) -> None:
+    with _lock:
+        _cancelled.add(job_id)
+
+
+def is_cancelled(job_id: str) -> bool:
+    with _lock:
+        return job_id in _cancelled
 
 
 def is_running(job_id: str) -> bool:
@@ -60,6 +71,7 @@ def start_job(job_id: str, target: Callable[[], None]) -> bool:
         if existing and existing.is_alive():
             return False
         _errors.pop(job_id, None)
+        _cancelled.discard(job_id)
 
         def wrapper() -> None:
             try:

@@ -124,8 +124,13 @@ CRITICAL RULES (Manim Community / `manim`, NOT ManimGL):
 15. LABEL DENSITY: every element the narration names gets a short Text label (≤3 words)
     when it appears, revealed progressively. A scene longer than ~12s carrying only a
     title is a failure — aim for 2-4 short labels/captions besides the title.
-16. Apply the provided palette colors via Manim color constants or hex strings
-    (e.g. "#e8a87c"). Set background with config.background_color or self.camera.background_color.
+16. AESTHETICS & CONTEXT (critical): Deeply understand the context and semantics of the material.
+    Use beautiful, harmonious pastel color combinations (e.g. "#FFB3BA", "#FFDFBA", "#FFFFBA", "#BAFFC9", "#BAE1FF")
+    for elements to create a visually pleasing, premium aesthetic. Avoid generic harsh colors.
+    Animate objects better: use smooth, organic, and engaging animations (e.g., DrawBorderThenFill,
+    LaggedStart, smooth interpolations) instead of flat or abrupt transitions, ensuring the motion
+    perfectly reflects the underlying concept being taught. Apply these pastel palettes and set
+    background with config.background_color or self.camera.background_color.
 17. When reference templates/samples are provided, adapt their motion + layout patterns
     to THIS scene — do not copy verbatim, and keep the RUNTIME CONTRACT (Text / to_edge).
 18. Output ONLY valid Python code — no markdown, checklists, or commentary.

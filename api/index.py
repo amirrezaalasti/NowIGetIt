@@ -324,6 +324,17 @@ def get_job(job_id: str, user: CurrentUser) -> dict:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
 
 
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, user: CurrentUser) -> dict:
+    _require_job_owner(job_id, user.id)
+    try:
+        store.load_job(job_id, user_id=user.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+    job_runner.cancel_job(job_id)
+    return {"ok": True, "job_id": job_id, "status": "cancelled"}
+
+
 @app.get("/api/jobs/{job_id}/status")
 def get_job_status(job_id: str, user: CurrentUser) -> dict:
     _require_job_owner(job_id, user.id)

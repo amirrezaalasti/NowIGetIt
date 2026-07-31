@@ -533,6 +533,17 @@ export async function streamGenerate(
   }
 }
 
+export async function cancelJob(jobId: string): Promise<void> {
+  const res = await fetch(`${apiBase()}/api/jobs/${jobId}/cancel`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || "Failed to cancel job");
+  }
+}
+
 export async function updateJobPlan(
   jobId: string,
   plan: ScenePlanDraft,
