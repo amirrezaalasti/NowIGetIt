@@ -77,7 +77,7 @@ class SceneSection(BaseModel):
         ..., description="Voiceover script for TTS for this section"
     )
     visual_description: str = Field(
-        ..., description="What should appear on screen in this scene"
+        default="", description="What should appear on screen in this scene"
     )
     animation_beats: list[str] = Field(default_factory=list)
     duration_seconds: float = Field(default=8.0, ge=2.0, le=60.0)

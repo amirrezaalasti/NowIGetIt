@@ -911,3 +911,101 @@ export async function deleteDocumentComment(
     throw new Error(detail || `Delete comment failed (${res.status})`);
   }
 }
+
+// ── Interactive Scene Editor ──────────────────────────────────────────────
+
+export type SceneElementPoint = { x: number; y: number };
+
+export type SceneElement = {
+  id: string;
+  type: string;
+  variable_name: string;
+  line_number: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  radius?: number;
+  fill_color: string | null;
+  fill_opacity: number;
+  stroke_color: string | null;
+  stroke_width: number;
+  rotation: number;
+  scale: number;
+  text?: string | null;
+  font_size?: number | null;
+  points?: SceneElementPoint[];
+  start_point?: SceneElementPoint;
+  end_point?: SceneElementPoint;
+};
+
+export type SceneElementEdit = Partial<SceneElement> & {
+  variable_name: string;
+  line_number: number;
+};
+
+export async function fetchSceneElements(
+  jobId: string,
+  sceneId: string,
+): Promise<{ elements: SceneElement[]; scene_id: string; job_id: string }> {
+  const res = await fetch(
+    `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/elements`,
+    {
+      headers: await authHeaders(),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Fetch elements failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function saveSceneElements(
+  jobId: string,
+  sceneId: string,
+  edits: SceneElementEdit[],
+): Promise<{ ok: boolean; edit_count: number }> {
+  const res = await fetch(
+    `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/elements`,
+    {
+      method: "PUT",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ edits }),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Save elements failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function applySceneEdits(
+  jobId: string,
+  sceneId: string,
+  edits: SceneElementEdit[],
+): Promise<{
+  ok: boolean;
+  scene_id: string;
+  video_url: string | null;
+  elements: SceneElement[];
+  render_log: string | null;
+}> {
+  const res = await fetch(
+    `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/apply-edits`,
+    {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ edits }),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `Apply edits failed (${res.status})`);
+  }
+  return res.json();
+}

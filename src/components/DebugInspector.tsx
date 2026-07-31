@@ -16,6 +16,7 @@ import {
   type PipelineEvent,
   type JobSummary,
 } from "@/lib/api";
+import { SceneEditor } from "@/components/SceneEditor";
 
 // ---- SceneVideoPlayer -------------------------------------------------------
 
@@ -456,6 +457,8 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
   const [tab, setTab] = useState<"scenes" | "advanced">("scenes");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Track which scenes are in "edit" mode (interactive canvas)
+  const [editingScenes, setEditingScenes] = useState<Set<string>>(new Set());
   const [refreshKey, setRefreshKey] = useState(0);
   const hasLoadedRef = useRef(false);
   const loadedForIdRef = useRef<string | null>(null);
@@ -746,26 +749,78 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                       No scenes recorded for this job yet.
                     </p>
                   )}
-                  {job.scenes.map((scene) => (
+                  {job.scenes.map((scene) => {
+                    const isEditing = editingScenes.has(scene.scene_id);
+                    return (
                     <article
                       key={scene.scene_id}
                       className="border-t border-[var(--line)] pt-6 first:border-t-0 first:pt-0"
                     >
-                      <h3 className="text-lg font-medium">
-                        {String(scene.section?.title || scene.scene_id)}
-                      </h3>
-                      <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                        {String(scene.section?.visual_description || "")}
-                      </p>
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <div>
+                          <h3 className="text-lg font-medium">
+                            {String(scene.section?.title || scene.scene_id)}
+                          </h3>
+                          <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                            {String(scene.section?.visual_description || "")}
+                          </p>
+                        </div>
+                        {/* Toggle: Watch Video ↔ Edit Scene */}
+                        {scene.code_final && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingScenes((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(scene.scene_id)) {
+                                  next.delete(scene.scene_id);
+                                } else {
+                                  next.add(scene.scene_id);
+                                }
+                                return next;
+                              });
+                            }}
+                            className={`shrink-0 flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11px] font-medium transition ${
+                              isEditing
+                                ? "border-[var(--accent)] text-[var(--accent)] bg-[var(--accent)]/10"
+                                : "border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                            }`}
+                          >
+                            {isEditing ? (
+                              <>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                                Watch Video
+                              </>
+                            ) : (
+                              <>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                                Edit Scene
+                              </>
+                            )}
+                          </button>
+                        )}
+                      </div>
 
-                      {scene.video_url && (
-                        <SceneVideoPlayer
+                      {/* Interactive Editor or Video Player */}
+                      {isEditing ? (
+                        <SceneEditor
                           jobId={job.job_id}
                           sceneId={scene.scene_id}
-                          videoUrl={assetUrl(scene.video_url)}
-                          initialComments={scene.human_comments || []}
-                          onRefresh={bumpRefresh}
+                          initialTimestamp={0.0}
+                          onVideoUpdated={(url) => {
+                            if (url) bumpRefresh();
+                          }}
                         />
+                      ) : (
+                        scene.video_url && (
+                          <SceneVideoPlayer
+                            jobId={job.job_id}
+                            sceneId={scene.scene_id}
+                            videoUrl={assetUrl(scene.video_url)}
+                            initialComments={scene.human_comments || []}
+                            onRefresh={bumpRefresh}
+                          />
+                        )
                       )}
 
                       {(scene.vlm_reviews || []).length > 0 && (
@@ -797,7 +852,8 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                         </div>
                       )}
                     </article>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 

@@ -533,6 +533,114 @@ def approve_scene_endpoint(job_id: str, scene_id: str, user: CurrentUser) -> dic
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# ── Interactive Scene Editor ──────────────────────────────────────────────
+
+
+@app.get("/api/jobs/{job_id}/scenes/{scene_id}/elements")
+def get_scene_elements(job_id: str, scene_id: str, user: CurrentUser) -> dict:
+    """Parse the scene's final Manim code and return a JSON scene graph."""
+    _require_job_owner(job_id, user.id)
+    sdir = store.scene_dir(job_id, scene_id)
+    code_path = sdir / "code_final.py"
+    if not code_path.exists():
+        raise HTTPException(status_code=404, detail="No code found for this scene")
+    code = code_path.read_text(encoding="utf-8")
+
+    from backend.pipeline.scene_parser import parse_scene_code
+
+    elements = parse_scene_code(code)
+    return {"elements": elements, "scene_id": scene_id, "job_id": job_id}
+
+
+@app.put("/api/jobs/{job_id}/scenes/{scene_id}/elements")
+def save_scene_elements(
+    job_id: str, scene_id: str, body: dict, user: CurrentUser
+) -> dict:
+    """Save user-edited element properties (position, color, size, text)."""
+    _require_job_owner(job_id, user.id)
+    edits = body.get("edits", [])
+    if not edits:
+        raise HTTPException(status_code=400, detail="No edits provided")
+
+    sdir = store.scene_dir(job_id, scene_id)
+    # Persist the edits for apply-edits to consume
+    store.write_json(sdir / "pending_edits.json", edits)
+    return {"ok": True, "scene_id": scene_id, "edit_count": len(edits)}
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_id}/apply-edits")
+def apply_scene_edits(
+    job_id: str, scene_id: str, body: dict, user: CurrentUser
+) -> dict:
+    """Apply element edits to the Manim code and re-render the scene video."""
+    _require_job_owner(job_id, user.id)
+    sdir = store.scene_dir(job_id, scene_id)
+    code_path = sdir / "code_final.py"
+    if not code_path.exists():
+        raise HTTPException(status_code=404, detail="No code found for this scene")
+
+    # Get edits from body or pending file
+    edits = body.get("edits", [])
+    if not edits:
+        edits_path = sdir / "pending_edits.json"
+        if edits_path.exists():
+            import json as _json
+
+            edits = _json.loads(edits_path.read_text(encoding="utf-8"))
+
+    if not edits:
+        raise HTTPException(status_code=400, detail="No edits to apply")
+
+    code = code_path.read_text(encoding="utf-8")
+
+    from backend.pipeline.scene_patcher import apply_element_edits
+
+    updated_code = apply_element_edits(code, edits)
+
+    # Save the patched code
+    code_path.write_text(updated_code, encoding="utf-8")
+
+    # Also save a revision copy
+    import glob
+
+    existing = glob.glob(str(sdir / "code_r*.py"))
+    next_rev = len(existing) + 1
+    (sdir / f"code_r{next_rev}.py").write_text(updated_code, encoding="utf-8")
+
+    # Clean up pending edits
+    (sdir / "pending_edits.json").unlink(missing_ok=True)
+
+    # Re-render if Manim is available
+    video_url = None
+    render_log = ""
+    settings = get_settings()
+    if settings.enable_manim_render or settings.render_worker_url:
+        from backend.pipeline.renderer import render_scene, make_job_dir
+
+        work_dir = make_job_dir(job_id)
+        video_path, frame_path, render_log = render_scene(
+            updated_code,
+            work_dir=work_dir,
+            resolution="720p",
+            scene_id=scene_id,
+        )
+        if video_path:
+            video_url = store.publish_scene_video(job_id, scene_id, video_path)
+
+    # Re-parse elements from the patched code for the frontend
+    from backend.pipeline.scene_parser import parse_scene_code
+
+    new_elements = parse_scene_code(updated_code)
+
+    return {
+        "ok": True,
+        "scene_id": scene_id,
+        "video_url": video_url,
+        "elements": new_elements,
+        "render_log": render_log[-500:] if render_log else None,
+    }
+
+
 @app.get("/api/documents")
 def list_documents(user: CurrentUser, limit: int = 50) -> dict:
     _prepare_user(user)
