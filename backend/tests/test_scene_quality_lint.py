@@ -7,12 +7,15 @@ out, and a trailing wait to pad up to the narration length.
 
 from __future__ import annotations
 
+import pytest
+
 from backend.code_utils import lint_scene_code
 from backend.pipeline.planner import (
     LENGTH_SCENE_COUNT,
     LENGTH_TARGET_SECONDS,
     _validate_plan_length,
     estimate_narration_seconds,
+    scene_count_range,
 )
 from backend.schemas import ScenePlan, SceneSection
 
@@ -138,3 +141,36 @@ def test_deep_preset_reaches_its_target_with_many_scenes() -> None:
     per_scene = estimate_narration_seconds(scenes[0].narration, "en")
     assert min_scenes <= len(scenes) <= max_scenes
     assert min_target <= per_scene * len(scenes) <= max_target
+
+
+def test_scene_pacing_shifts_scene_count_bands() -> None:
+    short_min, short_max = scene_count_range("standard", "short")
+    bal_min, bal_max = scene_count_range("standard", "balanced")
+    long_min, long_max = scene_count_range("standard", "long")
+    assert short_min > bal_min
+    assert short_max > bal_max
+    assert long_max < bal_min
+    assert long_min < bal_min
+    assert scene_count_range("standard", "balanced") == LENGTH_SCENE_COUNT["standard"]
+
+
+def test_long_pacing_rejects_too_many_scenes() -> None:
+    # 8 scenes is fine for balanced standard, but too many for long pacing.
+    scenes = [_scene(f"scene_{i}", 30) for i in range(8)]
+    plan = ScenePlan(title="t", concept_summary="c", scenes=scenes)
+    _validate_plan_length(
+        plan, length_preset="standard", language="en", scene_pacing="balanced"
+    )
+    with pytest.raises(ValueError, match="at most"):
+        _validate_plan_length(
+            plan, length_preset="standard", language="en", scene_pacing="long"
+        )
+
+
+def test_short_pacing_accepts_many_quick_scenes() -> None:
+    # 10 scenes × ~10s ≈ 100s — inside standard total, and inside short-pacing band.
+    scenes = [_scene(f"scene_{i}", 25) for i in range(10)]
+    plan = ScenePlan(title="t", concept_summary="c", scenes=scenes)
+    _validate_plan_length(
+        plan, length_preset="standard", language="en", scene_pacing="short"
+    )

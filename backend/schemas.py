@@ -19,6 +19,10 @@ class GenerateRequest(BaseModel):
     length_preset: str = Field(
         default="standard", pattern="^(short|standard|deep)$"
     )
+    # short = many quick scenes · balanced = default · long = fewer deeper scenes
+    scene_pacing: str = Field(
+        default="balanced", pattern="^(short|balanced|long)$"
+    )
     # hs | undergrad | general — steers metaphor depth and jargon
     audience: str = Field(
         default="general", pattern="^(hs|undergrad|general)$"

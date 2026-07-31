@@ -280,6 +280,8 @@ export type LanguageOption = {
 };
 
 export type LengthPreset = "short" | "standard" | "deep";
+/** Many short scenes vs fewer longer ones (total video length unchanged). */
+export type ScenePacing = "short" | "balanced" | "long";
 export type Audience = "hs" | "undergrad" | "general";
 
 export async function fetchHealth(): Promise<{
@@ -431,6 +433,7 @@ export type GenerateOptions = {
   resolution?: "480p" | "720p" | "1080p";
   skip_render?: boolean;
   length_preset?: LengthPreset;
+  scene_pacing?: ScenePacing;
   audience?: Audience;
   language?: string;
   tts_voice?: string;
@@ -511,6 +514,7 @@ export async function streamGenerate(
         skip_render: opts.skip_render ?? false,
         resolution: opts.resolution ?? "720p",
         length_preset: opts.length_preset ?? "standard",
+        scene_pacing: opts.scene_pacing ?? "balanced",
         audience: opts.audience ?? "general",
         language: opts.language ?? "en",
         tts_voice: opts.tts_voice ?? "Kore",

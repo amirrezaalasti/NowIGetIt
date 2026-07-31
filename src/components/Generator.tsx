@@ -23,6 +23,7 @@ import {
   type JobDetail,
   type LanguageOption,
   type LengthPreset,
+  type ScenePacing,
   type PipelineEvent,
   type ScenePlanDraft,
   type SceneSectionDraft,
@@ -115,6 +116,16 @@ const LENGTH_OPTIONS: { id: LengthPreset; label: string; hint: string }[] = [
   { id: "deep", label: "3 min", hint: "Deep dive" },
 ];
 
+const SCENE_PACING_OPTIONS: {
+  id: ScenePacing;
+  label: string;
+  hint: string;
+}[] = [
+  { id: "short", label: "Many short", hint: "More cuts, quicker beats" },
+  { id: "balanced", label: "Balanced", hint: "Default scene length" },
+  { id: "long", label: "Fewer long", hint: "Deeper scenes, fewer cuts" },
+];
+
 const AUDIENCE_OPTIONS: { id: Audience; label: string }[] = [
   { id: "general", label: "General" },
   { id: "hs", label: "High school" },
@@ -175,11 +186,65 @@ function sceneStatusTone(status?: string, approved?: boolean) {
   return "text-[var(--ink-muted)]";
 }
 
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
+}
+
+function eventStepLabel(event: PipelineEvent): string {
+  const step =
+    typeof event.data?.step === "string" ? event.data.step : event.type;
+  const labels: Record<string, string> = {
+    "planning.start": "Plan",
+    "planning.prepare": "Plan",
+    "planning.llm": "Thinking",
+    "planning.validate": "Validate",
+    "planning.retry": "Retry",
+    "planning.done": "Plan",
+    "planning.revise": "Revise",
+    "planning.revise_llm": "Thinking",
+    "planning.revise_retry": "Retry",
+    "planning.revise_done": "Plan",
+    "scene.start": "Scene",
+    "scene.tts": "Narration",
+    "scene.codegen": "Writing code",
+    "scene.code_ready": "Code",
+    "scene.render": "Render",
+    "scene.revise_render": "Fixing",
+    "scene.revise_timing": "Timing",
+    "scene.revise_clarity": "Clarity",
+    status: "Status",
+    plan: "Plan",
+    plan_ready: "Ready",
+    scene_start: "Scene",
+    scene_code: "Code",
+    scene_render: "Render",
+    scene_vlm: "Review",
+    scene_revise: "Revise",
+    scene_tts: "Narration",
+    scene_done: "Done",
+    complete: "Complete",
+    error: "Error",
+    final_debug: "Notes",
+  };
+  return labels[step] || labels[event.type] || event.type;
+}
+
+type CodePreview = {
+  sceneId: string;
+  revision: number;
+  code: string;
+  truncated: boolean;
+  chars: number;
+};
+
 export function Generator() {
   const { status: authStatus } = useSession();
   const searchParams = useSearchParams();
   const [prompt, setPrompt] = useState("");
   const [lengthPreset, setLengthPreset] = useState<LengthPreset>("standard");
+  const [scenePacing, setScenePacing] = useState<ScenePacing>("balanced");
   const [audience, setAudience] = useState<Audience>("general");
   const [ttsVoice, setTtsVoice] = useState("Kore");
   const [language, setLanguage] = useState("en");
@@ -229,7 +294,10 @@ export function Generator() {
   const [reviseSuccessMessage, setReviseSuccessMessage] = useState<
     string | null
   >(null);
-  const [logOpen, setLogOpen] = useState(false);
+  const [logOpen, setLogOpen] = useState(true);
+  const [codeOpen, setCodeOpen] = useState(true);
+  const [latestCode, setLatestCode] = useState<CodePreview | null>(null);
+  const [buildElapsed, setBuildElapsed] = useState(0);
   const [restoring, setRestoring] = useState(true);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
@@ -239,8 +307,10 @@ export function Generator() {
   // (applyPipelineEvent closes over state and would otherwise go stale).
   const regeneratingSceneIdRef = useRef<string | null>(null);
   const logContainerRef = useRef<HTMLDivElement | null>(null);
+  const codeContainerRef = useRef<HTMLPreElement | null>(null);
   const eventsLenRef = useRef(0);
   const didInitialRestoreRef = useRef(false);
+  const buildStartedAtRef = useRef<number | null>(null);
   const signedIn = authStatus === "authenticated";
   const urlJobId = searchParams.get("job");
   const urlPrompt = searchParams.get("prompt");
@@ -315,6 +385,31 @@ export function Generator() {
     }
   }, [events, logOpen]);
 
+  useEffect(() => {
+    if (codeContainerRef.current && codeOpen) {
+      codeContainerRef.current.scrollTop = 0;
+    }
+  }, [latestCode?.sceneId, latestCode?.revision, codeOpen]);
+
+  // Visible elapsed clock while planning/building so long LLM/render waits
+  // don't look frozen between sparse status lines.
+  useEffect(() => {
+    if (!running) {
+      buildStartedAtRef.current = null;
+      return;
+    }
+    if (buildStartedAtRef.current == null) {
+      buildStartedAtRef.current = Date.now();
+    }
+    const id = window.setInterval(() => {
+      const start = buildStartedAtRef.current;
+      if (start != null) {
+        setBuildElapsed(Math.floor((Date.now() - start) / 1000));
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [running]);
+
   const hasSceneOutput = scenes.some(
     (s) => s.videoUrl || s.frameUrl || s.status === "done",
   );
@@ -387,7 +482,58 @@ export function Generator() {
     if (event.type === "scene_start" && event.data?.scene_id) {
       setScenes((prev) =>
         prev.map((s) =>
-          s.id === event.data?.scene_id ? { ...s, status: "building" } : s,
+          s.id === event.data?.scene_id ? { ...s, status: "starting" } : s,
+        ),
+      );
+    }
+    if (
+      event.type === "status" &&
+      event.data?.scene_id &&
+      typeof event.data.step === "string"
+    ) {
+      const step = event.data.step as string;
+      const statusByStep: Record<string, string> = {
+        "scene.tts": "narrating",
+        "scene.codegen": "writing code",
+        "scene.render": "rendering",
+      };
+      const nextStatus = statusByStep[step];
+      if (nextStatus) {
+        setScenes((prev) =>
+          prev.map((s) =>
+            s.id === event.data?.scene_id ? { ...s, status: nextStatus } : s,
+          ),
+        );
+      }
+    }
+    if (event.type === "scene_code" && event.data?.scene_id) {
+      const code =
+        typeof event.data.code === "string" ? event.data.code : null;
+      if (code) {
+        setLatestCode({
+          sceneId: String(event.data.scene_id),
+          revision:
+            typeof event.data.revision === "number" ? event.data.revision : 0,
+          code,
+          truncated: Boolean(event.data.code_truncated),
+          chars:
+            typeof event.data.code_chars === "number"
+              ? event.data.code_chars
+              : code.length,
+        });
+        setCodeOpen(true);
+        setLogOpen(true);
+      }
+      setScenes((prev) =>
+        prev.map((s) =>
+          s.id === event.data?.scene_id ? { ...s, status: "code ready" } : s,
+        ),
+      );
+    }
+    if (event.type === "scene_revise" && event.data?.scene_id) {
+      setScenes((prev) =>
+        prev.map((s) =>
+          s.id === event.data?.scene_id ? { ...s, status: "revising" } : s,
         ),
       );
     }
@@ -623,6 +769,43 @@ export function Generator() {
     );
     setEvents(replay);
     eventsLenRef.current = replay.length;
+    // Prefer the newest code blob from the event stream; fall back to disk.
+    let codeFromEvents: CodePreview | null = null;
+    for (let i = replay.length - 1; i >= 0; i -= 1) {
+      const e = replay[i];
+      if (e.type === "scene_code" && typeof e.data?.code === "string") {
+        codeFromEvents = {
+          sceneId: String(e.data.scene_id || ""),
+          revision:
+            typeof e.data.revision === "number" ? e.data.revision : 0,
+          code: e.data.code,
+          truncated: Boolean(e.data.code_truncated),
+          chars:
+            typeof e.data.code_chars === "number"
+              ? e.data.code_chars
+              : e.data.code.length,
+        };
+        break;
+      }
+    }
+    if (!codeFromEvents) {
+      for (let i = job.scenes.length - 1; i >= 0; i -= 1) {
+        const art = job.scenes[i];
+        if (art.code_final) {
+          codeFromEvents = {
+            sceneId: art.scene_id,
+            revision: 0,
+            code: art.code_final,
+            truncated: false,
+            chars: art.code_final.length,
+          };
+          break;
+        }
+      }
+    }
+    setLatestCode(codeFromEvents);
+    if (codeFromEvents) setCodeOpen(true);
+    setLogOpen(true);
     setJobId(job.job_id);
     setStoredActiveJobId(job.job_id);
   }
@@ -632,6 +815,9 @@ export function Generator() {
     const controller = new AbortController();
     abortRef.current = controller;
     setRunning(true);
+    setLogOpen(true);
+    setBuildElapsed(0);
+    buildStartedAtRef.current = Date.now();
     setLiveMessage("Reconnected — catching up on progress…");
     try {
       await streamJobEvents(activeJobId, applyPipelineEvent, {
@@ -774,7 +960,11 @@ export function Generator() {
     setReviseElapsed(0);
     setReviseError(null);
     setReviseSuccessMessage(null);
-    setLogOpen(false);
+    setLogOpen(true);
+    setCodeOpen(true);
+    setLatestCode(null);
+    setBuildElapsed(0);
+    buildStartedAtRef.current = null;
     if (audioRef.current) {
       audioRef.current.pause();
       setIsPlayingPreview(false);
@@ -821,7 +1011,11 @@ export function Generator() {
     setFinalVideoUrl(null);
     setJobId(null);
     setLiveMessage("Planning storyboard…");
-    setLogOpen(false);
+    setLatestCode(null);
+    setLogOpen(true);
+    setCodeOpen(true);
+    setBuildElapsed(0);
+    buildStartedAtRef.current = Date.now();
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -831,6 +1025,7 @@ export function Generator() {
         {
           prompt: prompt.trim(),
           length_preset: lengthPreset,
+          scene_pacing: scenePacing,
           audience,
           language,
           tts_voice: ttsVoice,
@@ -948,7 +1143,10 @@ export function Generator() {
     setAwaitingPlan(false);
     setError(null);
     setLiveMessage("Saving storyboard…");
-    setLogOpen(false);
+    setLogOpen(true);
+    setCodeOpen(true);
+    setBuildElapsed(0);
+    buildStartedAtRef.current = Date.now();
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -1099,6 +1297,13 @@ export function Generator() {
                 value={lengthPreset}
                 options={LENGTH_OPTIONS}
                 onChange={setLengthPreset}
+                disabled={running}
+              />
+              <SegmentedControl
+                label="Scenes"
+                value={scenePacing}
+                options={SCENE_PACING_OPTIONS}
+                onChange={setScenePacing}
                 disabled={running}
               />
               <SegmentedControl
@@ -1487,6 +1692,12 @@ export function Generator() {
                         : "Clips unlock as each scene finishes — you don’t need to wait for the end.")
                     : "Full explanation with narration. Tweak individual scenes below if needed."}
                 </p>
+                {mode === "building" && running && (
+                  <p className="mt-1 font-mono text-xs text-[var(--accent)]">
+                    Elapsed {formatElapsed(buildElapsed)}
+                    {events.length > 0 ? ` · ${events.length} steps` : ""}
+                  </p>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 {running && (
@@ -1528,6 +1739,105 @@ export function Generator() {
                     }}
                   />
                 </div>
+              </div>
+            )}
+
+            {mode === "building" && (running || events.length > 0) && (
+              <div className="mt-8 space-y-4">
+                <div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+                      Live activity
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setLogOpen((v) => !v)}
+                      className="text-xs text-[var(--ink-muted)] underline-offset-4 hover:text-[var(--ink)] hover:underline"
+                    >
+                      {logOpen ? "Collapse" : "Expand"}
+                      {events.length > 0 ? ` · ${events.length}` : ""}
+                    </button>
+                  </div>
+                  {logOpen && (
+                    <div
+                      ref={logContainerRef}
+                      className="mt-3 max-h-72 overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-3"
+                    >
+                      {events.length === 0 && (
+                        <div className="font-mono text-xs text-[var(--ink-muted)] opacity-60">
+                          Waiting for the first planning step…
+                        </div>
+                      )}
+                      {events.map((event, idx) => {
+                        const detail =
+                          typeof event.data?.detail === "string"
+                            ? event.data.detail
+                            : null;
+                        const isLatest = idx === events.length - 1;
+                        return (
+                          <div
+                            key={`${event.type}-${idx}`}
+                            className={`mb-2.5 border-l-2 pl-3 ${
+                              isLatest && running
+                                ? "border-[var(--accent)]"
+                                : "border-[var(--line)]"
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                              <span className="rounded bg-[var(--surface-strong)] px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-[var(--accent)]">
+                                {eventStepLabel(event)}
+                              </span>
+                              <span
+                                className={`text-xs leading-relaxed ${
+                                  isLatest && running
+                                    ? "text-[var(--ink)]"
+                                    : "text-[var(--ink-muted)]"
+                                }`}
+                              >
+                                {event.message}
+                              </span>
+                            </div>
+                            {detail && (
+                              <p className="mt-1 line-clamp-3 font-mono text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                                {detail}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {latestCode && (
+                  <div>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+                        Generated code · {latestCode.sceneId}
+                        {latestCode.revision > 0
+                          ? ` · r${latestCode.revision}`
+                          : ""}
+                        {latestCode.truncated ? " · preview" : ""}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setCodeOpen((v) => !v)}
+                        className="text-xs text-[var(--ink-muted)] underline-offset-4 hover:text-[var(--ink)] hover:underline"
+                      >
+                        {codeOpen ? "Hide code" : "Show code"}
+                        {` · ${latestCode.chars.toLocaleString()} chars`}
+                      </button>
+                    </div>
+                    {codeOpen && (
+                      <pre
+                        ref={codeContainerRef}
+                        className="mt-3 max-h-80 overflow-auto rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-4 font-mono text-[11px] leading-relaxed text-[var(--ink)]"
+                      >
+                        <code>{latestCode.code}</code>
+                      </pre>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1685,31 +1995,56 @@ export function Generator() {
               </details>
             )}
 
-            {(running || events.length > 0) && (
-              <div className="mt-10">
-                <button
-                  type="button"
-                  onClick={() => setLogOpen((v) => !v)}
-                  className="text-sm text-[var(--ink-muted)] underline-offset-4 hover:text-[var(--ink)] hover:underline"
-                >
-                  {logOpen ? "Hide live log" : "Show live log"}
-                  {events.length > 0 ? ` (${events.length})` : ""}
-                </button>
-                {logOpen && (
-                  <div
-                    ref={logContainerRef}
-                    className="mt-3 max-h-64 overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-4 font-mono text-xs leading-relaxed text-[var(--ink-muted)]"
+            {mode === "result" && (running || events.length > 0) && (
+              <div className="mt-10 space-y-4">
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setLogOpen((v) => !v)}
+                    className="text-sm text-[var(--ink-muted)] underline-offset-4 hover:text-[var(--ink)] hover:underline"
                   >
-                    {events.length === 0 && (
-                      <div className="opacity-60">Waiting for pipeline events…</div>
+                    {logOpen ? "Hide activity" : "Show activity"}
+                    {events.length > 0 ? ` (${events.length})` : ""}
+                  </button>
+                  {logOpen && (
+                    <div
+                      ref={logContainerRef}
+                      className="mt-3 max-h-64 overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-3"
+                    >
+                      {events.map((event, idx) => (
+                        <div
+                          key={`${event.type}-${idx}`}
+                          className="mb-2 border-l-2 border-[var(--line)] pl-3"
+                        >
+                          <span className="rounded bg-[var(--surface-strong)] px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-[var(--accent)]">
+                            {eventStepLabel(event)}
+                          </span>{" "}
+                          <span className="text-xs text-[var(--ink-muted)]">
+                            {event.message}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {latestCode && (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setCodeOpen((v) => !v)}
+                      className="text-sm text-[var(--ink-muted)] underline-offset-4 hover:text-[var(--ink)] hover:underline"
+                    >
+                      {codeOpen ? "Hide" : "Show"} generated code ·{" "}
+                      {latestCode.sceneId}
+                    </button>
+                    {codeOpen && (
+                      <pre
+                        ref={codeContainerRef}
+                        className="mt-3 max-h-80 overflow-auto rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-4 font-mono text-[11px] leading-relaxed text-[var(--ink)]"
+                      >
+                        <code>{latestCode.code}</code>
+                      </pre>
                     )}
-                    {events.map((event, idx) => (
-                      <div key={`${event.type}-${idx}`} className="mb-2">
-                        <span className="text-[var(--accent)]">{event.type}</span>
-                        {" — "}
-                        {event.message}
-                      </div>
-                    ))}
                   </div>
                 )}
               </div>
