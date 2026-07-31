@@ -944,7 +944,7 @@ class Scene6_HeatRecoveryIntro(Scene):
         )
         self.play(eq_phi2.animate.scale(1 / 1.25), run_time=0.4)
 
-        self.wait(2.5)
+        self.wait(1.5)
         self.play(FadeOut(Group(*self.mobjects)), run_time=1.0)
 
 
@@ -955,270 +955,346 @@ class Scene7_VentilationSystemsComparison(Scene):
 
         # --- TITLE ---
         title = Text(
-            "Lüftungssysteme im Vergleich (DIN 1946-6)",
-            font_size=28,
+            "LÜFTUNGSSYSTEME HEIZVERLUST & WÄRMERÜCKGEWINNUNG (DIN 1946-6)",
+            font_size=22,
             color=WHITE,
         )
-        title.to_edge(UP, buff=0.35)
-        self.play(Write(title), run_time=1.0)
+        title.to_edge(UP, buff=0.25)
+        self.play(Write(title), run_time=1.2)
 
-        # Three comparison cards layout
-        card_w, card_h = 3.9, 4.4
-        card_y = DOWN * 0.45
-
-        # Helper function for identical base house wall schematic across all 3 options
-        def create_base_house(center_pos):
-            wall_top = Rectangle(
-                width=2.4,
-                height=0.35,
-                color=GREY_A,
-                fill_color="#333A42",
-                fill_opacity=0.9,
-                stroke_width=2,
-            ).move_to(center_pos + UP * 0.85)
-            wall_bot = Rectangle(
-                width=2.4,
-                height=0.35,
-                color=GREY_A,
-                fill_color="#333A42",
-                fill_opacity=0.9,
-                stroke_width=2,
-            ).move_to(center_pos + DOWN * 0.85)
-
-            lbl_outside = Text("Außen (Kalt)", font_size=10, color=BLUE_B).move_to(
-                center_pos + LEFT * 0.7 + UP * 1.15
-            )
-            lbl_inside = Text("Innen (Warm)", font_size=10, color=ORANGE).move_to(
-                center_pos + RIGHT * 0.7 + UP * 1.15
-            )
-
-            channel = Rectangle(
-                width=2.4, height=1.35, color=GREY_C, fill_opacity=0.08, stroke_width=1
-            ).move_to(center_pos)
-            return VGroup(wall_top, wall_bot, channel, lbl_outside, lbl_inside)
+        # Layout parameters for 3 columns
+        col_w, col_h = 4.3, 4.6
+        pos1 = LEFT * 4.4 + DOWN * 0.25
+        pos2 = DOWN * 0.25
+        pos3 = RIGHT * 4.4 + DOWN * 0.25
 
         # ----------------------------------------------------
-        # COLUMN 1: Fensterlüftung (Freie Lüftung, η = 0%)
+        # HELPER: IDENTICAL 3D ISOMETRIC VECTOR CUBE MODEL (1 m³)
         # ----------------------------------------------------
-        rect1 = RoundedRectangle(
-            width=card_w,
-            height=card_h,
+        def create_cube_graphic(center_pos):
+            face_top = Polygon(
+                center_pos + UP * 0.6,
+                center_pos + RIGHT * 0.85 + UP * 0.25,
+                center_pos + DOWN * 0.1,
+                center_pos + LEFT * 0.85 + UP * 0.25,
+                color=WHITE,
+                fill_color="#1E293B",
+                fill_opacity=0.85,
+                stroke_width=2,
+            )
+            face_left = Polygon(
+                center_pos + LEFT * 0.85 + UP * 0.25,
+                center_pos + DOWN * 0.1,
+                center_pos + DOWN * 0.95,
+                center_pos + LEFT * 0.85 + DOWN * 0.6,
+                color=WHITE,
+                fill_color="#0F172A",
+                fill_opacity=0.85,
+                stroke_width=2,
+            )
+            face_right = Polygon(
+                center_pos + DOWN * 0.1,
+                center_pos + RIGHT * 0.85 + UP * 0.25,
+                center_pos + RIGHT * 0.85 + DOWN * 0.6,
+                center_pos + DOWN * 0.95,
+                color=WHITE,
+                fill_color="#1E293B",
+                fill_opacity=0.75,
+                stroke_width=2,
+            )
+
+            return VGroup(face_top, face_left, face_right)
+
+        # ----------------------------------------------------
+        # PANEL 1: FENSTERLÜFTUNG (FREIE LÜFTUNG, OHNE WRG)
+        # ----------------------------------------------------
+        card1 = RoundedRectangle(
+            width=col_w,
+            height=col_h,
             corner_radius=0.15,
             color="#FF6B6B",
             fill_color="#1a1215",
             fill_opacity=0.85,
-        )
-        title1 = Text("1. Fensterlüftung", font_size=17, color="#FF6B6B")
-        eta1 = Text("η_WRG = 0%  (Freie Lüftung)", font_size=12, color=RED_B)
+        ).move_to(pos1)
+        t1_main = Text("1. FENSTERLÜFTUNG", font_size=15, color="#FF6B6B")
+        t1_sub = Text("Freie Lüftung (Ohne WRG)", font_size=11, color=GREY_A)
         hdr1 = (
-            VGroup(title1, eta1)
-            .arrange(DOWN, buff=0.08)
-            .move_to(rect1.get_top() + DOWN * 0.45)
+            VGroup(t1_main, t1_sub)
+            .arrange(DOWN, buff=0.05)
+            .move_to(card1.get_top() + DOWN * 0.45)
         )
 
-        center1 = rect1.get_center() + DOWN * 0.25
-        base1 = create_base_house(center1)
+        cube1 = create_cube_graphic(pos1 + DOWN * 0.1)
 
-        # Uncontrolled direct airflow: Warm air out (top), Cold air in (bottom)
-        arr_warm_out = Arrow(
-            center1 + RIGHT * 0.95 + UP * 0.3,
-            center1 + LEFT * 0.95 + UP * 0.3,
-            color=ORANGE,
-            stroke_width=3,
-            buff=0,
-        )
-        arr_cold_in = Arrow(
-            center1 + LEFT * 0.95 + DOWN * 0.3,
-            center1 + RIGHT * 0.95 + DOWN * 0.3,
+        # Airflow 1: Cold outdoor air entering from left into cube (-5°C)
+        arr_in1 = CurvedArrow(
+            pos1 + LEFT * 1.8 + DOWN * 0.7,
+            pos1 + LEFT * 0.7 + DOWN * 0.4,
+            radius=-1.0,
             color=BLUE_B,
-            stroke_width=3,
-            buff=0,
+            stroke_width=1.5,
         )
-        lbl_out1 = Text("Warm Raus", font_size=10, color=ORANGE).next_to(
-            arr_warm_out, UP, buff=0.04
-        )
-        lbl_in1 = Text("Kalt Rein", font_size=10, color=BLUE_B).next_to(
-            arr_cold_in, DOWN, buff=0.04
+        lbl_in1 = (
+            Text("Kaltluft (-5°C)", font_size=9, color=BLUE_B)
+            .next_to(arr_in1, DOWN, buff=0.02)
+            .shift(UP * 0.1)
         )
 
-        lbl_loss1 = Text("100% Lüftungsverlust", font_size=13, color=RED).move_to(
-            rect1.get_bottom() + UP * 0.35
+        # Airflow 2: Warm stale air escaping out from top of cube (+21°C)
+        arr_out1 = CurvedArrow(
+            pos1 + RIGHT * 0.2 + UP * 0.5,
+            pos1 + RIGHT * 1.5 + UP * 1.3,
+            radius=0.9,
+            color=ORANGE,
+            stroke_width=3.5,
+        )
+        lbl_out1 = Paragraph(
+            "Warmluft (+21°C)",
+            "entweicht!",
+            font_size=9,
+            color=ORANGE,
+            alignment="center",
+        ).next_to(arr_out1, UP, buff=0.1)
+
+        stat1_wrg = Text("WRG: 0%", font_size=11, color=RED)
+        stat1_loss = Text(
+            "Lüftungsverlust: 100% (Sehr Hoch)", font_size=10, color=RED_B
+        )
+        box1_stat = (
+            VGroup(stat1_wrg, stat1_loss)
+            .arrange(DOWN, buff=0.04)
+            .move_to(card1.get_bottom() + UP * 0.4)
         )
 
         col1 = VGroup(
-            rect1, hdr1, base1, arr_warm_out, arr_cold_in, lbl_out1, lbl_in1, lbl_loss1
-        ).move_to(LEFT * 4.1 + card_y)
+            card1, hdr1, cube1, arr_in1, lbl_in1, arr_out1, lbl_out1, box1_stat
+        )
 
         # ----------------------------------------------------
-        # COLUMN 2: Zentrale WRG (η = 80 - 90%)
+        # PANEL 2: ZENTRALE LÜFTUNGSANLAGE MIT WRG (ZENTRAL)
         # ----------------------------------------------------
-        rect2 = RoundedRectangle(
-            width=card_w,
-            height=card_h,
+        card2 = RoundedRectangle(
+            width=col_w,
+            height=col_h,
             corner_radius=0.15,
             color="#4D96FF",
             fill_color="#101825",
             fill_opacity=0.85,
-        )
-        title2 = Text("2. Zentrale WRG", font_size=17, color="#4D96FF")
-        eta2 = Text("η_WRG = 80 - 90% (Zentral)", font_size=12, color=GREEN_B)
+        ).move_to(pos2)
+        t2_main = Text("2. ZENTRALE WRG", font_size=15, color="#4D96FF")
+        t2_sub = Text("Zentrales Lüftungsgerät", font_size=11, color=GREY_A)
         hdr2 = (
-            VGroup(title2, eta2)
-            .arrange(DOWN, buff=0.08)
-            .move_to(rect2.get_top() + DOWN * 0.45)
+            VGroup(t2_main, t2_sub)
+            .arrange(DOWN, buff=0.05)
+            .move_to(card2.get_top() + DOWN * 0.45)
         )
 
-        center2 = rect2.get_center() + DOWN * 0.25
-        base2 = create_base_house(center2)
+        cube2 = create_cube_graphic(pos2 + DOWN * 0.1)
 
-        # Central Heat Exchanger Plate in channel
-        hx = RoundedRectangle(
-            width=0.9,
-            height=0.9,
-            corner_radius=0.08,
+        # Heat exchanger unit above cube
+        mvhr_box = RoundedRectangle(
+            width=0.8,
+            height=0.45,
+            corner_radius=0.05,
             color=WHITE,
-            fill_color="#1A2638",
+            fill_color="#2C3E50",
             fill_opacity=0.95,
             stroke_width=2,
-        ).move_to(center2)
-        lbl_hx = Text("WRG", font_size=10, color=YELLOW).move_to(hx)
+        ).move_to(pos2 + UP * 1.05)
+        lbl_mvhr = Text("WRG\nZentral", font_size=8, color=YELLOW).move_to(mvhr_box)
 
-        # Continuous heat exchange airflow: Exhaust warm -> cold out; Supply cold -> warm in!
-        arr_ex_in = Arrow(
-            center2 + RIGHT * 0.95 + UP * 0.25,
-            center2 + RIGHT * 0.45 + UP * 0.25,
-            color=ORANGE,
-            stroke_width=3,
-            buff=0,
-        )
-        arr_ex_out = Arrow(
-            center2 + LEFT * 0.45 + UP * 0.25,
-            center2 + LEFT * 0.95 + UP * 0.25,
+        # Cold outdoor air into exchanger & Exhaust out (Curved Arrows)
+        arr_fresh = CurvedArrow(
+            pos2 + LEFT * 1.7 + UP * 1.4,
+            mvhr_box.get_left() + UP * 0.1,
+            radius=1.3,
             color=BLUE_B,
             stroke_width=3,
-            buff=0,
         )
-
-        arr_sup_in = Arrow(
-            center2 + LEFT * 0.95 + DOWN * 0.25,
-            center2 + LEFT * 0.45 + DOWN * 0.25,
+        arr_exhaust = CurvedArrow(
+            mvhr_box.get_right() + UP * 0.1,
+            pos2 + RIGHT * 1.7 + UP * 1.4,
+            radius=-1.3,
             color=BLUE_B,
             stroke_width=3,
-            buff=0,
-        )
-        arr_sup_out = Arrow(
-            center2 + RIGHT * 0.45 + DOWN * 0.25,
-            center2 + RIGHT * 0.95 + DOWN * 0.25,
-            color=ORANGE,
-            stroke_width=3,
-            buff=0,
         )
 
-        lbl_loss2 = Text("Bis zu 90% Ersparnis!", font_size=13, color=GREEN).move_to(
-            rect2.get_bottom() + UP * 0.35
+        # Pre-heated supply air from exchanger down into middle of top surface of cube (+18°C)
+        arr_supply = Arrow(
+            mvhr_box.get_bottom(),
+            pos2 + UP * 0.3,
+            color=GREEN,
+            buff=0,
+            stroke_width=3.5,
+            max_tip_length_to_length_ratio=0.35,
+        )
+        lbl_supply = Text(
+            "Vorgewärmte Zuluft (+18°C)", font_size=9, color=GREEN
+        ).next_to(arr_supply, RIGHT, buff=0.04)
+
+        stat2_wrg = Text("WRG: 85 – 95%", font_size=11, color=GREEN)
+        stat2_loss = Text("Lüftungsverlust: ~10% (Gering)", font_size=10, color=GREEN_B)
+        box2_stat = (
+            VGroup(stat2_wrg, stat2_loss)
+            .arrange(DOWN, buff=0.04)
+            .move_to(card2.get_bottom() + UP * 0.4)
         )
 
         col2 = VGroup(
-            rect2,
+            card2,
             hdr2,
-            base2,
-            hx,
-            lbl_hx,
-            arr_ex_in,
-            arr_ex_out,
-            arr_sup_in,
-            arr_sup_out,
-            lbl_loss2,
-        ).move_to(card_y)
+            cube2,
+            mvhr_box,
+            lbl_mvhr,
+            arr_fresh,
+            arr_exhaust,
+            arr_supply,
+            lbl_supply,
+            box2_stat,
+        )
 
         # ----------------------------------------------------
-        # COLUMN 3: Dezentrale WRG (Pendellüfter, η = 70 - 85%)
+        # PANEL 3: DEZENTRALE LÜFTUNGSANLAGE (DEZENTRAL)
         # ----------------------------------------------------
-        rect3 = RoundedRectangle(
-            width=card_w,
-            height=card_h,
+        card3 = RoundedRectangle(
+            width=col_w,
+            height=col_h,
             corner_radius=0.15,
             color="#6BCB77",
             fill_color="#102018",
             fill_opacity=0.85,
-        )
-        title3 = Text("3. Dezentrale WRG", font_size=17, color="#6BCB77")
-        eta3 = Text("η_WRG = 70 - 85% (Pendel)", font_size=12, color=GREEN_B)
+        ).move_to(pos3)
+        t3_main = Text("3. DEZENTRALE WRG", font_size=15, color="#6BCB77")
+        t3_sub = Text("Pendellüfter mit Keramik", font_size=11, color=GREY_A)
         hdr3 = (
-            VGroup(title3, eta3)
-            .arrange(DOWN, buff=0.08)
-            .move_to(rect3.get_top() + DOWN * 0.45)
+            VGroup(t3_main, t3_sub)
+            .arrange(DOWN, buff=0.05)
+            .move_to(card3.get_top() + DOWN * 0.45)
         )
 
-        center3 = rect3.get_center() + DOWN * 0.25
-        base3 = create_base_house(center3)
+        cube3 = create_cube_graphic(pos3 + DOWN * 0.1)
 
-        # Ceramic Heat Accumulator Core in channel
-        ceramic = RoundedRectangle(
-            width=0.9,
-            height=0.9,
-            corner_radius=0.08,
+        # Minimal Isometric Window on right face of cube (u in [0.2, 0.7], v in [0.35, 0.8])
+        center_p3 = pos3 + DOWN * 0.1
+        w_top_l = center_p3 + RIGHT * 0.17 + DOWN * 0.3975
+        w_top_r = center_p3 + RIGHT * 0.595 + DOWN * 0.2225
+        w_bot_r = center_p3 + RIGHT * 0.595 + DOWN * 0.605
+        w_bot_l = center_p3 + RIGHT * 0.17 + DOWN * 0.78
+
+        win_poly = Polygon(
+            w_top_l,
+            w_top_r,
+            w_bot_r,
+            w_bot_l,
+            color="#06B6D4",
+            fill_color="#0284C7",
+            fill_opacity=0.5,
+            stroke_width=1.5,
+        )
+        win_line_v = Line(
+            center_p3 + RIGHT * 0.3825 + DOWN * 0.31,
+            center_p3 + RIGHT * 0.3825 + DOWN * 0.6925,
+            color=WHITE,
+            stroke_width=1,
+        )
+        win_line_h = Line(
+            center_p3 + RIGHT * 0.17 + DOWN * 0.58875,
+            center_p3 + RIGHT * 0.595 + DOWN * 0.41375,
+            color=WHITE,
+            stroke_width=1,
+        )
+        window3 = VGroup(win_poly, win_line_v, win_line_h)
+
+        # Narrow Ceramic Unit DIRECTLY ON TOP of Window (same length u in [0.2, 0.7], narrow v in [0.15, 0.3])
+        c_top_l = center_p3 + RIGHT * 0.17 + DOWN * 0.2275
+        c_top_r = center_p3 + RIGHT * 0.595 + DOWN * 0.0525
+        c_bot_r = center_p3 + RIGHT * 0.595 + DOWN * 0.18
+        c_bot_l = center_p3 + RIGHT * 0.17 + DOWN * 0.355
+
+        unit_face = Polygon(
+            c_top_l,
+            c_top_r,
+            c_bot_r,
+            c_bot_l,
             color=YELLOW,
             fill_color=ORANGE,
-            fill_opacity=0.65,
-            stroke_width=2,
-        ).move_to(center3)
-        lbl_ceramic = Text("Keramik-\nSpeicher", font_size=9, color=WHITE).move_to(
-            ceramic
+            fill_opacity=0.9,
+            stroke_width=1.5,
         )
+        unit1 = VGroup(unit_face)
 
-        # Reversing Push-Pull flow
-        push_pull_arr = DoubleArrow(
-            center3 + LEFT * 0.95,
-            center3 + RIGHT * 0.95,
-            color=YELLOW,
+        # Alternating 70s Push-Pull Cycles through Ceramic Unit
+        arr_cyc1 = CurvedArrow(
+            center_p3 + RIGHT * 0.3825 + DOWN * 0.2,
+            pos3 + RIGHT * 1.6 + UP * 0.6,
+            radius=1.0,
+            color=ORANGE,
             stroke_width=3,
-            buff=0,
-        ).move_to(center3 + DOWN * 0.52)
-        lbl_cycle = Text("70s Raus / 70s Rein", font_size=10, color=YELLOW).next_to(
-            push_pull_arr, DOWN, buff=0.04
+        )
+        lbl_cyc1 = Text("70s Abluft\n(Speichern)", font_size=8, color=ORANGE).next_to(
+            arr_cyc1, UP, buff=0.02
         )
 
-        lbl_loss3 = Text(
-            "Regenerativer Pendelbetrieb", font_size=12, color=GREEN
-        ).move_to(rect3.get_bottom() + UP * 0.35)
+        arr_cyc2 = CurvedArrow(
+            pos3 + RIGHT * 1.6 + DOWN * 0.2,
+            center_p3 + RIGHT * 0.3825 + DOWN * 0.2,
+            radius=-1.0,
+            color=GREEN,
+            stroke_width=3,
+        )
+        lbl_cyc2 = (
+            Text("70s Zuluft\n(+17°C)", font_size=8, color=GREEN)
+            .next_to(arr_cyc2, DOWN, buff=0.02)
+            .shift(RIGHT * 0.35)
+        )
+
+        stat3_wrg = Text("WRG: 70 – 90%", font_size=11, color=GREEN)
+        stat3_loss = Text("Lüftungsverlust: ~15 – 30%", font_size=10, color=GREEN_B)
+        box3_stat = (
+            VGroup(stat3_wrg, stat3_loss)
+            .arrange(DOWN, buff=0.04)
+            .move_to(card3.get_bottom() + UP * 0.4)
+        )
 
         col3 = VGroup(
-            rect3,
+            card3,
             hdr3,
-            base3,
-            ceramic,
-            lbl_ceramic,
-            push_pull_arr,
-            lbl_cycle,
-            lbl_loss3,
-        ).move_to(RIGHT * 4.1 + card_y)
+            cube3,
+            window3,
+            unit1,
+            arr_cyc1,
+            lbl_cyc1,
+            arr_cyc2,
+            lbl_cyc2,
+            box3_stat,
+        )
 
-        # Display columns sequentially
-        self.play(FadeIn(col1, shift=UP * 0.3), run_time=1.2)
-        self.wait(0.5)
-        self.play(FadeIn(col2, shift=UP * 0.3), run_time=1.2)
-        self.wait(0.5)
-        self.play(FadeIn(col3, shift=UP * 0.3), run_time=1.2)
+        # ----------------------------------------------------
+        # ANIMATION SEQUENCE
+        # ----------------------------------------------------
+        self.play(FadeIn(col1), run_time=1.5)
         self.wait(1.5)
 
-        # Highlight energy savings summary banner at bottom
-        summary_box = RoundedRectangle(
-            width=12.2,
-            height=0.6,
-            corner_radius=0.1,
-            color=YELLOW,
-            fill_color="#2b2510",
-            fill_opacity=0.9,
-        ).to_edge(DOWN, buff=0.15)
-        summary_text = Text(
-            "Fazit: Mechanische Lüftung mit WRG halbiert die Gebäudeheizlast!",
-            font_size=18,
-            color=YELLOW,
-        ).move_to(summary_box)
+        self.play(FadeIn(col2), run_time=1.5)
+        self.wait(1.5)
 
-        self.play(Create(summary_box), Write(summary_text), run_time=1.5)
-        self.wait(3.0)
+        self.play(FadeIn(col3), run_time=1.5)
+        self.wait(1.5)
+
+        table_box = RoundedRectangle(
+            width=13.2,
+            height=0.7,
+            corner_radius=0.1,
+            color=WHITE,
+        ).to_edge(DOWN, buff=0.1)
+        summary_text = Text(
+            "DIN 1946-6 Fazit: Mechanische WRG halbiert die Gebäudeheizlast & spart bis zu 90% Energie!",
+            font_size=16,
+            color=WHITE,
+        ).move_to(table_box)
+
+        self.play(Create(table_box), Write(summary_text), run_time=1.8)
+        self.wait(4.0)
 
 
 class FullConvectionVideo(Scene):

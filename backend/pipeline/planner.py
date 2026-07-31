@@ -132,7 +132,11 @@ def estimate_narration_seconds(text: str, language: str = "en") -> float:
 
 
 def _plan_total_narration_seconds(plan: ScenePlan, language: str) -> float:
-    return sum(estimate_narration_seconds(s.narration, language) for s in plan.scenes)
+    total = 0.0
+    for s in plan.scenes:
+        for b in s.beats:
+            total += estimate_narration_seconds(b.narration, language)
+    return total
 
 
 def _validate_plan_length(
@@ -257,9 +261,13 @@ Return ONLY a JSON object with this shape:
     {
       "id": "scene_1",
       "title": string,
-      "narration": string,
       "visual_description": string,
-      "animation_beats": [string],
+      "beats": [
+        {
+          "visual_action": string,
+          "narration": string
+        }
+      ],
       "duration_seconds": number,
       "camera_notes": string,
       "visual_device": string,

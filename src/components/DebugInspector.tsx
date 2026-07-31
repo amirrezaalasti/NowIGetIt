@@ -17,6 +17,7 @@ import {
   type PipelineEvent,
   type JobSummary,
 } from "@/lib/api";
+import { SceneEditor } from "@/components/SceneEditor";
 
 type JobFilter = "all" | "ready" | "in_progress";
 type StatusTone = "ready" | "live" | "warn" | "muted";
@@ -1119,14 +1120,26 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                         {String(scene.section?.visual_description || "")}
                       </p>
 
-                      {scene.video_url && (
-                        <SceneVideoPlayer
+                      {/* Interactive Editor or Video Player */}
+                      {isEditing ? (
+                        <SceneEditor
                           jobId={job.job_id}
                           sceneId={scene.scene_id}
-                          videoUrl={assetUrl(scene.video_url)}
-                          initialComments={scene.human_comments || []}
-                          onRefresh={bumpRefresh}
+                          initialTimestamp={0.0}
+                          onVideoUpdated={(url) => {
+                            if (url) bumpRefresh();
+                          }}
                         />
+                      ) : (
+                        scene.video_url && (
+                          <SceneVideoPlayer
+                            jobId={job.job_id}
+                            sceneId={scene.scene_id}
+                            videoUrl={assetUrl(scene.video_url)}
+                            initialComments={scene.human_comments || []}
+                            onRefresh={bumpRefresh}
+                          />
+                        )
                       )}
 
                       {(scene.vlm_reviews || []).length > 0 && (
@@ -1158,7 +1171,8 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                         </div>
                       )}
                     </article>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 

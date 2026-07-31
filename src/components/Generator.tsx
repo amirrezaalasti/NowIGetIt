@@ -15,6 +15,7 @@ import {
   setStoredActiveJobId,
   streamContinue,
   streamGenerate,
+  cancelJob,
   streamJobEvents,
   streamRegenerateScene,
   revisePlanWithAI,
@@ -1864,7 +1865,21 @@ export function Generator() {
             )}
 
             {mode === "result" && running && liveMessage && (
-              <p className="mt-4 text-sm text-[var(--accent)]">{liveMessage}</p>
+              <div className="mt-4 flex items-center justify-between gap-4 rounded-xl border border-[var(--line)] bg-[var(--bg-deep)] px-4 py-3">
+                <p className="text-sm text-[var(--accent)]">{liveMessage}</p>
+                {jobId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void cancelJob(jobId);
+                      abortRef.current?.abort();
+                    }}
+                    className="shrink-0 text-sm font-medium text-[var(--danger-ink)] hover:underline transition hover:text-[var(--danger-line)]"
+                  >
+                    Stop generation
+                  </button>
+                )}
+              </div>
             )}
 
             <ul className="mt-10 space-y-8">
@@ -2081,7 +2096,10 @@ export function Generator() {
               {running && (
                 <button
                   type="button"
-                  onClick={() => abortRef.current?.abort()}
+                  onClick={() => {
+                    if (jobId) void cancelJob(jobId);
+                    abortRef.current?.abort();
+                  }}
                   className="text-sm text-[var(--ink-muted)] underline-offset-4 hover:underline"
                 >
                   Cancel
