@@ -48,15 +48,13 @@ Reject for real code problems OR obvious layout disasters in the code:
 - a scene longer than ~12s whose only Text is the title (unlabeled shapes teach nothing)
 
 CRITICAL CONSTRAINTS for revision_instructions:
-- NEVER suggest MathTex, Tex, TexText, or LaTeX — the render host has no LaTeX.
-- Use plain Text("...") only. Write subscripts as ASCII: "C(t)", "h(t-1)", "x_t" → "x(t)".
-- Prefer repositioning with next_to / to_edge (small buff ~0.25–0.3) / FadeOut.
-- RUNTIME: Text is auto-recentered; to_edge(UP/DOWN) forces X=0 only (no width clamp).
-  Do NOT suggest to_edge(UP)+shift(LEFT/RIGHT), scale_to_fit_width, stretch_to_fit_*,
-  Text width=/height=, NBSP padding, or `_ManimText`.
-- NEVER tell the model to truncate words/formula terms or invent large margins.
-- Shorten only redundant UI labels (e.g. "Forget Gate Mechanism" → "Forget Gate"),
-  not mathematical content. Remove decorative filler shapes that do not teach.
+- Never suggest MathTex/Tex/TexText/LaTeX (not installed) — plain Text() only, ASCII
+  subscripts like "x(t)". The host already forces X=0 on to_edge and auto-recenters
+  Text, so never suggest to_edge()+shift, scale_to_fit_*, or Text width=/height= —
+  reposition with next_to/to_edge/FadeOut instead.
+- Never truncate words/formula terms. Shorten only redundant UI labels (e.g. "Forget
+  Gate Mechanism" → "Forget Gate"), not math content. Remove decorative filler shapes
+  that don't teach.
 
 Also score teaching quality (0–1):
 - clarity_score: how clearly the code would teach the concept
@@ -109,15 +107,13 @@ decorative Circle→Square morph."
 If the scene is already clear enough, set approved=true and keep revision_instructions short.
 
 CRITICAL CONSTRAINTS for revision_instructions:
-- NEVER suggest MathTex, Tex, TexText, or LaTeX — unavailable on this host.
-- Fix cut-off text by smaller font_size, two-line arrange(DOWN), or next_to/to_edge
-  with small buff (~0.25–0.3) — e.g. Text("Cell State C(t)", font_size=24).
-- RUNTIME: Text auto-recenters; to_edge(UP/DOWN) only centers X (no shrink/clamp).
-  For side labels prefer next_to/move_to. Never suggest scale_to_fit_width,
-  stretch_to_fit_*, Text width=, or `_ManimText`.
-- NEVER truncate words/formula terms or demand large hardcoded margins.
-- Prefer 1–3 surgical fixes; do not demand a full redesign of a mostly-good scene.
-- Reject decorative filler shapes / collisions that obscure the teaching idea.
+- Never suggest MathTex/Tex/TexText/LaTeX (unavailable here) — fix cut-off text with
+  a smaller font_size, two-line text, or next_to/to_edge (buff ~0.25-0.3), e.g.
+  Text("Cell State C(t)", font_size=24). The host already forces X=0 on to_edge and
+  auto-recenters Text, so never suggest scale_to_fit_width, stretch_to_fit_*, or
+  Text width=/height=.
+- Never truncate words/formula terms. Prefer 1-3 surgical fixes over a full
+  redesign; reject decorative filler shapes/collisions that obscure the teaching idea.
 
 Also score teaching quality (0–1):
 - clarity_score: how clearly the frames teach the concept

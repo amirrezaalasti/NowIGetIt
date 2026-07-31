@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -13,7 +14,7 @@ from typing import Any, Optional
 from backend import artifacts as store
 from backend import job_runner
 from backend import supabase_db as db
-from backend.code_utils import validate_manim_code
+from backend.code_utils import scene_body, validate_manim_code
 from backend.config import get_settings
 from backend.llm import OpenRouterClient
 from backend.pipeline.compose import (
@@ -102,17 +103,35 @@ def _revision_instructions_from_review(review: Any) -> str:
     return "\n\n".join(parts)
 
 
+# Cap Manim code in SSE / events.jsonl so reconnects stay responsive.
+_CODE_PREVIEW_CHARS = 14_000
+
+
 def _slim_data(data: Optional[dict], *, event_type: Optional[str] = None) -> Optional[dict]:
     """Keep live stream payloads small so the UI updates immediately."""
     if not data:
         return data
     slim: dict = {}
     # Drop bulky blobs; keep lightweight scene summaries for the UI.
-    drop = {"code", "vlm_reviews", "section"}
+    # Code is kept (truncated) on scene_code / scene_revise so the activity
+    # panel can show what the model just wrote.
+    drop = {"vlm_reviews", "section"}
+    keep_code = event_type in {"scene_code", "scene_revise"}
+    if not keep_code:
+        drop = {*drop, "code"}
     # Plan events need beats / descriptions for the editable storyboard.
     plan_keep_full = event_type in {"plan", "plan_ready"}
     for key, value in data.items():
         if key in drop:
+            continue
+        if key == "code" and isinstance(value, str):
+            if len(value) > _CODE_PREVIEW_CHARS:
+                slim[key] = value[:_CODE_PREVIEW_CHARS] + "\n# … truncated for live preview"
+                slim["code_truncated"] = True
+            else:
+                slim[key] = value
+                slim["code_truncated"] = False
+            slim["code_chars"] = len(value)
             continue
         if key == "plan" and not plan_keep_full:
             continue
@@ -120,6 +139,9 @@ def _slim_data(data: Optional[dict], *, event_type: Optional[str] = None) -> Opt
             continue
         if key == "note" and isinstance(value, str) and len(value) > 280:
             slim[key] = value[:280] + "…"
+            continue
+        if key == "detail" and isinstance(value, str) and len(value) > 500:
+            slim[key] = value[:500] + "…"
             continue
         if key == "scenes" and isinstance(value, list):
             slim[key] = [
@@ -333,6 +355,18 @@ def _job_length_preset(job_id: str, fallback: str = "standard") -> str:
     return fallback
 
 
+def _job_scene_pacing(job_id: str, fallback: str = "balanced") -> str:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        pacing = settings.get("scene_pacing")
+        if isinstance(pacing, str) and pacing in {"short", "balanced", "long"}:
+            return pacing
+    except Exception:  # noqa: BLE001
+        pass
+    return fallback
+
+
 def _job_audience(job_id: str, fallback: str = "general") -> str:
     try:
         meta = store.load_job(job_id).get("meta") or {}
@@ -391,6 +425,7 @@ def revise_scene_plan(job_id: str, instructions: str) -> ScenePlan:
         plan,
         instructions,
         length_preset=_job_length_preset(job_id),
+        scene_pacing=_job_scene_pacing(job_id),
         audience=_job_audience(job_id),
         language=_job_language(job_id),
     )
@@ -403,6 +438,12 @@ def revise_scene_plan(job_id: str, instructions: str) -> ScenePlan:
             usage_log=client.drain_usage_log(),
         )
     return revised
+
+
+# Render/syntax failures get a much bigger dedicated retry budget than
+# timing/VLM-clarity revisions: a scene that raises e.g. SyntaxError must
+# keep getting fixed rather than being dropped from the final video.
+MAX_RENDER_FIX_ATTEMPTS = 10
 
 
 def _process_one_scene(
@@ -433,7 +474,14 @@ def _process_one_scene(
         on_event,
         PipelineEventType.scene_start,
         f"Scene {index + 1}/{total}: {scene.title}",
-        data={"scene_id": scene.id, "index": index, "job_id": job_id},
+        data={
+            "scene_id": scene.id,
+            "index": index,
+            "job_id": job_id,
+            "step": "scene.start",
+            "title": scene.title,
+            "detail": (scene.visual_description or "")[:280] or None,
+        },
         job_id=job_id,
     )
 
@@ -446,6 +494,18 @@ def _process_one_scene(
     audio_path: Optional[str] = None
     audio_skipped = False
     if include_audio:
+        _emit(
+            on_event,
+            PipelineEventType.status,
+            f"Recording narration for {scene.id}…",
+            data={
+                "scene_id": scene.id,
+                "job_id": job_id,
+                "step": "scene.tts",
+                "detail": (scene.narration or "")[:220],
+            },
+            job_id=job_id,
+        )
         audio_path, audio_skipped = synthesize_narration(
             scene.narration,
             work_dir / "audio" / f"{scene.id}.wav",
@@ -493,7 +553,21 @@ def _process_one_scene(
         job_id=job_id,
     )
 
-    _check_cancel(job_id)
+    _emit(
+        on_event,
+        PipelineEventType.status,
+        f"Writing Manim code for {scene.id} ({target_duration:.1f}s)…",
+        data={
+            "scene_id": scene.id,
+            "job_id": job_id,
+            "step": "scene.codegen",
+            "detail": (
+                f"{scene.visual_device or 'animation'} · "
+                f"{len(scene.animation_beats)} beats"
+            ),
+        },
+        job_id=job_id,
+    )
     code = generate_scene_code(
         client,
         plan=plan,
@@ -509,7 +583,14 @@ def _process_one_scene(
         on_event,
         PipelineEventType.scene_code,
         f"Generated Manim code for {scene.id} (target {target_duration:.1f}s)",
-        data={"scene_id": scene.id, "code_chars": len(code), "job_id": job_id},
+        data={
+            "scene_id": scene.id,
+            "code": code,
+            "code_chars": len(code),
+            "revision": 0,
+            "job_id": job_id,
+            "step": "scene.code_ready",
+        },
         job_id=job_id,
     )
 
@@ -523,7 +604,18 @@ def _process_one_scene(
     preview_note = None
 
     if not skip_render:
-        _check_cancel(job_id)
+        _emit(
+            on_event,
+            PipelineEventType.status,
+            f"Rendering {scene.id} with Manim…",
+            data={
+                "scene_id": scene.id,
+                "job_id": job_id,
+                "step": "scene.render",
+                "revision": revision_count,
+            },
+            job_id=job_id,
+        )
         video_path, frame_path, render_log = render_scene(
             code,
             work_dir=work_dir / "render" / scene.id,
@@ -531,7 +623,7 @@ def _process_one_scene(
             scene_id=f"{scene.id}_r{revision_count}",
         )
 
-        while not video_path and revision_count < settings.max_scene_revisions:
+        while not video_path and revision_count < MAX_RENDER_FIX_ATTEMPTS:
             # Don't burn LLM revisions on infra failures (bad worker URL, manim missing).
             infra = (render_log or "").lower()
             if any(
@@ -551,9 +643,15 @@ def _process_one_scene(
             revision_count += 1
             _emit(
                 on_event,
-                PipelineEventType.status,
+                PipelineEventType.scene_revise,
                 f"Render failed, revising code for {scene.id} (attempt {revision_count})…",
-                data={"scene_id": scene.id, "job_id": job_id},
+                data={
+                    "scene_id": scene.id,
+                    "job_id": job_id,
+                    "step": "scene.revise_render",
+                    "revision": revision_count,
+                    "detail": (render_log or "Unknown error")[-280:],
+                },
                 job_id=job_id,
             )
             rev_instructions = (
@@ -570,6 +668,32 @@ def _process_one_scene(
                 language=language,
             )
             store.save_code(job_id, scene.id, code, revision=revision_count)
+            _emit(
+                on_event,
+                PipelineEventType.scene_code,
+                f"Revised Manim code for {scene.id} (r{revision_count})",
+                data={
+                    "scene_id": scene.id,
+                    "code": code,
+                    "code_chars": len(code),
+                    "revision": revision_count,
+                    "job_id": job_id,
+                    "step": "scene.code_ready",
+                },
+                job_id=job_id,
+            )
+            _emit(
+                on_event,
+                PipelineEventType.status,
+                f"Re-rendering {scene.id} (r{revision_count})…",
+                data={
+                    "scene_id": scene.id,
+                    "job_id": job_id,
+                    "step": "scene.render",
+                    "revision": revision_count,
+                },
+                job_id=job_id,
+            )
             video_path, frame_path, render_log = render_scene(
                 code,
                 work_dir=work_dir / "render" / scene.id,
@@ -617,6 +741,11 @@ def _process_one_scene(
                     "revision": revision_count,
                     "rendered_duration": mismatch,
                     "target_duration": target_duration,
+                    "step": "scene.revise_timing",
+                    "detail": (
+                        f"Clip is {abs(diff):.1f}s too "
+                        f"{'long' if diff > 0 else 'short'} — retiming beats."
+                    ),
                 },
                 job_id=job_id,
             )
@@ -644,6 +773,20 @@ def _process_one_scene(
                 language=language,
             )
             store.save_code(job_id, scene.id, code, revision=revision_count)
+            _emit(
+                on_event,
+                PipelineEventType.scene_code,
+                f"Retimed Manim code for {scene.id} (r{revision_count})",
+                data={
+                    "scene_id": scene.id,
+                    "code": code,
+                    "code_chars": len(code),
+                    "revision": revision_count,
+                    "job_id": job_id,
+                    "step": "scene.code_ready",
+                },
+                job_id=job_id,
+            )
             new_video_path, new_frame_path, render_log = render_scene(
                 code,
                 work_dir=work_dir / "render" / scene.id,
@@ -825,6 +968,8 @@ def _process_one_scene(
                     "revision": revision_count,
                     "clarity_score": getattr(review, "clarity_score", None),
                     "best_clarity": best["clarity"],
+                    "step": "scene.revise_clarity",
+                    "detail": (rev_instructions or "")[:280],
                 },
                 job_id=job_id,
             )
@@ -839,6 +984,20 @@ def _process_one_scene(
                 language=language,
             )
             store.save_code(job_id, scene.id, code, revision=revision_count)
+            _emit(
+                on_event,
+                PipelineEventType.scene_code,
+                f"Clarity-revised Manim code for {scene.id} (r{revision_count})",
+                data={
+                    "scene_id": scene.id,
+                    "code": code,
+                    "code_chars": len(code),
+                    "revision": revision_count,
+                    "job_id": job_id,
+                    "step": "scene.code_ready",
+                },
+                job_id=job_id,
+            )
 
             if not skip_render:
                 prev_video, prev_frame, prev_source = (
@@ -860,6 +1019,20 @@ def _process_one_scene(
                     preview_note = render_log
                     if revision_count < settings.max_scene_revisions:
                         revision_count += 1
+                        _emit(
+                            on_event,
+                            PipelineEventType.scene_revise,
+                            f"Render broke after clarity fix — repairing {scene.id} "
+                            f"(r{revision_count})…",
+                            data={
+                                "scene_id": scene.id,
+                                "job_id": job_id,
+                                "revision": revision_count,
+                                "step": "scene.revise_render",
+                                "detail": (render_log or "")[-280:],
+                            },
+                            job_id=job_id,
+                        )
                         code = revise_scene_code(
                             client,
                             code=code,
@@ -876,6 +1049,20 @@ def _process_one_scene(
                         )
                         store.save_code(
                             job_id, scene.id, code, revision=revision_count
+                        )
+                        _emit(
+                            on_event,
+                            PipelineEventType.scene_code,
+                            f"Repaired Manim code for {scene.id} (r{revision_count})",
+                            data={
+                                "scene_id": scene.id,
+                                "code": code,
+                                "code_chars": len(code),
+                                "revision": revision_count,
+                                "job_id": job_id,
+                                "step": "scene.code_ready",
+                            },
+                            job_id=job_id,
                         )
                         video_path, frame_path, render_log = render_scene(
                             code,
@@ -1134,6 +1321,29 @@ def _compose_and_finish(
     return result
 
 
+_HEX_COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}\b")
+_TEXT_LABEL_RE = re.compile(r"""\bText\(\s*["']([^"'\n]{1,40})["']""")
+
+
+def _extract_visual_summary(code: str, *, max_items: int = 6) -> str:
+    """Deterministic fingerprint of what a scene's REAL code actually rendered:
+    hex colors used and on-screen Text labels. This is cheaper and more
+    reliable for cross-scene continuity than pasting a raw code excerpt into
+    the next scene's prompt and hoping the model parses it correctly.
+    """
+    if not code:
+        return ""
+    body = scene_body(code)
+    colors = list(dict.fromkeys(_HEX_COLOR_RE.findall(body)))[:max_items]
+    labels = list(dict.fromkeys(_TEXT_LABEL_RE.findall(body)))[:max_items]
+    bits = []
+    if colors:
+        bits.append("colors used: " + ", ".join(colors))
+    if labels:
+        bits.append("on-screen labels used: " + ", ".join(f'"{l}"' for l in labels))
+    return "; ".join(bits)
+
+
 def _plan_previous_context(
     plan: ScenePlan,
     index: int,
@@ -1142,10 +1352,10 @@ def _plan_previous_context(
     """Continuity context for codegen.
 
     Gives a brief plan-level history of every earlier scene, plus — since
-    generation is sequential — the ACTUAL generated code and narration ending
-    of the scene immediately before this one. That's what really rendered
-    (colors, objects, terminology), not just what the plan intended, so this
-    scene can genuinely continue from it instead of guessing.
+    generation is sequential — a compact, deterministic fingerprint (colors +
+    on-screen labels actually rendered) of the scene immediately before this
+    one. That reflects what really rendered, not just what the plan intended,
+    without the bulk/ambiguity of pasting a raw code excerpt.
     """
     parts: list[str] = []
     for scene in plan.scenes[:index]:
@@ -1157,17 +1367,18 @@ def _plan_previous_context(
     if not prev or not (prev.code or "").strip():
         return history
 
-    code_tail = prev.code.strip()[-1600:]
+    summary = _extract_visual_summary(prev.code)
     last_line = (prev.narration or "").strip()[-220:]
-    detail = (
-        "\n\nImmediately previous scene — REAL generated code + narration ending "
-        f"(this is what was actually rendered for {prev.scene_id}, not just the plan; "
-        "match its colors, object styles, and terminology so this scene continues it "
-        "naturally instead of starting from an unrelated state):\n"
-        f'Ended narration on: "...{last_line}"\n'
-        f"```python\n# ...tail of {prev.scene_id}'s code...\n{code_tail}\n```"
-    )
-    return (history + detail) if history else detail.lstrip()
+    detail_lines = [
+        "\n\nImmediately previous scene — what was ACTUALLY rendered for "
+        f"{prev.scene_id} (match this, not just the plan, so this scene continues "
+        "it naturally instead of starting from an unrelated state):",
+        f'Ended narration on: "...{last_line}"',
+    ]
+    if summary:
+        detail_lines.append(summary[0].upper() + summary[1:] + ".")
+    detail = "\n".join(detail_lines)
+    return (history + detail) if history else detail.lstrip("\n")
 
 
 def _plan_next_context(plan: ScenePlan, index: int) -> str:
@@ -1376,6 +1587,7 @@ def run_pipeline(
             "resolution": request.resolution,
             "skip_render": request.skip_render,
             "length_preset": request.length_preset,
+            "scene_pacing": request.scene_pacing,
             "audience": request.audience,
             "language": request.language,
             "tts_voice": request.tts_voice,
@@ -1415,15 +1627,27 @@ def run_pipeline(
         on_event,
         PipelineEventType.status,
         f"Planning scenes from prompt… (job {job_id})",
-        data={"job_id": job_id},
+        data={"job_id": job_id, "step": "planning.start"},
         job_id=job_id,
     )
+
+    def _plan_progress(message: str, data: dict[str, Any]) -> None:
+        _emit(
+            on_event,
+            PipelineEventType.status,
+            message,
+            data={"job_id": job_id, **data},
+            job_id=job_id,
+        )
+
     plan = create_scene_plan(
         client,
         request.prompt,
         length_preset=request.length_preset,
+        scene_pacing=request.scene_pacing,
         audience=request.audience,
         language=request.language,
+        on_progress=_plan_progress,
     )
     plan_path = store.save_scene_plan(job_id, plan.model_dump())
     for scene in plan.scenes:
@@ -1445,6 +1669,7 @@ def run_pipeline(
         "saved_path": plan_path,
         "awaiting_confirm": request.plan_only,
         "length_preset": request.length_preset,
+        "scene_pacing": request.scene_pacing,
         "audience": request.audience,
         "language": request.language,
         "tts_voice": request.tts_voice,

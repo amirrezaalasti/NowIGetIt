@@ -88,7 +88,7 @@ def get_settings() -> Settings:
         tts_voice=os.getenv("TTS_VOICE", "Kore"),
         enable_manim_render=os.getenv("ENABLE_MANIM_RENDER", "false").lower()
         in {"1", "true", "yes"},
-        max_scene_revisions=int(os.getenv("MAX_SCENE_REVISIONS", "5")),
+        max_scene_revisions=int(os.getenv("MAX_SCENE_REVISIONS", "3")),
         enable_auto_vlm_revise=os.getenv("ENABLE_AUTO_VLM_REVISE", "true").lower()
         in {"1", "true", "yes"},
         vlm_clarity_threshold=float(os.getenv("VLM_CLARITY_THRESHOLD", "0.55")),
