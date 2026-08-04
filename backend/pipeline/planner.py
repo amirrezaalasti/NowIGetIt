@@ -192,20 +192,74 @@ def _validate_plan_length(
         )
 
 
+def _validate_beat_narration(plan: ScenePlan) -> None:
+    """Reject plans that dump a scene's whole script onto one beat.
+
+    Codegen renders beats as a timeline ("at 4.1s-7.8s animate X while the voice
+    says Y"), so narration bunched on a single beat costs the animation its sync
+    with the voiceover. This is checked only on early attempts — a plan that is
+    otherwise good is still far better than no plan at all.
+    """
+    offenders: list[str] = []
+    for scene in plan.scenes:
+        if len(scene.beats) < 2:
+            continue
+        with_narration = sum(1 for b in scene.beats if b.narration.strip())
+        if with_narration < 2:
+            offenders.append(scene.id)
+    if offenders:
+        raise ValueError(
+            f"Scenes {', '.join(offenders)} put all their narration on a single "
+            "beat. Split each scene's narration ACROSS its beats: every beat needs "
+            "the one or two sentences spoken while that beat's visual_action is on "
+            "screen, so the animation stays in sync with the voiceover."
+        )
+
+
 PLANNER_SYSTEM = """You are an expert educational animation director (3Blue1Brown-caliber).
 Given a learner's prompt, produce a JSON scene plan for a short explanatory video.
+
+TEACH SOMETHING — the video must leave the learner able to do or see something they
+could not before. Before writing scenes, decide:
+- the ONE question the video answers (put it in concept_summary);
+- the concrete running example you will actually work through — with real numbers,
+  not "some value" (e.g. a specific parabola and a starting x of -2, one 3-word
+  sentence being tokenized, a 400W heater in a 20m² room);
+- the misconception you are pre-empting.
+Then order the scenes as a real explanation, not a table of contents: hook the
+question → build the mechanism one moving part at a time → work the example →
+land the payoff. Never open with "In this video we will…" — open on the problem.
 
 SCENE STRUCTURE:
 - Break the explanation into sequential scenes, one clear visual idea per scene —
   simple enough for one short Manim class. Split complex topics across scenes
   (overview → component A → component B → …) instead of packing a whole system
   (e.g. every LSTM gate, a full transformer stack) into one scene.
-- Each scene needs: id, title, narration, visual_description, animation_beats (3-6,
-  each describing MOTION — "Dot slides to the minimum", "GrowArrow for gradient" —
-  never just "show X"), duration_seconds, camera_notes, visual_device, style_tags.
+- Each scene needs: id, title, visual_description, beats (3-6), duration_seconds,
+  camera_notes, visual_device, style_tags.
+- BEATS ARE THE CORE OF THE PLAN. Each beat pairs ONE `visual_action` with the exact
+  `narration` spoken while that action is on screen. The two are rendered together:
+  the animator receives "at 4.1s–7.8s, animate <visual_action> while the voice says
+  <narration>" and follows it literally. So:
+  * Split the narration ACROSS the beats — never write the whole paragraph into one
+    beat and leave the rest empty. Each beat carries the one or two sentences said
+    during it, and those sentences must describe what that beat shows.
+  * `visual_action` describes MOTION with a subject — "The orange dot slides down the
+    curve to the minimum", "GrowArrow from the dot along the tangent" — never "show
+    gradient descent" and never a static "display X".
+  * Beat N+1 builds on the frame beat N left behind; the diagram accumulates rather
+    than being wiped and redrawn.
 - Name 2-4 concrete things per scene that will get short on-screen labels (≤3 words),
   so the coder has real content to reveal instead of animating unlabeled shapes.
 - The final beat of every scene must leave the core diagram + title on screen.
+
+NARRATION QUALITY (this is the script — it is what the learner hears):
+- Explain causally, in the order the visual builds: state the thing, then why it
+  follows. Prefer "because", "which means", "so" over listing facts.
+- Say the concrete numbers out loud when the visual shows them.
+- No filler ("let's dive in", "as we can see", "it's important to note"), no naming
+  the format ("in this scene"), no promises about later scenes beyond one hand-off
+  clause. Every sentence must carry information.
 
 LANGUAGE: write narration, titles, and on-screen labels in the requested output
 language (visual_device/style_tags stay in English — they're machine keys). Match
@@ -387,6 +441,9 @@ palette — emit every scene before ending the response.
                 language=lang,
                 scene_pacing=pacing,
             )
+            # Soft check: worth one retry, never worth failing the whole job.
+            if attempt < 2:
+                _validate_beat_narration(plan)
             _progress(
                 f"Storyboard locked: {len(plan.scenes)} scenes · {plan.title}",
                 step="planning.done",

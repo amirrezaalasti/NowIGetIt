@@ -14,7 +14,12 @@ from typing import Any, Optional
 from backend import artifacts as store
 from backend import job_runner
 from backend import supabase_db as db
-from backend.code_utils import scene_body, validate_manim_code
+from backend.code_utils import (
+    layout_revision_instructions,
+    parse_layout_report,
+    scene_body,
+    validate_manim_code,
+)
 from backend.config import get_settings
 from backend.llm import OpenRouterClient
 from backend.pipeline.compose import (
@@ -26,7 +31,7 @@ from backend.pipeline.planner import create_scene_plan, revise_scene_plan as _re
 from backend.pipeline.renderer import extract_review_frames, render_scene
 from backend.pipeline.scene_generator import generate_scene_code, revise_scene_code
 from backend.pipeline.storyboard import create_storyboard_frame
-from backend.pipeline.tts import synthesize_narration
+from backend.pipeline.tts import synthesize_scene_narration
 from backend.pipeline.visual_preview import create_visual_preview
 from backend.pipeline.vlm_review import review_scene
 from backend.languages import DEFAULT_LANGUAGE, normalize_language
@@ -493,6 +498,7 @@ def _process_one_scene(
     # Gemini returns PCM→WAV (no ffmpeg); other providers may return MP3.
     audio_path: Optional[str] = None
     audio_skipped = False
+    beat_seconds: list[float] = []
     if include_audio:
         _emit(
             on_event,
@@ -506,8 +512,8 @@ def _process_one_scene(
             },
             job_id=job_id,
         )
-        audio_path, audio_skipped = synthesize_narration(
-            scene.narration,
+        audio_path, audio_skipped, beat_seconds = synthesize_scene_narration(
+            [b.narration for b in scene.beats],
             work_dir / "audio" / f"{scene.id}.wav",
             settings=settings,
             voice=voice,
@@ -521,8 +527,18 @@ def _process_one_scene(
     else:
         target_duration = scene.duration_seconds
 
-    # Persist measured duration back onto the section for debugging
-    scene = scene.model_copy(update={"duration_seconds": float(target_duration)})
+    # Persist the measured duration back onto the section — both the scene total
+    # and, when TTS rendered each beat separately, how long each beat's own line
+    # actually took. Codegen times the animation off these numbers, so measured
+    # values here are the difference between the picture tracking the voiceover
+    # and merely averaging it.
+    scene_update: dict[str, Any] = {"duration_seconds": float(target_duration)}
+    if beat_seconds and len(beat_seconds) == len(scene.beats):
+        scene_update["beats"] = [
+            b.model_copy(update={"audio_duration_seconds": float(seconds)})
+            for b, seconds in zip(scene.beats, beat_seconds)
+        ]
+    scene = scene.model_copy(update=scene_update)
     store.save_scene_section(job_id, scene.id, scene.model_dump())
 
     if include_audio:
@@ -602,6 +618,7 @@ def _process_one_scene(
     reviews_log: list[dict] = []
     revision_count = 0
     preview_note = None
+    render_log = ""
 
     if not skip_render:
         _emit(
@@ -886,6 +903,27 @@ def _process_one_scene(
                         "revision_instructions": f"Fix invalid Python ({syntax_err}).",
                     }
                 )
+            else:
+                # Geometry the render actually measured. The reviewer only sees
+                # two sampled frames and routinely misses a label that collides
+                # or a panel that leaves the frame mid-scene; these are facts,
+                # so they override an approval.
+                layout_issues = parse_layout_report(render_log)
+                if layout_issues:
+                    result = result.model_copy(
+                        update={
+                            "approved": False,
+                            "issues": [*layout_issues, *result.issues],
+                            "revision_instructions": "\n\n".join(
+                                part
+                                for part in (
+                                    layout_revision_instructions(layout_issues),
+                                    result.revision_instructions,
+                                )
+                                if part.strip()
+                            ),
+                        }
+                    )
             saved = store.save_vlm_review(
                 job_id,
                 scene.id,

@@ -5,7 +5,13 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from backend.languages import DEFAULT_LANGUAGE, normalize_language
 from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
@@ -95,14 +101,50 @@ class SceneSection(BaseModel):
     )
     duration_seconds: float = Field(default=8.0, ge=2.0, le=120.0)
     visual_description: str = ""
+    camera_notes: str = ""
+    # Pedagogical visual device, e.g. number_line, equation_reveal, particle_flow
+    visual_device: str = ""
+    # Keyword tags used for Manim template retrieval
+    style_tags: list[str] = Field(default_factory=list)
 
-    @property
-    def narration(self) -> str:
-        return " ".join(b.narration for b in self.beats if b.narration)
+    # `beats` is the canonical shape, but the UI, every saved scene_plan.json,
+    # and section.json on disk all speak the flat `narration` + `animation_beats`
+    # shape. Accept both on the way in (below) and emit both on the way out
+    # (computed fields) — otherwise a plan round-tripped through the storyboard
+    # editor comes back with no narration at all: no TTS, no subtitles, and a
+    # codegen prompt with an empty script.
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_flat_narration(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        beats = data.get("beats")
+        if isinstance(beats, list) and beats:
+            return data
 
-    @property
-    def animation_beats(self) -> list[str]:
-        return [b.visual_action for b in self.beats if b.visual_action]
+        actions = data.get("animation_beats")
+        actions = (
+            [str(a) for a in actions if str(a).strip()]
+            if isinstance(actions, list)
+            else []
+        )
+        narration = data.get("narration")
+        narration = str(narration).strip() if narration is not None else ""
+        if not actions and not narration:
+            return data
+
+        data = dict(data)
+        if actions:
+            # Whole narration rides on the first beat: splitting prose across
+            # visual actions would invent sentence boundaries that were never
+            # authored, and only the joined text is ever spoken.
+            data["beats"] = [
+                {"visual_action": action, "narration": narration if i == 0 else ""}
+                for i, action in enumerate(actions)
+            ]
+        else:
+            data["beats"] = [{"visual_action": "", "narration": narration}]
+        return data
 
     @model_validator(mode="after")
     def _fill_visual_description(self) -> SceneSection:
@@ -110,11 +152,15 @@ class SceneSection(BaseModel):
             self.visual_description = " ".join(b.visual_action for b in self.beats if b.visual_action)
         return self
 
-    camera_notes: str = ""
-    # Pedagogical visual device, e.g. number_line, equation_reveal, particle_flow
-    visual_device: str = ""
-    # Keyword tags used for Manim template retrieval
-    style_tags: list[str] = Field(default_factory=list)
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def narration(self) -> str:
+        return " ".join(b.narration for b in self.beats if b.narration)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def animation_beats(self) -> list[str]:
+        return [b.visual_action for b in self.beats if b.visual_action]
 
 
 class ScenePlan(BaseModel):

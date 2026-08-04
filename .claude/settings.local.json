@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -m pytest backend/tests -q)",
+      "Bash(ffmpeg -version)",
+      "Bash(ffmpeg -hide_banner -filters)",
+      "Bash(ffmpeg -hide_banner -version)",
+      "Bash(.venv/bin/python -)",
+      "Bash(PYTHONPATH=. .venv/bin/python /private/tmp/claude-501/-Users-amirrezaalasti-Desktop-selfprojects-NowIGetIt/9b0d5760-b369-4fc9-8e4f-c9a828c60387/scratchpad/full.py)",
+      "Bash(grep -vE \"INFO|_client|^\\\\s*$\")"
+    ]
+  }
+}

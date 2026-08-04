@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Optional
 
 from backend.llm import OpenRouterClient
+from backend.pipeline.beat_timing import beat_timeline, format_beat_timeline
 from backend.schemas import SceneSection, VlmReview
 
 _FORBIDDEN_LATEX_RE = re.compile(
@@ -46,6 +48,13 @@ Reject for real code problems OR obvious layout disasters in the code:
   unlabeled objects flying in and back out, repeated identical plays, a trailing
   self.wait() beyond the 0.5s hold, or timing-arithmetic comments
 - a scene longer than ~12s whose only Text is the title (unlabeled shapes teach nothing)
+- OUT OF SYNC WITH THE VOICEOVER: the plays do not follow the beat timeline's order,
+  or a beat's run_time is wildly off its budget, so the picture shows one thing while
+  the narration describes another
+- a single self.play longer than ~5s that only does one thing (the frame sits still
+  while the voice keeps talking) — it should be 2-3 successive steps
+- the scene wipes the frame between beats and rebuilds instead of accumulating, so
+  the through-line is lost
 
 CRITICAL CONSTRAINTS for revision_instructions:
 - Never suggest MathTex/Tex/TexText/LaTeX (not installed) — plain Text() only, ASCII
@@ -83,6 +92,11 @@ REJECT (approved=false) when ANY of these are true:
 - shapes carrying no label for what the narration names — e.g. a long scene showing only
   a title plus unlabeled geometry, or the attached code spending its runtime on
   scale/opacity pulsing, `.scale(1.0)` no-ops, objects flying in and out, or padding waits
+- the frame does not TEACH the beat it belongs to: a learner pausing here could not say
+  what the picture is claiming, or the diagram is generic decoration that would suit any
+  topic rather than a model of THIS concept
+- the attached code's play order departs from the beat timeline, so the animation and
+  the voiceover are describing different things at the same moment
 
 Do NOT reject for:
 - clean layouts with intentional white space
@@ -192,15 +206,19 @@ def review_scene(
 ) -> VlmReview:
     # Keep prompt lean so the model has room to finish JSON.
     code_excerpt = code if len(code) <= 6000 else code[:6000] + "\n# ... truncated ..."
+    timeline = format_beat_timeline(
+        beat_timeline(
+            scene,
+            max(0.5, scene.duration_seconds - 0.5),
+        )
+    )
     prompt = f"""Scene title: {scene.title}
 Intended visual description:
 {scene.visual_description}
 
-Animation beats:
-{chr(10).join(f"- {b}" for b in scene.animation_beats)}
-
-Narration (context only):
-{scene.narration}
+Beat timeline the animation was supposed to follow — each beat's animation should
+play while its line is spoken, in this order:
+{timeline}
 
 Manim code:
 ```python

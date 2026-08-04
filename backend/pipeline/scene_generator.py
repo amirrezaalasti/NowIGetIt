@@ -8,6 +8,11 @@ from typing import Optional
 from backend.code_utils import clean_manim_code, lint_scene_code, validate_manim_code
 from backend.languages import language_display_name, normalize_language
 from backend.llm import OpenRouterClient
+from backend.pipeline.beat_timing import (
+    beat_timeline,
+    format_beat_timeline,
+    narration_is_beat_aligned,
+)
 from backend.pipeline.templates import format_templates_for_prompt, retrieve_templates
 from backend.schemas import ScenePlan, SceneSection
 
@@ -23,6 +28,33 @@ QUALITY BAR:
   caption/formula bottom. The FINAL hold must still show the key diagram + title.
 - On-screen text is sparse; long explanations stay in narration only (it becomes
   subtitles). Every shape must map to the concept — no decorative filler.
+
+THE ANIMATION MUST *BE* THE EXPLANATION (this is what separates a good scene from
+a slideshow — read the beat timeline below and follow it literally):
+- Each beat's animation plays WHILE its narration line is spoken. Animate exactly
+  what that line describes, at that moment: when the voice says "the slope flattens",
+  the tangent line visibly flattens on screen. Never illustrate a sentence the voice
+  already left behind, and never show a thing several seconds before it is named.
+- MOTION CARRIES MEANING. Direction, speed, and change encode the idea: descending =
+  moving down, growth = scaling up, equality = two things converging, cause→effect =
+  A moves, THEN B reacts (sequential plays, not one simultaneous blob).
+- Show change, don't restate it. Prefer Transform/ReplacementTransform when one thing
+  BECOMES another, ValueTracker + updaters when a quantity varies continuously, and
+  MoveAlongPath when something travels. A number that changes should visibly count
+  (DecimalNumber + updater), not cut between two static labels.
+- DIRECT ATTENTION. Only one thing should be "loud" at a time: Indicate / Circumscribe
+  / SurroundingRectangle the element under discussion, and dim what is now background
+  (`.animate.set_opacity(0.35)`) instead of deleting it. Anything mentioned again
+  later must stay on screen, dimmed — do not FadeOut and rebuild it.
+- BUILD, DON'T RESET. The diagram accumulates across the scene: the anchor object
+  from beat 1 is still there at the end, annotated. Each beat adds to or modifies
+  what is already there. Wiping the frame between beats destroys the through-line.
+- SPATIAL GRAMMAR IS STABLE. Once a thing owns a screen position, it keeps it for the
+  whole scene; a label stays next_to its object. Never re-shuffle the layout mid-scene
+  just to make room — plan the composition so everything has a home from the start.
+- CONCRETE OVER ABSTRACT. Use real numbers, real axes ticks, a real worked case
+  (x = 3, not "some value"). A learner should be able to pause on any frame and read
+  what each element means from its label.
 
 RUNTIME CONTRACT (injected before render — write code that COOPERATES with it):
 A host post-processor wraps Text / MarkupText / Paragraph and patches Mobject.to_edge.
@@ -99,9 +131,21 @@ def generate_scene_code(
     templates = retrieve_templates(scene, limit=3)
     template_block = format_templates_for_prompt(templates)
     duration = target_duration_seconds or scene.duration_seconds
-    # Budget: leave a short final hold; distribute the rest across beats
+    # Budget: leave a short final hold; the rest is split across beats in
+    # proportion to how long each beat's own narration takes to speak, so the
+    # animation tracks the voiceover instead of dividing the clock evenly.
     beat_count = max(len(scene.animation_beats), 1)
-    per_beat = max(0.6, (duration - 0.5) / beat_count)
+    timings = beat_timeline(scene, max(0.5, duration - 0.5), language=language)
+    timeline_block = format_beat_timeline(timings)
+    alignment_note = (
+        ""
+        if narration_is_beat_aligned(scene)
+        else (
+            "\n(This scene's narration was authored as one block rather than split\n"
+            " per beat, so the split above is an estimate — keep the ORDER and the\n"
+            " total, and use your judgement on where each sentence lands.)\n"
+        )
+    )
     # Density floor: long scenes need many *substantive* steps, otherwise the
     # model stretches a few animations and pads the rest with decorative motion.
     min_plays = max(beat_count, math.ceil(duration / 4.0))
@@ -141,11 +185,20 @@ Scene title: {scene.title}
 Visual device: {scene.visual_device or "(unspecified)"}
 Style tags: {", ".join(scene.style_tags) or "(none)"}
 Visual description: {scene.visual_description}
-Animation beats (map each to run_time ≈ {per_beat:.1f}s):
-{chr(10).join(f"- {b}" for b in scene.animation_beats)}
-Target narration duration: {duration:.1f} seconds  ← TOTAL play+wait must match this
 Camera notes: {scene.camera_notes}
-Narration (pacing only; do not dump full VO on screen):
+
+BEAT TIMELINE — the voiceover audio is ALREADY RECORDED and fixed at {duration:.1f}s.
+These timecodes are what the learner will actually hear. Work through the beats in
+this order and spend each beat's budget inside its own window, so every animation is
+on screen exactly while its line is spoken. A beat's budget may be one self.play or
+several consecutive ones — any beat over ~5s MUST be broken into 2-3 successive plays
+that each move the explanation a step further (reveal, annotate, advance the tracker),
+because a single 8-second animation reads as nothing happening:
+
+{timeline_block}
+{alignment_note}
+Full narration for reference (do NOT dump this on screen — it is spoken, and the
+subtitles are burned in separately):
 {scene.narration}
 
 Creative direction:
@@ -165,8 +218,8 @@ Reference Manim patterns (adapt to this scene):
 Numbers for this scene (the narration audio is already fixed at {duration:.1f}s — a
 mismatch means the video freezes or runs silent against the voiceover):
 - Total self.play(run_time=...) + self.wait(...) time (excluding the final 0.5s hold)
-  must land within ±0.5s of {duration:.1f}s. Spread it roughly evenly across the
-  beats above (~{per_beat:.1f}s each) rather than dumping it into one wait.
+  must land within ±0.5s of {duration:.1f}s. Take each beat's run_time from the
+  timeline above rather than dumping the difference into one wait.
 - At least {min_plays} distinct self.play calls that each advance the explanation,
   and at least {min_labels} short Text labels besides the title. Total self.wait()
   time must stay under {max(1.0, 0.15 * duration):.1f}s including the final hold.
@@ -267,15 +320,21 @@ def revise_scene_code(
         if surgical and not render_error
         else "Rewrite a complete valid file that renders and teaches the scene."
     )
+    # Carry the beat/narration pairing into revisions too — otherwise a fix for
+    # layout or timing quietly re-orders the animation away from the voiceover.
+    timeline_block = format_beat_timeline(
+        beat_timeline(scene, max(0.5, duration - 0.5), language=language)
+    )
     user = f"""Fix this Manim Community scene. Output ONLY a complete valid Python file.
 
 Scene title: {scene.title}
 Visual goal: {scene.visual_description}
 Visual device: {scene.visual_device or "(unspecified)"}
-Beats:
-{chr(10).join(f"- {b}" for b in scene.animation_beats)}
-Target narration duration: {duration:.1f}s (keep total play+wait matched)
 Output language: keep all on-screen Text in {lang_name}.
+
+Beat timeline the animation must stay locked to (voiceover is fixed at {duration:.1f}s;
+keep every beat in this order and inside its window):
+{timeline_block}
 
 Revision mode:
 {mode_note}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 from typing import Optional
 
@@ -203,6 +204,207 @@ Mobject.to_edge = _nig_safe_to_edge
 """
 
 
+# =============================================================================
+# LAYOUT GUARD
+# =============================================================================
+# The VLM is unreliable at spotting a panel that runs off the bottom of the
+# frame or two labels sitting on top of each other, and it costs an image call
+# to ask. Manim already knows the exact geometry, so we sample it during the
+# render and report it back through the log the orchestrator already collects.
+# Reporting only — never mutate the scene or fail the render.
+
+_LAYOUT_GUARD_MARKER = "# _NOWIGETIT_LAYOUT_GUARD"
+_LAYOUT_GUARD_END_MARKER = "# _NOWIGETIT_LAYOUT_GUARD_END"
+_LAYOUT_REPORT_PREFIX = "_NOWIGETIT_LAYOUT_REPORT "
+# Content may kiss the frame edge; only flag a real bleed past it.
+_FRAME_TOLERANCE = 0.12
+# Text boxes overlapping by less than this read as tight spacing, not collision.
+_OVERLAP_TOLERANCE = 0.06
+
+_LAYOUT_GUARD = f'''{_LAYOUT_GUARD_MARKER}
+# Samples on-screen geometry after each play and reports violations via stdout.
+_NIG_REPORT_PREFIX = {_LAYOUT_REPORT_PREFIX!r}
+_NIG_FRAME_TOL = {_FRAME_TOLERANCE!r}
+_NIG_OVERLAP_TOL = {_OVERLAP_TOLERANCE!r}
+_nig_violations = {{}}
+
+
+# ValueTracker & friends store their value AS a coordinate, so they sit far off
+# stage by design and must never be read as layout.
+_NIG_NON_VISUAL = ("ValueTracker", "ComplexValueTracker", "DecimalMatrix_dummy")
+
+
+def _nig_box(mob):
+    try:
+        if type(mob).__name__ in _NIG_NON_VISUAL:
+            return None
+        if not mob.get_all_points().size:
+            return None
+        box = (
+            float(mob.get_left()[0]), float(mob.get_right()[0]),
+            float(mob.get_bottom()[1]), float(mob.get_top()[1]),
+        )
+    except Exception:
+        return None
+    # Updaters can transiently produce inf/NaN or astronomically large values
+    # (e.g. an Angle between momentarily parallel lines) — not a layout fault.
+    for v in box:
+        if v != v or v in (float("inf"), float("-inf")) or abs(v) > 1e4:
+            return None
+    return box
+
+
+def _nig_label(mob):
+    text = getattr(mob, "text", None) or getattr(mob, "original_text", None)
+    name = type(mob).__name__
+    if isinstance(text, str) and text.strip():
+        return name + " " + repr(text.strip()[:34])
+    return name
+
+
+def _nig_walk(mob):
+    """Leaf-ish mobjects: a VGroup's own box hides which child is off-frame."""
+    subs = [s for s in getattr(mob, "submobjects", []) if s is not None]
+    if subs and type(mob).__name__ in ("VGroup", "Group", "VDict"):
+        for sub in subs:
+            for leaf in _nig_walk(sub):
+                yield leaf
+    else:
+        yield mob
+
+
+def _nig_check(scene):
+    try:
+        half_w = float(config.frame_width) / 2.0
+        half_h = float(config.frame_height) / 2.0
+    except Exception:
+        return
+    texts, seen = [], []
+    for top in list(getattr(scene, "mobjects", [])):
+        for mob in _nig_walk(top):
+            box = _nig_box(mob)
+            if box is None:
+                continue
+            left, right, bottom, top_y = box
+            # Objects larger than the frame are deliberate backdrops.
+            if (right - left) > 2 * half_w or (top_y - bottom) > 2 * half_h:
+                continue
+            # Only *partially* visible content is a layout fault. Something
+            # entirely off stage is either parked there deliberately or is a
+            # transient updater state — the learner never sees it clipped.
+            visible = (
+                left < half_w and right > -half_w
+                and bottom < half_h and top_y > -half_h
+            )
+            if not visible:
+                continue
+            over = max(
+                -half_w - left, right - half_w, -half_h - bottom, top_y - half_h
+            )
+            if over > _NIG_FRAME_TOL:
+                key = "offframe:" + _nig_label(mob)
+                if key not in _nig_violations:
+                    _nig_violations[key] = (
+                        _nig_label(mob) + " runs " + format(over, ".2f")
+                        + " units past the frame edge"
+                    )
+            if type(mob).__name__ in ("Text", "MarkupText", "Paragraph"):
+                texts.append((mob, box))
+    for i in range(len(texts)):
+        mob_a, a = texts[i]
+        for j in range(i + 1, len(texts)):
+            mob_b, b = texts[j]
+            dx = min(a[1], b[1]) - max(a[0], b[0])
+            dy = min(a[3], b[3]) - max(a[2], b[2])
+            if dx > _NIG_OVERLAP_TOL and dy > _NIG_OVERLAP_TOL:
+                pair = tuple(sorted([_nig_label(mob_a), _nig_label(mob_b)]))
+                key = "overlap:" + "|".join(pair)
+                if key not in _nig_violations and pair not in seen:
+                    seen.append(pair)
+                    _nig_violations[key] = pair[0] + " overlaps " + pair[1]
+
+
+_NIG_scene_play = Scene.play
+
+
+def _nig_play(self, *args, **kwargs):
+    result = _NIG_scene_play(self, *args, **kwargs)
+    try:
+        _nig_check(self)
+    except Exception:
+        pass
+    return result
+
+
+Scene.play = _nig_play
+
+_NIG_scene_render = Scene.render
+
+
+def _nig_render(self, *args, **kwargs):
+    result = _NIG_scene_render(self, *args, **kwargs)
+    try:
+        if _nig_violations:
+            import json as _nig_json
+            print(_NIG_REPORT_PREFIX + _nig_json.dumps(
+                sorted(_nig_violations.values())[:8]
+            ))
+    except Exception:
+        pass
+    return result
+
+
+Scene.render = _nig_render
+{_LAYOUT_GUARD_END_MARKER}
+'''
+
+
+def parse_layout_report(log: str) -> list[str]:
+    """Pull layout violations the guard reported during a render."""
+    if not log or _LAYOUT_REPORT_PREFIX not in log:
+        return []
+    issues: list[str] = []
+    for line in log.splitlines():
+        idx = line.find(_LAYOUT_REPORT_PREFIX)
+        if idx < 0:
+            continue
+        payload = line[idx + len(_LAYOUT_REPORT_PREFIX) :].strip()
+        try:
+            parsed = json.loads(payload)
+        except ValueError:
+            continue
+        if isinstance(parsed, list):
+            issues.extend(str(x) for x in parsed if str(x).strip())
+    return list(dict.fromkeys(issues))
+
+
+def layout_revision_instructions(issues: list[str]) -> str:
+    """Turn guard findings into a concrete, actionable revision request."""
+    if not issues:
+        return ""
+    offframe = [i for i in issues if "past the frame edge" in i]
+    overlaps = [i for i in issues if "overlaps" in i]
+    parts = [
+        "The render measured real layout faults (exact geometry, not opinion) — "
+        "fix these without changing the teaching content or the beat timing:"
+    ]
+    if offframe:
+        parts.append(
+            "- Off-frame content (the visible frame is 14.2 x 8.0 units, so x must "
+            "stay within ±7.1 and y within ±4.0). Pull these back by grouping with "
+            "arrange()/next_to() and move_to(ORIGIN), or use a smaller font_size / "
+            "shorter diagram — never by truncating words:\n  "
+            + "\n  ".join(offframe)
+        )
+    if overlaps:
+        parts.append(
+            "- Overlapping text. Give each label its own zone (next_to with buff "
+            "~0.3), or FadeOut the earlier label before the later one appears:\n  "
+            + "\n  ".join(overlaps)
+        )
+    return "\n".join(parts)
+
+
 class UnsafeTextShimError(RuntimeError):
     """Raised when cleaned Manim code is missing the durable Text fix or has pad/hide hacks."""
 
@@ -271,6 +473,11 @@ def _strip_marked_block(code: str, start_marker: str, end_marker: str) -> str:
         end = end + len(end_marker)
         if end < len(code) and code[end] == "\n":
             end += 1
+        # Also swallow blank lines left at the seam, so strip→inject cycles
+        # (every revision re-cleans the code) stay byte-for-byte idempotent
+        # instead of growing a blank line per pass.
+        while end < len(code) and code[end] == "\n":
+            end += 1
         return code[:start] + code[end:]
     rest = code[start:]
     m = re.search(r"^class\s", rest, flags=re.M)
@@ -284,6 +491,7 @@ def _strip_text_kerning_shim(code: str) -> str:
     """Remove previously injected text/layout shims."""
     for start, end in _TEXT_LAYOUT_LEGACY_MARKERS:
         code = _strip_marked_block(code, start, end)
+    code = _strip_marked_block(code, _LAYOUT_GUARD_MARKER, _LAYOUT_GUARD_END_MARKER)
     code = _strip_marked_block(code, _TEXT_LAYOUT_MARKER, _TEXT_LAYOUT_END_MARKER)
     return _strip_marked_block(code, _TEXT_KERNING_MARKER, _TEXT_KERNING_END_MARKER)
 
@@ -296,7 +504,14 @@ def _inject_text_kerning_shim(code: str) -> str:
     calls raw `_ManimText` so a stale wrapper cannot win.
     """
     code = _strip_text_kerning_shim(code)
-    shim = _TEXT_KERNING_SHIM.strip() + "\n" + _TEXT_LAYOUT_FIX.strip() + "\n"
+    shim = (
+        _TEXT_KERNING_SHIM.strip()
+        + "\n"
+        + _TEXT_LAYOUT_FIX.strip()
+        + "\n"
+        + _LAYOUT_GUARD.strip()
+        + "\n"
+    )
     match = re.search(r"^from manim import \*[ \t]*$", code, flags=re.M)
     if match:
         insert_at = match.end()
