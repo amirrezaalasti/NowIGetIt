@@ -8,7 +8,8 @@ from typing import Any, Optional
 
 from backend.languages import language_display_name, normalize_language
 from backend.llm import OpenRouterClient
-from backend.schemas import ScenePlan
+from backend.pipeline.pedagogy import format_blueprint_for_planner
+from backend.schemas import ScenePlan, TeachingBlueprint
 
 # (message, optional data) — used so the UI can show planning steps live.
 ProgressCallback = Callable[[str, dict[str, Any]], None]
@@ -216,6 +217,63 @@ def _validate_beat_narration(plan: ScenePlan) -> None:
         )
 
 
+def _validate_step_coverage(plan: ScenePlan, blueprint: TeachingBlueprint) -> None:
+    """Reject a storyboard that quietly dropped or reordered teaching steps.
+
+    The blueprint is the explanation; scenes are only its staging. A plan that
+    skips step 4 or teaches step 6 before step 5 is exactly the "sequence of
+    pretty clips that never adds up" failure the blueprint exists to prevent.
+    """
+    step_ids = [s.id for s in blueprint.steps]
+    if not step_ids:
+        return
+    known = {sid.lower(): sid for sid in step_ids}
+    covered: list[str] = []
+    unknown: list[str] = []
+    for scene in plan.scenes:
+        for raw in scene.covers_steps:
+            key = str(raw).strip().lower()
+            if key in known:
+                covered.append(known[key])
+            elif key:
+                unknown.append(str(raw))
+
+    if not covered:
+        raise ValueError(
+            "No scene recorded which teaching steps it delivers. Set `covers_steps` on "
+            f"every scene using the plan's step ids ({', '.join(step_ids)}) so the "
+            "storyboard provably covers the explanation."
+        )
+    if unknown:
+        raise ValueError(
+            f"covers_steps references unknown step ids: {', '.join(sorted(set(unknown))[:5])}. "
+            f"Use only the ids from the teaching plan: {', '.join(step_ids)}."
+        )
+    missing = [sid for sid in step_ids if sid not in covered]
+    if missing:
+        raise ValueError(
+            f"Teaching steps {', '.join(missing)} are not delivered by any scene. Every "
+            "step is a rung the next one depends on — add or extend scenes so all of "
+            f"{', '.join(step_ids)} are covered."
+        )
+    off_plan = [s.id for s in plan.scenes if not [c for c in s.covers_steps if str(c).strip()]]
+    if off_plan:
+        raise ValueError(
+            f"Scenes {', '.join(off_plan)} do not deliver any teaching step. Every scene "
+            "must stage part of the plan — give each one the step id(s) it delivers in "
+            "`covers_steps`, or drop the scene."
+        )
+    # A step may span consecutive scenes (a big idea split in two); it may not
+    # come back after the explanation has moved on.
+    order = [step_ids.index(sid) for sid in covered]
+    if order != sorted(order):
+        raise ValueError(
+            "Scenes deliver the teaching steps out of order "
+            f"({' → '.join(covered)}). Each step is earned by the one before it, so the "
+            f"scenes must follow the plan's order: {' → '.join(step_ids)}."
+        )
+
+
 PLANNER_SYSTEM = """You are an expert educational animation director (3Blue1Brown-caliber).
 Given a learner's prompt, produce a JSON scene plan for a short explanatory video.
 
@@ -229,6 +287,27 @@ could not before. Before writing scenes, decide:
 Then order the scenes as a real explanation, not a table of contents: hook the
 question → build the mechanism one moving part at a time → work the example →
 land the payoff. Never open with "In this video we will…" — open on the problem.
+
+WHEN A TEACHING PLAN IS PROVIDED, those decisions are already made — your job is to
+STAGE it, not to re-derive it:
+- Walk its steps in the given order. Each scene delivers one step, or two adjacent
+  steps when they are small; split one step across consecutive scenes when it is too
+  big for a single visual idea. Never reorder steps, never skip one, never add a
+  scene teaching something outside the plan.
+- Record which steps each scene delivers in that scene's `covers_steps` (e.g.
+  ["step_3"]). Every scene needs at least one step id, every step id must appear in
+  at least one scene, and the ids must run in order across the scenes — a step split
+  across two scenes uses consecutive scenes, and an idea is never revisited after the
+  explanation has moved past it.
+- A step's `visual_strategy` is the scene's visual_description and the source of its
+  beats; its `why_it_follows` is what the narration must actually say; its
+  `checkpoint` is what the scene must leave the learner able to do.
+- Use the plan's notation with its stated visual_encoding for every on-screen label,
+  and put those encodings into recurring_elements so every scene renders them the
+  same way. Never introduce a symbol before the step that introduces it.
+- Introduce each relation the way its `how_to_show` says: the picture makes it
+  obvious first, then the expression appears, built term by term. The running example
+  and its real numbers carry through every scene.
 
 SCENE STRUCTURE:
 - Break the explanation into sequential scenes, one clear visual idea per scene —
@@ -325,7 +404,8 @@ Return ONLY a JSON object with this shape:
       "duration_seconds": number,
       "camera_notes": string,
       "visual_device": string,
-      "style_tags": [string]
+      "style_tags": [string],
+      "covers_steps": [string]
     }
   ]
 }
@@ -363,6 +443,7 @@ def create_scene_plan(
     scene_pacing: str = "balanced",
     audience: str = "general",
     language: str = "en",
+    blueprint: Optional[TeachingBlueprint] = None,
     on_progress: Optional[ProgressCallback] = None,
 ) -> ScenePlan:
     pacing = scene_pacing if scene_pacing in SCENE_PACING_VALUES else "balanced"
@@ -383,10 +464,21 @@ def create_scene_plan(
         if on_progress:
             on_progress(message, data)
 
+    blueprint_block = (
+        f"""TEACHING PLAN (already decided — STAGE it, do not re-derive or reorder it.
+Every step below must be delivered, in this order, and every scene must record the
+step id(s) it delivers in its `covers_steps` field):
+
+{format_blueprint_for_planner(blueprint)}
+
+"""
+        if blueprint is not None and blueprint.steps
+        else ""
+    )
     user = f"""Learner prompt:
 {prompt}
 
-Length preset ({length_preset}): {length}
+{blueprint_block}Length preset ({length_preset}): {length}
 Scene pacing ({pacing}): {SCENE_PACING_GUIDANCE[pacing]}
 HARD REQUIREMENT (checked programmatically — the plan will be rejected and
 retried if this is not met): the sum of every scene's spoken narration must
@@ -441,9 +533,17 @@ palette — emit every scene before ending the response.
                 language=lang,
                 scene_pacing=pacing,
             )
-            # Soft check: worth one retry, never worth failing the whole job.
+            # Soft checks: worth a retry, never worth failing the whole job —
+            # an imperfect plan still beats no video at all.
             if attempt < 2:
                 _validate_beat_narration(plan)
+                if blueprint is not None:
+                    _validate_step_coverage(plan, blueprint)
+            if blueprint is not None:
+                # Carry the teaching plan on the plan itself: codegen reads its
+                # notation/visual grammar, and it must survive the round trip
+                # through scene_plan.json and the storyboard editor.
+                plan = plan.model_copy(update={"blueprint": blueprint})
             _progress(
                 f"Storyboard locked: {len(plan.scenes)} scenes · {plan.title}",
                 step="planning.done",
@@ -476,6 +576,9 @@ shorter", "merge the last two scenes"). Apply the requested change while:
 - Preserving concept_summary, visual_identity, recurring_elements, and palette
   so newly added/edited scenes still look and sound like part of the same
   video (reuse the SAME palette hex values and recurring_elements).
+- Keeping each surviving scene's `covers_steps` as it was, and giving any scene
+  you add the step id(s) of the teaching plan it sits between (leave it empty
+  only when the learner asked for something genuinely outside the plan).
 - Re-numbering scene ids sequentially as scene_1, scene_2, … after any
   add/remove/reorder so there are no gaps or duplicates.
 - Keeping the CONTINUITY rules above intact for the new scene order (fix the
@@ -562,6 +665,11 @@ array — never omit scenes.
             )
             _require_scenes_payload(data)
             revised = ScenePlan.model_validate(data)
+            if plan.blueprint is not None:
+                # The teaching plan is not the reviser's to rewrite — a scene
+                # edit must never silently drop the notation/visual grammar the
+                # already-generated scenes were built against.
+                revised = revised.model_copy(update={"blueprint": plan.blueprint})
             _progress(
                 f"Updated storyboard: {len(revised.scenes)} scenes · {revised.title}",
                 step="planning.revise_done",

@@ -27,7 +27,14 @@ export type HumanComment = {
 export type JobRuntimeStatus = {
   job_id: string;
   status: "complete" | "running" | "awaiting_plan" | "interrupted" | "unknown" | string;
+  /** The main generation pipeline is building scenes. */
   running: boolean;
+  /** True when the pipeline OR any single-scene edit is in flight. */
+  any_task_running?: boolean;
+  /** Task keys currently running: "pipeline" and/or "scene:<id>". */
+  active_tasks?: string[];
+  /** Scenes that cannot be edited right now because a writer holds them. */
+  busy_scenes?: string[];
   event_count: number;
   has_result: boolean;
   has_final_video: boolean;
@@ -179,6 +186,46 @@ export async function ensureApiToken(): Promise<string | null> {
   }
 }
 
+/** A scene can't be edited because the pipeline or another edit holds it. */
+export class SceneBusyError extends Error {
+  readonly sceneId: string | null;
+  constructor(message: string, sceneId: string | null) {
+    super(message);
+    this.name = "SceneBusyError";
+    this.sceneId = sceneId;
+  }
+}
+
+/**
+ * Read a FastAPI error body as a sentence. `detail` is a plain string for most
+ * errors and an object for coded ones (quota, SCENE_BUSY) — returning the raw
+ * text would surface JSON to the user.
+ */
+async function readError(res: Response, fallback: string): Promise<Error> {
+  const text = await res.text();
+  let message = text;
+  let code: string | null = null;
+  let sceneId: string | null = null;
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown };
+    const detail = parsed?.detail;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object") {
+      const obj = detail as Record<string, unknown>;
+      if (typeof obj.message === "string") message = obj.message;
+      if (typeof obj.code === "string") code = obj.code;
+      if (typeof obj.scene_id === "string") sceneId = obj.scene_id;
+    }
+  } catch {
+    /* not JSON — keep the raw text */
+  }
+  if (code === "SCENE_BUSY" || res.status === 409) {
+    return new SceneBusyError(message || fallback, sceneId);
+  }
+  return new Error(message || fallback);
+}
+
 export async function addSceneComment(
   jobId: string,
   sceneId: string,
@@ -219,8 +266,7 @@ export async function streamRetouch(
     },
   );
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(detail || `Retouch failed (${res.status})`);
+    throw await readError(res, `Retouch failed (${res.status})`);
   }
   if (!res.body) throw new Error("No response stream");
 
@@ -263,8 +309,7 @@ export async function approveScene(
     },
   );
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(detail || `Approve failed (${res.status})`);
+    throw await readError(res, `Approve failed (${res.status})`);
   }
   return res.json();
 }
@@ -684,8 +729,7 @@ export async function streamRegenerateScene(
     },
   );
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(detail || `Regenerate failed (${res.status})`);
+    throw await readError(res, `Regenerate failed (${res.status})`);
   }
   await readSseStream(res, onEvent);
 }
@@ -1026,8 +1070,7 @@ export async function applySceneEdits(
     },
   );
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(detail || `Apply edits failed (${res.status})`);
+    throw await readError(res, `Apply edits failed (${res.status})`);
   }
   return res.json();
 }

@@ -197,6 +197,12 @@ function eventStepLabel(event: PipelineEvent): string {
   const step =
     typeof event.data?.step === "string" ? event.data.step : event.type;
   const labels: Record<string, string> = {
+    "blueprint.start": "Teaching",
+    "blueprint.prepare": "Teaching",
+    "blueprint.llm": "Thinking",
+    "blueprint.retry": "Retry",
+    "blueprint.failed": "Retry",
+    "blueprint.done": "Teaching",
     "planning.start": "Plan",
     "planning.prepare": "Plan",
     "planning.llm": "Thinking",
@@ -270,9 +276,11 @@ export function Generator() {
   const [regenDirection, setRegenDirection] = useState<Record<string, string>>(
     {},
   );
-  const [regeneratingSceneId, setRegeneratingSceneId] = useState<
-    string | null
-  >(null);
+  // Scene edits run independently of the main pipeline and of each other, so
+  // in-flight state is per scene rather than one global flag.
+  const [regeneratingSceneIds, setRegeneratingSceneIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [sceneRegenError, setSceneRegenError] = useState<
     Record<string, string>
   >({});
@@ -304,9 +312,13 @@ export function Generator() {
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const reviseAbortRef = useRef<AbortController | null>(null);
-  // Kept in sync with regeneratingSceneId so SSE handlers see the live value
-  // (applyPipelineEvent closes over state and would otherwise go stale).
-  const regeneratingSceneIdRef = useRef<string | null>(null);
+  // One abort controller per in-flight scene edit. Kept separate from
+  // `abortRef` (the main pipeline stream) so regenerating a scene never tears
+  // down the generation stream — that's what blocked editing mid-build.
+  const sceneAbortsRef = useRef<Map<string, AbortController>>(new Map());
+  // Mirrors regeneratingSceneIds; applyPipelineEvent closes over state and
+  // would otherwise see a stale set.
+  const regeneratingSceneIdsRef = useRef<Set<string>>(new Set());
   const logContainerRef = useRef<HTMLDivElement | null>(null);
   const codeContainerRef = useRef<HTMLPreElement | null>(null);
   const eventsLenRef = useRef(0);
@@ -451,21 +463,27 @@ export function Generator() {
     }
     const eventSceneId =
       typeof event.data?.scene_id === "string" ? event.data.scene_id : null;
-    const activeRegenId = regeneratingSceneIdRef.current;
-    if (eventSceneId && eventSceneId === activeRegenId) {
+    const inFlight = regeneratingSceneIdsRef.current;
+    // Route by the event's own scene_id. Falling back to "the" active scene
+    // only works when exactly one edit is running — with several in flight an
+    // untagged event would land on the wrong scene.
+    const attributedSceneId =
+      eventSceneId ?? (inFlight.size === 1 ? [...inFlight][0] : null);
+    if (eventSceneId && inFlight.has(eventSceneId)) {
       setSceneRegenMessage((prev) => ({
         ...prev,
         [eventSceneId]: event.message,
       }));
     }
     if (event.type === "error") {
-      if (activeRegenId) {
+      if (attributedSceneId && inFlight.has(attributedSceneId)) {
         setSceneRegenError((prev) => ({
           ...prev,
-          [activeRegenId]: event.message,
+          [attributedSceneId]: event.message,
         }));
+      } else {
+        setError(event.message);
       }
-      setError(event.message);
     }
     if (
       (event.type === "plan" || event.type === "plan_ready") &&
@@ -950,8 +968,12 @@ export function Generator() {
     setError(null);
     setLiveMessage("");
     setRegenDirection({});
-    regeneratingSceneIdRef.current = null;
-    setRegeneratingSceneId(null);
+    for (const controller of sceneAbortsRef.current.values()) {
+      controller.abort();
+    }
+    sceneAbortsRef.current.clear();
+    regeneratingSceneIdsRef.current = new Set();
+    setRegeneratingSceneIds(new Set());
     setSceneRegenError({});
     setSceneRegenMessage({});
     setVideoVersion({});
@@ -1173,12 +1195,20 @@ export function Generator() {
     }
   }
 
+  function markSceneRegenerating(sceneId: string, active: boolean) {
+    const next = new Set(regeneratingSceneIdsRef.current);
+    if (active) next.add(sceneId);
+    else next.delete(sceneId);
+    regeneratingSceneIdsRef.current = next;
+    setRegeneratingSceneIds(next);
+  }
+
   async function onRegenerateScene(sceneId: string) {
-    if (!jobId || running) return;
-    setRunning(true);
-    regeneratingSceneIdRef.current = sceneId;
-    setRegeneratingSceneId(sceneId);
-    setError(null);
+    // Deliberately not gated on `running`: a scene may be edited while the
+    // pipeline builds other scenes, and while other scenes are being edited.
+    // Only a second edit of *this* scene is refused (the server 409s too).
+    if (!jobId || regeneratingSceneIdsRef.current.has(sceneId)) return;
+    markSceneRegenerating(sceneId, true);
     setSceneRegenError((prev) => {
       const next = { ...prev };
       delete next[sceneId];
@@ -1188,15 +1218,16 @@ export function Generator() {
       ...prev,
       [sceneId]: "Starting regeneration…",
     }));
-    setLiveMessage(`Regenerating ${sceneId}…`);
     setScenes((prev) =>
       prev.map((s) =>
         s.id === sceneId ? { ...s, status: "regenerating" } : s,
       ),
     );
-    abortRef.current?.abort();
+    // A per-scene controller — never touch abortRef, which owns the main
+    // generation stream.
+    sceneAbortsRef.current.get(sceneId)?.abort();
     const controller = new AbortController();
-    abortRef.current = controller;
+    sceneAbortsRef.current.set(sceneId, controller);
 
     const section = editingPlan?.scenes.find((s) => s.id === sceneId);
     try {
@@ -1209,7 +1240,6 @@ export function Generator() {
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         const message = (err as Error).message;
-        setError(message);
         setSceneRegenError((prev) => ({ ...prev, [sceneId]: message }));
         // The stream broke before we could tell whether a clip was ever
         // produced — don't leave the scene stuck on "regenerating…" forever.
@@ -1222,11 +1252,10 @@ export function Generator() {
         );
       }
     } finally {
-      setRunning(false);
-      if (regeneratingSceneIdRef.current === sceneId) {
-        regeneratingSceneIdRef.current = null;
+      markSceneRegenerating(sceneId, false);
+      if (sceneAbortsRef.current.get(sceneId) === controller) {
+        sceneAbortsRef.current.delete(sceneId);
       }
-      setRegeneratingSceneId((current) => (current === sceneId ? null : current));
     }
   }
 
@@ -1884,7 +1913,7 @@ export function Generator() {
 
             <ul className="mt-10 space-y-8">
               {scenes.map((scene, i) => {
-                const isRegeneratingThis = regeneratingSceneId === scene.id;
+                const isRegeneratingThis = regeneratingSceneIds.has(scene.id);
                 const settledStatuses = new Set([
                   "done",
                   "approved",
@@ -1892,11 +1921,13 @@ export function Generator() {
                   "render failed",
                   "regenerate failed",
                 ]);
+                // A finished scene stays editable even while the pipeline is
+                // still building later ones, so this no longer waits for
+                // mode === "result".
                 const canShowRegenControls =
-                  mode === "result" &&
-                  jobId &&
-                  scene.status &&
-                  settledStatuses.has(scene.status);
+                  Boolean(jobId) &&
+                  Boolean(scene.status) &&
+                  settledStatuses.has(scene.status as string);
                 return (
                   <li key={scene.id} className="min-w-0">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
@@ -1976,11 +2007,11 @@ export function Generator() {
                           }
                           placeholder="What should change? e.g. more visual, less text"
                           className="min-w-[12rem] flex-1 border-b border-[var(--line)] bg-transparent px-0 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)] disabled:opacity-50"
-                          disabled={running}
+                          disabled={isRegeneratingThis}
                         />
                         <button
                           type="button"
-                          disabled={running}
+                          disabled={isRegeneratingThis}
                           onClick={() => onRegenerateScene(scene.id)}
                           className="flex items-center gap-1.5 text-sm font-medium text-[var(--accent)] underline-offset-4 hover:underline disabled:opacity-40"
                         >

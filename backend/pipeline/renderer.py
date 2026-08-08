@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -126,11 +127,17 @@ def _render_scene_remote(
 
     log = str(payload.get("log") or "")
     if not payload.get("ok"):
-        return None, None, str(payload.get("error") or log or "Remote render failed")
+        detail = str(payload.get("error") or log or "Remote render failed")
+        # The worker returns only the log tail, which can cut off the reason the
+        # local path already worked out — re-derive it from everything we have.
+        reason = _no_video_reason(f"{log}\n{detail}")
+        if reason != "No mp4 produced.":
+            return None, None, f"{reason}\n{detail}"
+        return None, None, detail
 
     video_b64 = payload.get("video_base64")
     if not video_b64:
-        return None, None, f"Remote render missing video.\n{log[-2000:]}"
+        return None, None, f"{_no_video_reason(log)}\n{log[-2000:]}"
 
     out_dir = Path(work_dir).resolve() / scene_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,6 +154,29 @@ def _render_scene_remote(
         frame_path = _extract_preview_frame(str(video_path), out_dir / "preview.png")
 
     return str(video_path), frame_path, log[-2500:]
+
+
+def _no_video_reason(log: str) -> str:
+    """Explain an mp4-less render in terms the code reviser can act on.
+
+    Manim exits 0 and quietly writes a still PNG when a scene never animates,
+    so the raw log tail is a Python warning that says nothing about the real
+    problem. Without this the revise loop burns its whole budget re-sending
+    "render failed" and the model never learns what to change.
+    """
+    if "Played 0 animations" in log:
+        return (
+            "Manim played 0 animations, so it wrote a still image instead of a "
+            "video. The Scene's construct() never called self.play(...). Rewrite "
+            "construct() so every beat runs a real self.play(...) with a run_time "
+            "— self.add() and self.wait() alone do not produce a video."
+        )
+    if re.search(r"media[/\\]images[/\\]", log) and ".png" in log:
+        return (
+            "Manim produced only a still image, not a video: the scene has no "
+            "animated self.play(...) calls. Add one self.play per beat."
+        )
+    return "No mp4 produced."
 
 
 def _render_scene_local(
@@ -204,7 +234,7 @@ def _render_scene_local(
         if "partial_movie_files" not in str(v)
     ]
     if not videos:
-        return None, None, f"No mp4 produced.\n{log[-2500:]}"
+        return None, None, f"{_no_video_reason(log)}\n{log[-2500:]}"
 
     video_path = str(sorted(videos, key=lambda p: p.stat().st_mtime)[-1])
     frame_path = _extract_preview_frame(video_path, scene_dir / "preview.png")

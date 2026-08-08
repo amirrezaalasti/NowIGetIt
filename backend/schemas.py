@@ -80,6 +80,86 @@ class ContinueRequest(BaseModel):
         return normalize_language(value)
 
 
+class NotationEntry(BaseModel):
+    """One symbol/quantity and the visual role it owns for the whole video."""
+
+    symbol: str
+    meaning: str = ""
+    # The persistent visual identity of this quantity (color, shape, axis, or
+    # position) so the same thing looks the same in every scene.
+    visual_encoding: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_plain_string(cls, data: Any) -> Any:
+        return {"symbol": data} if isinstance(data, str) else data
+
+
+class Relation(BaseModel):
+    """One equation/relationship, plus how it is earned rather than asserted."""
+
+    expression: str
+    reads_as: str = ""
+    why_true: str = ""
+    how_to_show: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_plain_string(cls, data: Any) -> Any:
+        return {"expression": data} if isinstance(data, str) else data
+
+
+class Misconception(BaseModel):
+    belief: str
+    correction: str = ""
+    how_the_visual_prevents_it: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_plain_string(cls, data: Any) -> Any:
+        return {"belief": data} if isinstance(data, str) else data
+
+
+class BlueprintStep(BaseModel):
+    """One rung of the explanation ladder, decided before any scene exists."""
+
+    id: str = ""
+    claim: str
+    why_it_follows: str = ""
+    # Symbols / relations (by name) this step introduces or uses.
+    uses: list[str] = Field(default_factory=list)
+    visual_strategy: str = ""
+    checkpoint: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_plain_string(cls, data: Any) -> Any:
+        return {"claim": data} if isinstance(data, str) else data
+
+
+class TeachingBlueprint(BaseModel):
+    """How to teach the concept — decided BEFORE the storyboard is written.
+
+    The planner turns these steps into scenes and the code generator reads the
+    notation/visual grammar, so the mathematics is introduced in one deliberate
+    order with one consistent visual language instead of being improvised per
+    scene.
+    """
+
+    core_question: str = ""
+    payoff: str = ""
+    prerequisites: list[str] = Field(default_factory=list)
+    running_example: str = ""
+    math_treatment: str = ""
+    notation: list[NotationEntry] = Field(default_factory=list)
+    relations: list[Relation] = Field(default_factory=list)
+    steps: list[BlueprintStep] = Field(default_factory=list)
+    misconceptions: list[Misconception] = Field(default_factory=list)
+    # Invariant rules for the visual language, e.g. "time always runs left→right".
+    visual_grammar: list[str] = Field(default_factory=list)
+    out_of_scope: list[str] = Field(default_factory=list)
+
+
 class AnimationBeat(BaseModel):
     visual_action: str = Field(
         ..., description="What happens on screen during this exact beat"
@@ -106,6 +186,8 @@ class SceneSection(BaseModel):
     visual_device: str = ""
     # Keyword tags used for Manim template retrieval
     style_tags: list[str] = Field(default_factory=list)
+    # Ids of the TeachingBlueprint steps this scene delivers (in order).
+    covers_steps: list[str] = Field(default_factory=list)
 
     # `beats` is the canonical shape, but the UI, every saved scene_plan.json,
     # and section.json on disk all speak the flat `narration` + `animation_beats`
@@ -176,6 +258,8 @@ class ScenePlan(BaseModel):
         default_factory=dict,
         description="Named colors e.g. background, accent, text, highlight",
     )
+    # The teaching plan the scenes were derived from (step 0 of the pipeline).
+    blueprint: Optional[TeachingBlueprint] = None
     scenes: list[SceneSection]
 
 

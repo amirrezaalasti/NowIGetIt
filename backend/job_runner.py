@@ -1,4 +1,16 @@
-"""Process-level job registry so pipelines keep running after SSE clients disconnect."""
+"""Process-level job registry so pipelines keep running after SSE clients disconnect.
+
+Work for one job is split into independently schedulable *tasks*: the main
+``pipeline`` task plus one ``scene:<scene_id>`` task per in-flight scene edit.
+That is what lets a user retouch scene 1 while scene 4 is still generating, and
+retouch scenes 1 and 2 at the same time.
+
+Tasks run concurrently, so anything they share is guarded here:
+  * ``scene_lock``   — one writer at a time per scene folder (code revisions,
+                       renders, published clips).
+  * ``compose_lock`` — one writer at a time for the job's final.mp4.
+  * ``plan_lock``    — read-modify-write of scene_plan.json.
+"""
 
 from __future__ import annotations
 
@@ -7,15 +19,33 @@ import json
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
 from backend import artifacts as store
 
+#: Task key for the whole-job generation pipeline.
+PIPELINE_TASK = "pipeline"
+
 _lock = threading.RLock()
-_threads: dict[str, threading.Thread] = {}
+_threads: dict[tuple[str, str], threading.Thread] = {}
 _errors: dict[str, str] = {}
+_task_errors: dict[tuple[str, str], str] = {}
 _cancelled: set[str] = set()
+
+# Shared-resource locks, created lazily and keyed by resource name.
+_res_locks: dict[str, threading.RLock] = {}
+# job_id → {scene_id: depth} for every scene currently held by a writer.
+_busy_scenes: dict[str, dict[str, int]] = {}
+
+
+class SceneBusyError(RuntimeError):
+    """Raised when a scene is already being generated or edited."""
+
+
+def scene_task_key(scene_id: str) -> str:
+    return f"scene:{scene_id}"
 
 
 def cancel_job(job_id: str) -> None:
@@ -28,15 +58,122 @@ def is_cancelled(job_id: str) -> bool:
         return job_id in _cancelled
 
 
-def is_running(job_id: str) -> bool:
+def is_task_running(job_id: str, task_key: str) -> bool:
     with _lock:
-        t = _threads.get(job_id)
+        t = _threads.get((job_id, task_key))
         return bool(t and t.is_alive())
 
 
+def is_pipeline_running(job_id: str) -> bool:
+    """True only for the whole-job generation pipeline (not scene edits)."""
+    return is_task_running(job_id, PIPELINE_TASK)
+
+
+def is_running(job_id: str) -> bool:
+    """True while *any* task for this job is alive (pipeline or scene edit)."""
+    with _lock:
+        return any(
+            t.is_alive() for (jid, _), t in _threads.items() if jid == job_id
+        )
+
+
+def active_tasks(job_id: str) -> list[str]:
+    with _lock:
+        return sorted(
+            key for (jid, key), t in _threads.items() if jid == job_id and t.is_alive()
+        )
+
+
 def last_error(job_id: str) -> Optional[str]:
+    """Last unhandled error from the job's main pipeline task."""
     with _lock:
         return _errors.get(job_id)
+
+
+def task_error(job_id: str, task_key: str) -> Optional[str]:
+    with _lock:
+        return _task_errors.get((job_id, task_key))
+
+
+# ── Shared-resource locks ────────────────────────────────────────────────────
+
+
+def _resource_lock(name: str) -> threading.RLock:
+    with _lock:
+        existing = _res_locks.get(name)
+        if existing is None:
+            existing = threading.RLock()
+            _res_locks[name] = existing
+        return existing
+
+
+@contextmanager
+def scene_lock(
+    job_id: str,
+    scene_id: str,
+    *,
+    timeout: Optional[float] = None,
+) -> Iterator[None]:
+    """Exclusive writer access to one scene's artifacts.
+
+    Different scenes never contend, so parallel edits stay parallel. Pass a
+    ``timeout`` to fail fast with :class:`SceneBusyError` instead of queueing
+    behind a multi-minute generation.
+    """
+    lock = _resource_lock(f"scene::{job_id}::{scene_id}")
+    acquired = lock.acquire(True, timeout) if timeout is not None else lock.acquire()
+    if not acquired:
+        raise SceneBusyError(
+            f"Scene {scene_id} is already being generated or edited."
+        )
+    with _lock:
+        counts = _busy_scenes.setdefault(job_id, {})
+        counts[scene_id] = counts.get(scene_id, 0) + 1
+    try:
+        yield
+    finally:
+        with _lock:
+            counts = _busy_scenes.get(job_id) or {}
+            remaining = counts.get(scene_id, 1) - 1
+            if remaining > 0:
+                counts[scene_id] = remaining
+            else:
+                counts.pop(scene_id, None)
+            if not counts:
+                _busy_scenes.pop(job_id, None)
+        lock.release()
+
+
+@contextmanager
+def compose_lock(job_id: str) -> Iterator[None]:
+    """Exclusive access to the job's final.mp4 and its ffmpeg scratch files."""
+    lock = _resource_lock(f"compose::{job_id}")
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+@contextmanager
+def plan_lock(job_id: str) -> Iterator[None]:
+    """Exclusive access for read-modify-write cycles on scene_plan.json."""
+    lock = _resource_lock(f"plan::{job_id}")
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def busy_scenes(job_id: str) -> list[str]:
+    with _lock:
+        return sorted((_busy_scenes.get(job_id) or {}).keys())
+
+
+def is_scene_busy(job_id: str, scene_id: str) -> bool:
+    with _lock:
+        return scene_id in (_busy_scenes.get(job_id) or {})
 
 
 def event_count(job_id: str) -> int:
@@ -61,50 +198,72 @@ def read_events(job_id: str) -> list[dict[str, Any]]:
     return events
 
 
-def start_job(job_id: str, target: Callable[[], None]) -> bool:
+def start_task(
+    job_id: str,
+    task_key: str,
+    target: Callable[[], None],
+) -> bool:
     """
-    Start a daemon worker for job_id if none is alive.
-    Returns True if a new thread was started, False if already running.
+    Start a daemon worker for (job_id, task_key) if none is alive.
+    Returns True if a new thread was started, False if that task already runs.
+
+    Tasks with different keys run concurrently — that is how a scene edit
+    proceeds while the main pipeline is still building later scenes.
     """
+    key = (job_id, task_key)
     with _lock:
-        existing = _threads.get(job_id)
+        existing = _threads.get(key)
         if existing and existing.is_alive():
             return False
-        _errors.pop(job_id, None)
-        _cancelled.discard(job_id)
+        _task_errors.pop(key, None)
+        if task_key == PIPELINE_TASK:
+            _errors.pop(job_id, None)
+            # Only a fresh pipeline run clears a cancel: a scene edit starting
+            # mid-cancel must not resurrect the job.
+            _cancelled.discard(job_id)
 
         def wrapper() -> None:
             try:
                 target()
             except Exception as exc:  # noqa: BLE001
                 with _lock:
-                    _errors[job_id] = str(exc)
-                # Persist error so reconnecting clients see it.
-                try:
-                    store.append_event(
-                        job_id,
-                        {
-                            "type": "error",
-                            "message": str(exc),
-                            "data": {"error": str(exc), "job_id": job_id},
-                        },
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+                    _task_errors[key] = str(exc)
+                    if task_key == PIPELINE_TASK:
+                        _errors[job_id] = str(exc)
+                # Persist pipeline errors so reconnecting clients see them.
+                # Scene-edit errors stay on their own stream — appending them
+                # here would terminate every client tailing the job log.
+                if task_key == PIPELINE_TASK:
+                    try:
+                        store.append_event(
+                            job_id,
+                            {
+                                "type": "error",
+                                "message": str(exc),
+                                "data": {"error": str(exc), "job_id": job_id},
+                            },
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
             finally:
                 with _lock:
-                    cur = _threads.get(job_id)
+                    cur = _threads.get(key)
                     if cur is threading.current_thread():
-                        _threads.pop(job_id, None)
+                        _threads.pop(key, None)
 
         thread = threading.Thread(
             target=wrapper,
-            name=f"nowigetit-job-{job_id}",
+            name=f"nowigetit-job-{job_id}-{task_key}",
             daemon=True,
         )
-        _threads[job_id] = thread
+        _threads[key] = thread
         thread.start()
         return True
+
+
+def start_job(job_id: str, target: Callable[[], None]) -> bool:
+    """Start the job's main generation pipeline task."""
+    return start_task(job_id, PIPELINE_TASK, target)
 
 
 def iter_event_tail(
@@ -202,6 +361,7 @@ def job_status(job_id: str) -> dict[str, Any]:
     has_final = (root / "final.mp4").exists()
     has_plan = (root / "scene_plan.json").exists()
     running = is_running(job_id)
+    pipeline_running = is_pipeline_running(job_id)
 
     scenes_root = root / "scenes"
     scene_work = False
@@ -215,7 +375,7 @@ def job_status(job_id: str) -> dict[str, Any]:
 
     if has_result or has_final:
         status = "complete"
-    elif running:
+    elif pipeline_running:
         status = "running"
     elif scene_work:
         status = "interrupted"
@@ -227,7 +387,12 @@ def job_status(job_id: str) -> dict[str, Any]:
     return {
         "job_id": job_id,
         "status": status,
-        "running": running,
+        # `running` stays "is the main pipeline building scenes" so restore
+        # logic doesn't reattach a finished job just because a scene edit runs.
+        "running": pipeline_running,
+        "any_task_running": running,
+        "active_tasks": active_tasks(job_id),
+        "busy_scenes": busy_scenes(job_id),
         "event_count": event_count(job_id),
         "has_result": has_result,
         "has_final_video": has_final,

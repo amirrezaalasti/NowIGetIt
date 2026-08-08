@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -487,13 +490,43 @@ def compose_final_video(
     if len(existing) == 1:
         if _same_file(existing[0], output_path):
             return str(output_path)
-        shutil.copy2(existing[0], output_path)
+        _publish_atomically(existing[0], output_path)
         return str(output_path)
 
-    list_file = output_path.parent / "concat_list.txt"
+    # Scratch files live in a run-private folder: a scene edit re-composing the
+    # final video must not stomp on a concurrent compose's normalized clips,
+    # and the served final.mp4 is only swapped in once it is complete.
+    scratch = Path(tempfile.mkdtemp(prefix="compose_", dir=output_path.parent))
+    staged = scratch / "final.mp4"
+    try:
+        composed = _compose_into(existing, staged, scratch)
+        if not composed:
+            return None
+        _publish_atomically(staged, output_path)
+        return str(output_path) if output_path.exists() else None
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _publish_atomically(src: Path, dest: Path) -> None:
+    """Swap `src` into place at `dest` so readers never see a partial file."""
+    tmp = dest.with_name(f"{dest.stem}.{uuid.uuid4().hex[:8]}.part{dest.suffix}")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _compose_into(
+    existing: list[Path],
+    output_path: Path,
+    scratch: Path,
+) -> Optional[str]:
+    list_file = scratch / "concat_list.txt"
     normalized: list[Path] = []
     for i, src in enumerate(existing):
-        norm = output_path.parent / f"norm_{i:02d}.mp4"
+        norm = scratch / f"norm_{i:02d}.mp4"
         # Ensure every clip has a stereo AAC track for clean concat
         has_audio = _probe_has_audio(src)
         if has_audio:
@@ -590,8 +623,6 @@ def compose_final_video(
     if proc.returncode == 0 and output_path.exists():
         return str(output_path)
 
-    if _same_file(existing[0], output_path):
-        return str(output_path)
     shutil.copy2(existing[0], output_path)
     return str(output_path) if output_path.exists() else None
 
