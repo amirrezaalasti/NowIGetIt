@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import uuid
@@ -27,7 +28,13 @@ from backend.pipeline.compose import (
     mux_scene_audio,
     probe_duration,
 )
-from backend.pipeline.planner import create_scene_plan, revise_scene_plan as _revise_plan_llm
+from backend.pipeline.pedagogy import create_teaching_blueprint
+from backend.pipeline.planner import (
+    AUDIENCE_GUIDANCE,
+    create_scene_plan,
+    revise_scene_plan as _revise_plan_llm,
+    scene_count_range,
+)
 from backend.pipeline.renderer import extract_review_frames, render_scene
 from backend.pipeline.scene_generator import generate_scene_code, revise_scene_code
 from backend.pipeline.storyboard import create_storyboard_frame
@@ -336,16 +343,32 @@ def _mux_scene_vo(
     job_id: str,
     narration: str = "",
 ) -> Optional[str]:
-    """Mux narration + burn-in subtitles (defaults from job settings)."""
+    """Mux narration + burn-in subtitles (defaults from job settings).
+
+    Muxes to a scratch file and swaps it in, so a compose running in parallel
+    (from another scene's edit) can never read a half-written clip.
+    """
     if not _job_include_audio(job_id, fallback=True):
         audio_path = None
-    return mux_scene_audio(
-        video_path,
-        audio_path,
-        output_path,
-        subtitle_text=narration,
-        burn_subtitles=_job_include_subtitles(job_id, fallback=True),
+    output_path = Path(output_path)
+    staged = output_path.with_name(
+        f"{output_path.stem}.{uuid.uuid4().hex[:8]}.staging{output_path.suffix}"
     )
+    try:
+        muxed = mux_scene_audio(
+            video_path,
+            audio_path,
+            staged,
+            subtitle_text=narration,
+            burn_subtitles=_job_include_subtitles(job_id, fallback=True),
+        )
+        if not muxed or not staged.exists() or staged.stat().st_size == 0:
+            return None
+        os.replace(staged, output_path)
+        return str(output_path)
+    finally:
+        staged.unlink(missing_ok=True)
+        staged.with_suffix(".srt").unlink(missing_ok=True)
 
 
 def _job_length_preset(job_id: str, fallback: str = "standard") -> str:
@@ -392,20 +415,90 @@ def _load_plan(job_id: str) -> ScenePlan:
     return ScenePlan.model_validate(plan_data)
 
 
+def _carry_forward_plan_fields(job_id: str, plan: ScenePlan) -> ScenePlan:
+    """Restore fields an editing client omitted rather than deliberately cleared.
+
+    The storyboard editor sends back the scene fields it renders, so a plan that
+    round-trips through it arrives with no blueprint, no recurring_elements, and
+    no covers_steps. Those drive codegen's visual consistency and the teaching
+    each scene owes, so losing them on a title edit quietly degrades every scene
+    generated afterwards.
+    """
+    try:
+        stored = _load_plan(job_id)
+    except Exception:  # noqa: BLE001 — first save, nothing to carry forward
+        return plan
+
+    update: dict[str, Any] = {}
+    if plan.blueprint is None and stored.blueprint is not None:
+        update["blueprint"] = stored.blueprint
+    if not plan.recurring_elements and stored.recurring_elements:
+        update["recurring_elements"] = stored.recurring_elements
+
+    prior_steps = {s.id: s.covers_steps for s in stored.scenes if s.covers_steps}
+    if prior_steps:
+        scenes = [
+            scene
+            if scene.covers_steps or scene.id not in prior_steps
+            else scene.model_copy(update={"covers_steps": prior_steps[scene.id]})
+            for scene in plan.scenes
+        ]
+        if any(a is not b for a, b in zip(scenes, plan.scenes)):
+            update["scenes"] = scenes
+    return plan.model_copy(update=update) if update else plan
+
+
 def update_scene_plan(job_id: str, plan: ScenePlan) -> ScenePlan:
     """Persist an edited plan and per-scene section.json files."""
-    store.save_scene_plan(job_id, plan.model_dump())
-    for scene in plan.scenes:
-        store.save_scene_section(job_id, scene.id, scene.model_dump())
-    # Keep meta title in sync when possible
-    try:
-        meta_path = store.job_dir(job_id) / "meta.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            meta["title"] = plan.title
-            meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    except Exception:  # noqa: BLE001
-        pass
+    with job_runner.plan_lock(job_id):
+        plan = _carry_forward_plan_fields(job_id, plan)
+        store.save_scene_plan(job_id, plan.model_dump())
+        for scene in plan.scenes:
+            store.save_scene_section(job_id, scene.id, scene.model_dump())
+        # Keep meta title in sync when possible
+        try:
+            meta_path = store.job_dir(job_id) / "meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta["title"] = plan.title
+                meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+    return plan
+
+
+def update_scene_section(
+    job_id: str,
+    scene_id: str,
+    section: SceneSection,
+) -> ScenePlan:
+    """Replace one scene in the saved plan, leaving every other scene alone.
+
+    Scene edits run concurrently with each other and with the main pipeline, so
+    a read-modify-write of the whole plan would silently revert a sibling
+    scene's edit. Only the named scene is touched, and the whole cycle happens
+    under the plan lock.
+    """
+    with job_runner.plan_lock(job_id):
+        plan = _load_plan(job_id)
+        scenes = [s for s in plan.scenes]
+        replaced = False
+        for i, existing in enumerate(scenes):
+            if existing.id == scene_id:
+                # The editor doesn't render covers_steps; an edit that omits it
+                # is not a request to detach the scene from the teaching plan.
+                if not section.covers_steps and existing.covers_steps:
+                    section = section.model_copy(
+                        update={"covers_steps": existing.covers_steps}
+                    )
+                scenes[i] = section
+                replaced = True
+                break
+        if not replaced:
+            scenes.append(section)
+        plan = plan.model_copy(update={"scenes": scenes})
+        store.save_scene_plan(job_id, plan.model_dump())
+        store.save_scene_section(job_id, scene_id, section.model_dump())
     return plan
 
 
@@ -1269,27 +1362,33 @@ def _compose_and_finish(
     for art in artifacts:
         if not art.video_path:
             continue
-        vo_path = store.scene_dir(job_id, art.scene_id) / "scene_vo.mp4"
-        # Prefer an already-muxed VO clip so we don't burn subtitles twice.
-        if vo_path.exists() and vo_path.stat().st_size > 0:
-            muxed_clips.append(str(vo_path))
-            art.video_url = store.publish_scene_video(job_id, art.scene_id, str(vo_path))
-            continue
-        muxed = _mux_scene_vo(
-            art.video_path,
-            art.audio_path,
-            vo_path,
-            job_id=job_id,
-            narration=art.narration,
-        )
-        if muxed:
-            muxed_clips.append(muxed)
-            art.video_url = store.publish_scene_video(job_id, art.scene_id, muxed)
+        # Take each scene's lock in turn so a user edit that lands mid-compose
+        # is either fully included or fully excluded — never half-written.
+        with job_runner.scene_lock(job_id, art.scene_id):
+            vo_path = store.scene_dir(job_id, art.scene_id) / "scene_vo.mp4"
+            # Prefer an already-muxed VO clip so we don't burn subtitles twice.
+            if vo_path.exists() and vo_path.stat().st_size > 0:
+                muxed_clips.append(str(vo_path))
+                art.video_url = store.publish_scene_video(
+                    job_id, art.scene_id, str(vo_path)
+                )
+                continue
+            muxed = _mux_scene_vo(
+                art.video_path,
+                art.audio_path,
+                vo_path,
+                job_id=job_id,
+                narration=art.narration,
+            )
+            if muxed:
+                muxed_clips.append(muxed)
+                art.video_url = store.publish_scene_video(job_id, art.scene_id, muxed)
 
-    final_path = compose_final_video(
-        muxed_clips,
-        store.job_dir(job_id) / "final.mp4",
-    )
+    with job_runner.compose_lock(job_id):
+        final_path = compose_final_video(
+            muxed_clips,
+            store.job_dir(job_id) / "final.mp4",
+        )
     final_url = f"/api/jobs/{job_id}/file/final.mp4" if final_path else None
 
     result = GenerateResult(
@@ -1563,21 +1662,24 @@ def _run_scenes_loop(
     # predecessor really produced.
     for index, scene in to_run:
         _check_cancel(job_id)
-        artifact = _process_one_scene(
-            client=client,
-            job_id=job_id,
-            work_dir=work_dir,
-            plan=plan,
-            scene=scene,
-            index=index,
-            total=total,
-            previous_context=_plan_previous_context(plan, index, results),
-            next_context=_plan_next_context(plan, index),
-            resolution=resolution,
-            skip_render=skip_render,
-            on_event=on_event,
-            tts_voice=voice,
-        )
+        # Claim the scene so a user edit on *this* scene is rejected while it is
+        # being built. Scenes already finished stay unlocked and editable.
+        with job_runner.scene_lock(job_id, scene.id):
+            artifact = _process_one_scene(
+                client=client,
+                job_id=job_id,
+                work_dir=work_dir,
+                plan=plan,
+                scene=scene,
+                index=index,
+                total=total,
+                previous_context=_plan_previous_context(plan, index, results),
+                next_context=_plan_next_context(plan, index),
+                resolution=resolution,
+                skip_render=skip_render,
+                on_event=on_event,
+                tts_voice=voice,
+            )
         results[index] = artifact
         _flush_client(client)
 
@@ -1664,8 +1766,8 @@ def run_pipeline(
     _emit(
         on_event,
         PipelineEventType.status,
-        f"Planning scenes from prompt… (job {job_id})",
-        data={"job_id": job_id, "step": "planning.start"},
+        f"Working out how to explain this… (job {job_id})",
+        data={"job_id": job_id, "step": "blueprint.start"},
         job_id=job_id,
     )
 
@@ -1678,6 +1780,61 @@ def run_pipeline(
             job_id=job_id,
         )
 
+    # Step 0 — decide the teaching itself (question, running example, notation and
+    # its visual encoding, the order the relations are earned) before any scene
+    # exists. Planning straight to scenes improvises those choices one scene at a
+    # time, which is what makes a video look right and still explain nothing.
+    min_scenes, max_scenes = scene_count_range(
+        request.length_preset, request.scene_pacing
+    )
+    try:
+        blueprint = create_teaching_blueprint(
+            client,
+            request.prompt,
+            audience=request.audience,
+            audience_guidance=AUDIENCE_GUIDANCE.get(
+                request.audience, AUDIENCE_GUIDANCE["general"]
+            ),
+            language=request.language,
+            # One step per scene is the target: the planner may merge two small
+            # steps or split a big one, but a blueprint far off the scene budget
+            # forces it into an awkward staging.
+            min_steps=max(3, min_scenes),
+            max_steps=max(4, max_scenes),
+            on_progress=_plan_progress,
+        )
+    except Exception as e:  # noqa: BLE001
+        # The planner still teaches on its own — a video planned without the
+        # blueprint beats no video, so this degrades rather than fails.
+        blueprint = None
+        _emit(
+            on_event,
+            PipelineEventType.status,
+            "Could not build a teaching plan — planning scenes directly.",
+            data={"job_id": job_id, "step": "blueprint.failed", "detail": str(e)[:400]},
+            job_id=job_id,
+        )
+    _flush_usage()
+    _emit(
+        on_event,
+        PipelineEventType.status,
+        (
+            f"Storyboarding {len(blueprint.steps)} teaching steps into scenes…"
+            if blueprint
+            else "Planning scenes from prompt…"
+        ),
+        data={
+            "job_id": job_id,
+            "step": "planning.start",
+            "step_count": len(blueprint.steps) if blueprint else 0,
+            "core_question": blueprint.core_question if blueprint else None,
+            "teaching_steps": (
+                [f"{s.id}: {s.claim}" for s in blueprint.steps] if blueprint else None
+            ),
+        },
+        job_id=job_id,
+    )
+
     plan = create_scene_plan(
         client,
         request.prompt,
@@ -1685,6 +1842,7 @@ def run_pipeline(
         scene_pacing=request.scene_pacing,
         audience=request.audience,
         language=request.language,
+        blueprint=blueprint,
         on_progress=_plan_progress,
     )
     plan_path = store.save_scene_plan(job_id, plan.model_dump())
@@ -1815,6 +1973,44 @@ def continue_pipeline(
     )
 
 
+def _recompose_final(
+    job_id: str,
+    plan: ScenePlan,
+    *,
+    on_event: Optional[EventCallback] = None,
+) -> Optional[str]:
+    """Restitch final.mp4 from whatever scene clips are on disk right now.
+
+    Called after a single-scene edit. Skipped while the main pipeline is still
+    building scenes: it would stitch a half-finished video, and the pipeline
+    composes the real one from the same clips when it finishes anyway.
+    """
+    if job_runner.is_pipeline_running(job_id):
+        _emit(
+            on_event,
+            PipelineEventType.status,
+            "Scene updated — the full video will refresh once generation finishes.",
+            data={"job_id": job_id, "final_deferred": True},
+        )
+        return None
+
+    with job_runner.compose_lock(job_id):
+        muxed_clips: list[str] = []
+        for s in plan.scenes:
+            # A sibling scene mid-edit still contributes its current clip —
+            # scene clips are swapped in atomically, so this reads either the
+            # old or the new one, and that editor recomposes when it lands.
+            cand = store.scene_dir(job_id, s.id) / "scene_vo.mp4"
+            if not cand.exists():
+                cand = store.scene_dir(job_id, s.id) / "scene.mp4"
+            if cand.exists():
+                muxed_clips.append(str(cand))
+        if not muxed_clips:
+            return None
+        compose_final_video(muxed_clips, store.job_dir(job_id) / "final.mp4")
+    return f"/api/jobs/{job_id}/file/final.mp4"
+
+
 def regenerate_scene(
     job_id: str,
     scene_id: str,
@@ -1853,19 +2049,9 @@ def regenerate_scene(
     else:
         scene = scene.model_copy(update={"id": scene_id})
 
-    # Keep plan in sync if section was edited
-    new_scenes = []
-    found = False
-    for s in plan.scenes:
-        if s.id == scene_id:
-            new_scenes.append(scene)
-            found = True
-        else:
-            new_scenes.append(s)
-    if not found:
-        new_scenes.append(scene)
-    plan = plan.model_copy(update={"scenes": new_scenes})
-    update_scene_plan(job_id, plan)
+    # Keep the plan in sync if the section was edited — scene-scoped so a
+    # sibling scene being edited in parallel keeps its own changes.
+    plan = update_scene_section(job_id, scene_id, scene)
 
     resolution = _job_resolution(job_id)
     prev_parts = [
@@ -1875,49 +2061,39 @@ def regenerate_scene(
         (i for i, s in enumerate(plan.scenes) if s.id == scene_id), 0
     )
 
-    artifact = _process_one_scene(
-        client=client,
-        job_id=job_id,
-        work_dir=store.job_dir(job_id),
-        plan=plan,
-        scene=scene,
-        index=index,
-        total=len(plan.scenes),
-        previous_context="\n".join(prev_parts),
-        next_context=_plan_next_context(plan, index),
-        resolution=resolution,
-        skip_render=request.skip_render,
-        on_event=on_event,
-        creative_direction=request.direction,
-        tts_voice=_job_tts_voice(job_id),
-        skip_vlm_review=True,
-    )
-
-    # Mux + refresh final if we have video
-    video_url = artifact.video_url
-    if artifact.video_path:
-        muxed = _mux_scene_vo(
-            artifact.video_path,
-            artifact.audio_path,
-            store.scene_dir(job_id, scene_id) / "scene_vo.mp4",
+    with job_runner.scene_lock(job_id, scene_id):
+        artifact = _process_one_scene(
+            client=client,
             job_id=job_id,
-            narration=artifact.narration,
+            work_dir=store.job_dir(job_id),
+            plan=plan,
+            scene=scene,
+            index=index,
+            total=len(plan.scenes),
+            previous_context="\n".join(prev_parts),
+            next_context=_plan_next_context(plan, index),
+            resolution=resolution,
+            skip_render=request.skip_render,
+            on_event=on_event,
+            creative_direction=request.direction,
+            tts_voice=_job_tts_voice(job_id),
+            skip_vlm_review=True,
         )
-        if muxed:
-            video_url = store.publish_scene_video(job_id, scene_id, muxed)
 
-    # Recompose final from all available scene clips
-    muxed_clips: list[str] = []
-    for s in plan.scenes:
-        cand = store.scene_dir(job_id, s.id) / "scene_vo.mp4"
-        if not cand.exists():
-            cand = store.scene_dir(job_id, s.id) / "scene.mp4"
-        if cand.exists():
-            muxed_clips.append(str(cand))
-    final_url = None
-    if muxed_clips:
-        compose_final_video(muxed_clips, store.job_dir(job_id) / "final.mp4")
-        final_url = f"/api/jobs/{job_id}/file/final.mp4"
+        # Mux + refresh final if we have video
+        video_url = artifact.video_url
+        if artifact.video_path:
+            muxed = _mux_scene_vo(
+                artifact.video_path,
+                artifact.audio_path,
+                store.scene_dir(job_id, scene_id) / "scene_vo.mp4",
+                job_id=job_id,
+                narration=artifact.narration,
+            )
+            if muxed:
+                video_url = store.publish_scene_video(job_id, scene_id, muxed)
+
+    final_url = _recompose_final(job_id, plan, on_event=on_event)
 
     if isinstance(owner_id, str) and owner_id:
         db.flush_client_usage(
@@ -1953,19 +2129,45 @@ def retouch_scene(
     timestamp: Optional[float] = None,
     on_event: Optional[Any] = None,
 ) -> dict[str, Any]:
-    """Retouch/revise ONLY a specific scene based on human feedback."""
+    """Retouch/revise ONLY a specific scene based on human feedback.
+
+    Holds only *this* scene's lock, so retouching scene 1 runs happily beside a
+    retouch of scene 2 or the pipeline still building scene 4.
+    """
+    with job_runner.scene_lock(job_id, scene_id):
+        return _retouch_scene_locked(
+            job_id,
+            scene_id,
+            human_instructions,
+            timestamp=timestamp,
+            on_event=on_event,
+        )
+
+
+def _retouch_scene_locked(
+    job_id: str,
+    scene_id: str,
+    human_instructions: str,
+    *,
+    timestamp: Optional[float] = None,
+    on_event: Optional[Any] = None,
+) -> dict[str, Any]:
     settings = get_settings()
     client = OpenRouterClient(settings=settings)
 
     def emit(msg: str, data: Optional[dict] = None) -> None:
         if on_event:
+            # Every event carries scene_id so a UI watching several concurrent
+            # edits can route each line to the right scene.
             on_event(
                 PipelineEvent(
-                    type=PipelineEventType.status, message=msg, data=data or {}
+                    type=PipelineEventType.status,
+                    message=msg,
+                    data={"scene_id": scene_id, "job_id": job_id, **(data or {})},
                 )
             )
 
-    emit(f"Loading scene data for '{scene_id}'…", {"scene_id": scene_id, "job_id": job_id})
+    emit(f"Loading scene data for '{scene_id}'…")
 
     job_data = store.load_job(job_id)
     meta = job_data.get("meta") or {}
@@ -2182,15 +2384,21 @@ def retouch_scene(
     return result
 
 
-def iter_retouch_scene(
+def _iter_scene_task(
     job_id: str,
     scene_id: str,
-    human_instructions: str,
-    timestamp: Optional[float] = None,
+    run: Callable[[EventCallback], None],
+    *,
+    label: str,
+    timeout_seconds: float,
 ) -> Iterator[str]:
-    """SSE stream of retouch progress events for a single scene."""
+    """Run one scene edit on a tracked background task and stream its events.
+
+    Each scene gets its own task key, so edits to different scenes run in
+    parallel while a second edit of the *same* scene is refused instead of
+    racing the first one's code revisions and renders.
+    """
     from queue import Empty, Queue
-    from threading import Thread
 
     q: Queue[Optional[PipelineEvent]] = Queue()
 
@@ -2199,25 +2407,48 @@ def iter_retouch_scene(
 
     def worker() -> None:
         try:
-            retouch_scene(
-                job_id,
-                scene_id,
-                human_instructions,
-                timestamp=timestamp,
-                on_event=on_event,
+            run(on_event)
+        except job_runner.SceneBusyError as exc:
+            q.put(
+                PipelineEvent(
+                    type=PipelineEventType.error,
+                    message=str(exc),
+                    data={"error": "scene_busy", "scene_id": scene_id},
+                )
+            )
+        except JobCancelledError as exc:
+            q.put(
+                PipelineEvent(
+                    type=PipelineEventType.error,
+                    message=str(exc),
+                    data={"error": "cancelled", "scene_id": scene_id},
+                )
             )
         except Exception as exc:  # noqa: BLE001
             q.put(
                 PipelineEvent(
                     type=PipelineEventType.error,
                     message=str(exc),
-                    data={"error": str(exc)},
+                    data={"error": str(exc), "scene_id": scene_id},
                 )
             )
         finally:
             q.put(None)
 
-    Thread(target=worker, daemon=True).start()
+    started = job_runner.start_task(job_id, job_runner.scene_task_key(scene_id), worker)
+    if not started:
+        yield _sse(
+            {
+                "type": PipelineEventType.error.value,
+                "message": (
+                    f"Scene {scene_id} is already being edited — wait for that "
+                    "change to finish before starting another."
+                ),
+                "data": {"error": "scene_busy", "scene_id": scene_id, "job_id": job_id},
+            }
+        )
+        return
+
     # Short queue waits + SSE comments so Starlette's iterate_in_threadpool
     # releases the worker between polls (long .get() timeouts wedge the API).
     waited = 0.0
@@ -2226,8 +2457,14 @@ def iter_retouch_scene(
             item = q.get(timeout=0.35)
         except Empty:
             waited += 0.35
-            if waited >= 300:
-                yield _sse({"type": "error", "message": "Retouch timed out", "data": None})
+            if waited >= timeout_seconds:
+                yield _sse(
+                    {
+                        "type": PipelineEventType.error.value,
+                        "message": f"{label} timed out",
+                        "data": {"scene_id": scene_id, "job_id": job_id},
+                    }
+                )
                 break
             yield ":\n\n"
             continue
@@ -2235,6 +2472,32 @@ def iter_retouch_scene(
         if item is None:
             break
         yield _sse(item.model_dump())
+
+
+def iter_retouch_scene(
+    job_id: str,
+    scene_id: str,
+    human_instructions: str,
+    timestamp: Optional[float] = None,
+) -> Iterator[str]:
+    """SSE stream of retouch progress events for a single scene."""
+
+    def run(on_event: EventCallback) -> None:
+        retouch_scene(
+            job_id,
+            scene_id,
+            human_instructions,
+            timestamp=timestamp,
+            on_event=on_event,
+        )
+
+    yield from _iter_scene_task(
+        job_id,
+        scene_id,
+        run,
+        label="Retouch",
+        timeout_seconds=300,
+    )
 
 
 def iter_pipeline_events(
@@ -2395,56 +2658,16 @@ def iter_regenerate_scene(
     scene_id: str,
     request: Optional[RegenerateSceneRequest] = None,
 ) -> Iterator[str]:
-    from queue import Empty, Queue
-    from threading import Thread
+    def run(on_event: EventCallback) -> None:
+        regenerate_scene(job_id, scene_id, request, on_event=on_event)
 
-    q: Queue[Optional[PipelineEvent]] = Queue()
-
-    def on_event(event: PipelineEvent) -> None:
-        q.put(event)
-
-    def worker() -> None:
-        try:
-            regenerate_scene(
-                job_id, scene_id, request, on_event=on_event
-            )
-        except JobCancelledError as exc:
-            q.put(
-                PipelineEvent(
-                    type=PipelineEventType.error,
-                    message=str(exc),
-                    data={"error": "cancelled"},
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            q.put(
-                PipelineEvent(
-                    type=PipelineEventType.error,
-                    message=str(exc),
-                    data={"error": str(exc)},
-                )
-            )
-        finally:
-            q.put(None)
-
-    Thread(target=worker, daemon=True).start()
-    waited = 0.0
-    while True:
-        try:
-            item = q.get(timeout=0.35)
-        except Empty:
-            waited += 0.35
-            if waited >= 400:
-                yield _sse(
-                    {"type": "error", "message": "Regenerate timed out", "data": None}
-                )
-                break
-            yield ":\n\n"
-            continue
-        waited = 0.0
-        if item is None:
-            break
-        yield _sse(item.model_dump())
+    yield from _iter_scene_task(
+        job_id,
+        scene_id,
+        run,
+        label="Regenerate",
+        timeout_seconds=400,
+    )
 
 
 async def aiter_job_event_stream(job_id: str, *, after: int = 0) -> AsyncIterator[str]:
@@ -2467,8 +2690,6 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
     scenes = job_data.get("scenes") or []
 
     sdir = store.scene_dir(job_id, scene_id)
-    job_dir = store.job_dir(job_id)
-
     scene_video = sdir / "scene.mp4"
     if not scene_video.exists():
         return {
@@ -2484,9 +2705,6 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
             ),
         }
 
-    audio_p = _scene_audio_file(sdir)
-    audio_str = str(audio_p) if audio_p is not None else None
-    muxed_path = sdir / "scene_vo.mp4"
     narration = ""
     for s in scenes:
         if s.get("scene_id") == scene_id:
@@ -2495,28 +2713,37 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
             if not narration and isinstance(section, dict):
                 narration = str(section.get("narration") or "")
             break
-    muxed = _mux_scene_vo(
-        str(scene_video),
-        audio_str,
-        muxed_path,
-        job_id=job_id,
-        narration=narration,
-    )
 
-    muxed_clips: list[str] = []
-    for s in scenes:
-        sid = s["scene_id"]
-        candidate = sdir.parent / sid / "scene_vo.mp4"
-        if not candidate.exists():
-            candidate = sdir.parent / sid / "scene.mp4"
-        if candidate.exists():
-            muxed_clips.append(str(candidate))
+    # Mux under this scene's lock only; the final stitch happens after it is
+    # released so approvals of two different scenes never deadlock on each other.
+    with job_runner.scene_lock(job_id, scene_id):
+        audio_p = _scene_audio_file(sdir)
+        muxed = _mux_scene_vo(
+            str(scene_video),
+            str(audio_p) if audio_p is not None else None,
+            sdir / "scene_vo.mp4",
+            job_id=job_id,
+            narration=narration,
+        )
 
     final_url = None
-    if muxed_clips:
-        final_out = job_dir / "final.mp4"
-        compose_final_video(muxed_clips, final_out)
-        final_url = f"/api/jobs/{job_id}/file/final.mp4"
+    if job_runner.is_pipeline_running(job_id):
+        # Generation is still producing later scenes — it composes the final
+        # video itself when it finishes, and this scene's clip is already in.
+        pass
+    else:
+        with job_runner.compose_lock(job_id):
+            muxed_clips: list[str] = []
+            for s in scenes:
+                sid = s["scene_id"]
+                candidate = sdir.parent / sid / "scene_vo.mp4"
+                if not candidate.exists():
+                    candidate = sdir.parent / sid / "scene.mp4"
+                if candidate.exists():
+                    muxed_clips.append(str(candidate))
+            if muxed_clips:
+                compose_final_video(muxed_clips, store.job_dir(job_id) / "final.mp4")
+                final_url = f"/api/jobs/{job_id}/file/final.mp4"
 
     scene_video_url = (
         f"/api/jobs/{job_id}/file/scenes/{scene_id}/scene_vo.mp4"

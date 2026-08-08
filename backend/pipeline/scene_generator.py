@@ -13,6 +13,7 @@ from backend.pipeline.beat_timing import (
     format_beat_timeline,
     narration_is_beat_aligned,
 )
+from backend.pipeline.pedagogy import format_blueprint_for_codegen
 from backend.pipeline.templates import format_templates_for_prompt, retrieve_templates
 from backend.schemas import ScenePlan, SceneSection
 
@@ -165,6 +166,23 @@ def generate_scene_code(
         if recurring
         else "  (none specified — still reuse the palette + visual_identity consistently)"
     )
+    # The teaching plan this scene was staged from: what it must actually leave the
+    # learner able to do, and the notation/visual grammar shared with every other
+    # scene. Without it the coder re-invents an encoding per scene.
+    teaching_block = format_blueprint_for_codegen(
+        plan.blueprint, covers_steps=scene.covers_steps
+    )
+    teaching_section = (
+        f"""
+TEACHING PLAN — this scene is one rung of a single explanation. Honour these
+encodings exactly: they are what makes the video one system instead of a set of
+unrelated clips, and the learner is tracking them from scene to scene.
+
+{teaching_block}
+"""
+        if teaching_block
+        else ""
+    )
 
     user = f"""Video title: {plan.title}
 Concept: {plan.concept_summary}
@@ -186,7 +204,7 @@ Visual device: {scene.visual_device or "(unspecified)"}
 Style tags: {", ".join(scene.style_tags) or "(none)"}
 Visual description: {scene.visual_description}
 Camera notes: {scene.camera_notes}
-
+{teaching_section}
 BEAT TIMELINE — the voiceover audio is ALREADY RECORDED and fixed at {duration:.1f}s.
 These timecodes are what the learner will actually hear. Work through the beats in
 this order and spend each beat's budget inside its own window, so every animation is
@@ -237,24 +255,34 @@ Return one complete runnable Manim Community Scene file.
     )
     code = clean_manim_code(raw)
     ok, err = validate_manim_code(code)
-    if ok:
-        return _fix_filler_motion(
+    # Repair before handing off: shipping code we already know is invalid just
+    # moves the failure into the render loop, which then spends its budget
+    # re-reporting "render failed" instead of fixing anything.
+    for _ in range(2):
+        if ok:
+            break
+        code = revise_scene_code(
             client,
             code=code,
             scene=scene,
-            duration=duration,
+            revision_instructions=(
+                f"The previous output was invalid ({err}). "
+                "Rewrite a complete, syntactically valid Manim Community Scene "
+                "with a Scene subclass whose construct() animates every beat "
+                "with self.play(...)."
+            ),
+            target_duration_seconds=duration,
+            surgical=False,
             language=lang,
         )
-    return revise_scene_code(
+        ok, err = validate_manim_code(code)
+    if not ok:
+        return code
+    return _fix_filler_motion(
         client,
         code=code,
         scene=scene,
-        revision_instructions=(
-            f"The previous output was invalid ({err}). "
-            "Rewrite a complete, syntactically valid Manim Community Scene."
-        ),
-        target_duration_seconds=duration,
-        surgical=False,
+        duration=duration,
         language=lang,
     )
 
@@ -350,17 +378,49 @@ Current code (base your edits on this — keep what already works):
 {code}
 ```
 """
-    raw = client.chat(
-        system=MANIM_SYSTEM
+    system = (
+        MANIM_SYSTEM
         + "\nWhen revising, output the FULL Python file. Never output checklists or rule audits."
         + "\nSurgical priority: (1) pull off-frame content back with arrange + move_to(ORIGIN),"
         + " (2) fix overlaps by FadeOut prior labels / next_to,"
         + " (3) fix cutoffs with smaller font or two-line Text — never hide/truncate glyphs,"
         + " (4) remove only decorative filler shapes."
-        + " Keep the core diagram visible in the final hold.",
-        user=user,
-        temperature=0.12,
-        max_tokens=8192,
-        model=client.manim_model,
+        + " Keep the core diagram visible in the final hold."
     )
-    return clean_manim_code(raw)
+    revised = clean_manim_code(
+        client.chat(
+            system=system,
+            user=user,
+            temperature=0.12,
+            max_tokens=8192,
+            model=client.manim_model,
+        )
+    )
+
+    # A revision that answers with a fragment (a few self.play lines, no class or
+    # construct) renders as a syntax error, and the caller's loop then reports
+    # "render failed" and asks again — burning its whole budget without ever
+    # telling the model what was actually wrong. Catch it here, once, for every
+    # call site.
+    ok, err = validate_manim_code(revised)
+    if ok:
+        return revised
+    repaired = clean_manim_code(
+        client.chat(
+            system=system,
+            user=(
+                user
+                + f"\n\nYour previous answer was not a usable file ({err}). You "
+                "returned a fragment or invalid Python. Return the COMPLETE file "
+                "again from the first import to the last line: the imports, the "
+                "full `class ...(Scene):` and its entire `construct(self)` body "
+                "with every self.play(...) call. Output nothing but Python."
+            ),
+            temperature=0.05,
+            max_tokens=8192,
+            model=client.manim_model,
+        )
+    )
+    repaired_ok, _ = validate_manim_code(repaired)
+    # Neither is valid — hand back the one the caller can still diff against.
+    return repaired if repaired_ok else revised

@@ -213,6 +213,62 @@ Mobject.to_edge = _nig_safe_to_edge
 # render and report it back through the log the orchestrator already collects.
 # Reporting only — never mutate the scene or fail the render.
 
+_TEXT_MOTION_MARKER = "# _NOWIGETIT_TEXT_MOTION_FIX"
+_TEXT_MOTION_END_MARKER = "# _NOWIGETIT_TEXT_MOTION_FIX_END"
+
+# Transform between two Text mobjects interpolates glyph OUTLINES: the letters
+# visibly melt into other letters, and Text→shape turns words into blobs. It
+# reads as a rendering artefact rather than an explanation. Manim cannot know
+# the intent statically, but at runtime the operand types are right there, so
+# swap in a crossfade whenever text is involved.
+_TEXT_MOTION_FIX = f'''{_TEXT_MOTION_MARKER}
+_NIG_Transform = Transform
+_NIG_ReplacementTransform = ReplacementTransform
+_NIG_TransformMatchingShapes = TransformMatchingShapes
+
+
+def _nig_texty(mob):
+    try:
+        name = type(mob).__name__
+    except Exception:
+        return False
+    if name in ("Text", "MarkupText", "Paragraph"):
+        return True
+    subs = [s for s in getattr(mob, "submobjects", []) or [] if s is not None]
+    if name in ("VGroup", "Group") and subs:
+        return all(_nig_texty(s) for s in subs)
+    return False
+
+
+def _nig_crossfade(original, mobject, target, args, kwargs):
+    """Crossfade when either side is text; otherwise keep the real morph."""
+    try:
+        if target is not None and (_nig_texty(mobject) or _nig_texty(target)):
+            return FadeTransform(mobject, target, **kwargs)
+    except Exception:
+        pass
+    if target is None:
+        return original(mobject, *args, **kwargs)
+    return original(mobject, target, *args, **kwargs)
+
+
+def Transform(mobject, target_mobject=None, *args, **kwargs):
+    return _nig_crossfade(_NIG_Transform, mobject, target_mobject, args, kwargs)
+
+
+def ReplacementTransform(mobject, target_mobject=None, *args, **kwargs):
+    return _nig_crossfade(
+        _NIG_ReplacementTransform, mobject, target_mobject, args, kwargs
+    )
+
+
+def TransformMatchingShapes(mobject, target_mobject=None, *args, **kwargs):
+    return _nig_crossfade(
+        _NIG_TransformMatchingShapes, mobject, target_mobject, args, kwargs
+    )
+{_TEXT_MOTION_END_MARKER}
+'''
+
 _LAYOUT_GUARD_MARKER = "# _NOWIGETIT_LAYOUT_GUARD"
 _LAYOUT_GUARD_END_MARKER = "# _NOWIGETIT_LAYOUT_GUARD_END"
 _LAYOUT_REPORT_PREFIX = "_NOWIGETIT_LAYOUT_REPORT "
@@ -492,6 +548,7 @@ def _strip_text_kerning_shim(code: str) -> str:
     for start, end in _TEXT_LAYOUT_LEGACY_MARKERS:
         code = _strip_marked_block(code, start, end)
     code = _strip_marked_block(code, _LAYOUT_GUARD_MARKER, _LAYOUT_GUARD_END_MARKER)
+    code = _strip_marked_block(code, _TEXT_MOTION_MARKER, _TEXT_MOTION_END_MARKER)
     code = _strip_marked_block(code, _TEXT_LAYOUT_MARKER, _TEXT_LAYOUT_END_MARKER)
     return _strip_marked_block(code, _TEXT_KERNING_MARKER, _TEXT_KERNING_END_MARKER)
 
@@ -508,6 +565,8 @@ def _inject_text_kerning_shim(code: str) -> str:
         _TEXT_KERNING_SHIM.strip()
         + "\n"
         + _TEXT_LAYOUT_FIX.strip()
+        + "\n"
+        + _TEXT_MOTION_FIX.strip()
         + "\n"
         + _LAYOUT_GUARD.strip()
         + "\n"
@@ -652,8 +711,17 @@ _TIMING_COMMENT_RE = re.compile(
 
 
 def scene_body(code: str) -> str:
-    """Scene source with the injected Text/layout shims stripped off."""
-    for marker in (_TEXT_LAYOUT_END_MARKER, _TEXT_KERNING_END_MARKER):
+    """Scene source with the injected Text/layout shims stripped off.
+
+    Ordered outermost-last: the guard is injected after the Text shims, so its
+    end marker has to be tried first or the guard's own source leaks into the
+    body and gets linted and fingerprinted as if the model had written it.
+    """
+    for marker in (
+        _LAYOUT_GUARD_END_MARKER,
+        _TEXT_LAYOUT_END_MARKER,
+        _TEXT_KERNING_END_MARKER,
+    ):
         idx = code.find(marker)
         if idx >= 0:
             return code[idx + len(marker) :]

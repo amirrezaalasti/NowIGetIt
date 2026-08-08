@@ -102,6 +102,26 @@ def _require_job_owner(job_id: str, user_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
 
 
+def _require_scene_free(job_id: str, scene_id: str) -> None:
+    """Reject an edit only for the one scene that is mid-generation.
+
+    Every other scene stays editable, including while the pipeline builds the
+    rest of the video and while sibling scenes are being edited.
+    """
+    if job_runner.is_scene_busy(job_id, scene_id):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SCENE_BUSY",
+                "message": (
+                    f"Scene {scene_id} is being generated or edited right now. "
+                    "Wait for it to finish, then try again."
+                ),
+                "scene_id": scene_id,
+            },
+        )
+
+
 @app.get("/api/health")
 def health() -> dict:
     settings = get_settings()
@@ -447,6 +467,7 @@ def regenerate_scene_stream(
 ) -> StreamingResponse:
     """SSE: regenerate one scene from its plan section (optionally with direction)."""
     _require_job_owner(job_id, user.id)
+    _require_scene_free(job_id, scene_id)
     try:
         db.assert_within_quotas(user.id, need_tokens=8_000)
     except db.QuotaExceededError as exc:
@@ -501,6 +522,7 @@ def retouch_scene_stream(
 ) -> StreamingResponse:
     """SSE stream: AI reads the comment, revises code, and re-renders the scene."""
     _require_job_owner(job_id, user.id)
+    _require_scene_free(job_id, scene_id)
     try:
         db.assert_within_quotas(user.id, need_tokens=5_000)
     except db.QuotaExceededError as exc:
@@ -538,6 +560,7 @@ def approve_scene_endpoint(job_id: str, scene_id: str, user: CurrentUser) -> dic
     Muxes scene audio and re-composes the final video.
     """
     _require_job_owner(job_id, user.id)
+    _require_scene_free(job_id, scene_id)
     try:
         return approve_scene(job_id, scene_id)
     except Exception as exc:
@@ -585,6 +608,7 @@ def apply_scene_edits(
 ) -> dict:
     """Apply element edits to the Manim code and re-render the scene video."""
     _require_job_owner(job_id, user.id)
+    _require_scene_free(job_id, scene_id)
     sdir = store.scene_dir(job_id, scene_id)
     code_path = sdir / "code_final.py"
     if not code_path.exists():
@@ -602,45 +626,52 @@ def apply_scene_edits(
     if not edits:
         raise HTTPException(status_code=400, detail="No edits to apply")
 
-    code = code_path.read_text(encoding="utf-8")
-
     from backend.pipeline.scene_patcher import apply_element_edits
+    from backend.pipeline.scene_parser import parse_scene_code
 
-    updated_code = apply_element_edits(code, edits)
-
-    # Save the patched code
-    code_path.write_text(updated_code, encoding="utf-8")
-
-    # Also save a revision copy
-    import glob
-
-    existing = glob.glob(str(sdir / "code_r*.py"))
-    next_rev = len(existing) + 1
-    (sdir / f"code_r{next_rev}.py").write_text(updated_code, encoding="utf-8")
-
-    # Clean up pending edits
-    (sdir / "pending_edits.json").unlink(missing_ok=True)
-
-    # Re-render if Manim is available
     video_url = None
     render_log = ""
     settings = get_settings()
-    if settings.enable_manim_render or settings.render_worker_url:
-        from backend.pipeline.renderer import render_scene, make_job_dir
+    # Hold this scene only: patching code, numbering the revision, and
+    # publishing the clip must not interleave with a retouch/regenerate of the
+    # same scene. Other scenes are untouched and stay editable in parallel.
+    try:
+        scene_guard = job_runner.scene_lock(job_id, scene_id, timeout=30)
+    except job_runner.SceneBusyError as exc:  # pragma: no cover - guarded above
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-        work_dir = make_job_dir(job_id)
-        video_path, frame_path, render_log = render_scene(
-            updated_code,
-            work_dir=work_dir,
-            resolution="720p",
-            scene_id=scene_id,
-        )
-        if video_path:
-            video_url = store.publish_scene_video(job_id, scene_id, video_path)
+    with scene_guard:
+        code = code_path.read_text(encoding="utf-8")
+        updated_code = apply_element_edits(code, edits)
+
+        # Save the patched code
+        code_path.write_text(updated_code, encoding="utf-8")
+
+        # Also save a revision copy
+        import glob
+
+        existing = glob.glob(str(sdir / "code_r*.py"))
+        next_rev = len(existing) + 1
+        (sdir / f"code_r{next_rev}.py").write_text(updated_code, encoding="utf-8")
+
+        # Clean up pending edits
+        (sdir / "pending_edits.json").unlink(missing_ok=True)
+
+        # Re-render if Manim is available
+        if settings.enable_manim_render or settings.render_worker_url:
+            from backend.pipeline.renderer import render_scene, make_job_dir
+
+            work_dir = make_job_dir(job_id)
+            video_path, frame_path, render_log = render_scene(
+                updated_code,
+                work_dir=work_dir,
+                resolution="720p",
+                scene_id=scene_id,
+            )
+            if video_path:
+                video_url = store.publish_scene_video(job_id, scene_id, video_path)
 
     # Re-parse elements from the patched code for the frontend
-    from backend.pipeline.scene_parser import parse_scene_code
-
     new_elements = parse_scene_code(updated_code)
 
     return {
