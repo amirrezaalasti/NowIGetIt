@@ -383,6 +383,114 @@ onOutput(function(next){
 `,
 );
 
+export const PODCAST_PLAYER_HTML = htmlDoc(
+  "Now I Get It — podcast",
+  "",
+  `
+var el=document.getElementById("app");
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return ({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"})[c];}); }
+onOutput(function(s){
+  s=s||{};
+  var script=s.script||{};
+  var chapters=script.chapters||[];
+  var audio=s.audio_url?('<audio controls src="'+esc(s.audio_url)+'" style="width:100%"></audio>'):'<p class="muted">Transcript is ready'+(s.audio_skipped?" (no TTS on this server).":".")+'</p>';
+  var ch=chapters.map(function(c){
+    return '<li class="card"><strong>'+esc(c.title||c.id)+'</strong><div class="muted">'+(c.lines||[]).length+' lines</div></li>';
+  }).join("");
+  var take=(s.takeaways||[]).map(function(t){return '<li>'+esc(t)+'</li>';}).join("");
+  el.innerHTML='<h1>'+esc(s.title||"Podcast")+'</h1>'+
+    '<div class="muted">'+esc(script.tagline||"")+'</div>'+audio+
+    (ch?'<ol>'+ch+'</ol>':'')+
+    (take?'<div class="panel"><p class="muted">Takeaways</p><ul>'+take+'</ul></div>':'')+
+    (s.learn_url?'<div class="row"><a class="btn ghost" href="'+esc(s.learn_url)+'" target="_blank" rel="noreferrer">Open in Learn</a></div>':'');
+});
+`,
+);
+
+export const QUIZ_RUNNER_HTML = htmlDoc(
+  "Now I Get It — quiz",
+  "",
+  `
+var el=document.getElementById("app");
+var state={};
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return ({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"})[c];}); }
+function render(){
+  var s=state||{};
+  var paper=s.paper||{};
+  var qs=paper.questions||[];
+  var grade=s.grade;
+  var list=qs.map(function(q,i){
+    var choices=(q.choices||[]).map(function(c){
+      return '<label class="block"><input type="radio" name="'+esc(q.id)+'" value="'+esc(c.id)+'"/> '+esc(c.text)+'</label>';
+    }).join("");
+    if(q.type==="numeric"||q.type==="short_answer"){
+      choices='<input data-qid="'+esc(q.id)+'" placeholder="Answer"/>';
+    }
+    var mark="";
+    if(grade&&grade.questions){
+      var g=grade.questions.find(function(x){return x.question_id===q.id;});
+      if(g) mark='<div class="'+(g.correct?"ok":"err")+'">'+(g.correct?"Correct":"Not quite")+' — '+esc(g.explanation||"")+'</div>';
+    }
+    return '<li class="card"><div class="muted">Q'+(i+1)+'</div><p>'+esc(q.prompt)+'</p>'+choices+mark+'</li>';
+  }).join("");
+  var score=grade?('<div class="panel">Score '+grade.correct_count+' / '+grade.total+'</div>'):"";
+  el.innerHTML='<h1>'+esc(s.title||paper.title||"Quiz")+'</h1>'+
+    '<p class="muted">'+esc(paper.intro||"")+'</p>'+
+    score+'<ol>'+list+'</ol>'+
+    '<div class="row"><button class="btn" id="score">Score quiz</button>'+
+    (s.learn_url?'<a class="btn ghost" href="'+esc(s.learn_url)+'" target="_blank" rel="noreferrer">Open in Learn</a>':'')+
+    '</div><div class="err" id="err"></div>';
+  var btn=document.getElementById("score");
+  if(btn) btn.onclick=function(){
+    var answers=[];
+    qs.forEach(function(q){
+      var val="";
+      var radios=el.querySelectorAll('input[name="'+q.id+'"]');
+      radios.forEach(function(r){ if(r.checked) val=r.value; });
+      var inp=el.querySelector('input[data-qid="'+q.id+'"]');
+      if(inp) val=inp.value;
+      answers.push({question_id:q.id, answer:val});
+    });
+    callTool("grade_quiz",{id:s.id, answers:answers}).then(function(r){
+      var next=structured(r);
+      state=Object.assign({},state,next);
+      render();
+    }).catch(function(e){ var err=document.getElementById("err"); if(err) err.textContent=e.message; });
+  };
+}
+onOutput(function(s){ state=Object.assign({},state,s||{}); render(); });
+`,
+);
+
+export const INTERACTIVE_LAB_HTML = htmlDoc(
+  "Now I Get It — lab",
+  "",
+  `
+var el=document.getElementById("app");
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return ({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"})[c];}); }
+onOutput(function(s){
+  s=s||{};
+  var lesson=s.lesson||{};
+  var phases=lesson.phases||[];
+  var params=lesson.parameters||[];
+  var readouts=lesson.readouts||[];
+  var phaseList=phases.map(function(p){
+    return '<li class="card"><div class="muted">'+esc(p.kind)+'</div><strong>'+esc(p.title)+'</strong><p class="muted">'+esc(p.coach||"").slice(0,220)+'</p></li>';
+  }).join("");
+  var sliders=params.map(function(p){
+    return '<div class="muted">'+esc(p.label)+' ('+esc(p.unit||"")+') · '+p.min+'–'+p.max+' default '+p.default+'</div>';
+  }).join("");
+  el.innerHTML='<h1>'+esc(s.title||lesson.title||"Lab")+'</h1>'+
+    '<p class="muted">'+esc(lesson.core_question||lesson.tagline||"")+'</p>'+
+    '<div class="panel">'+esc((lesson.visual&&lesson.visual.kind)||"visual")+' · '+params.length+' sliders · '+phases.length+' phases</div>'+
+    sliders+
+    (readouts.length?'<div class="muted">Live readouts: '+readouts.map(function(r){return r.label;}).join(", ")+'</div>':'')+
+    '<ol>'+phaseList+'</ol>'+
+    (s.learn_url?'<div class="row"><a class="btn" href="'+esc(s.learn_url)+'" target="_blank" rel="noreferrer">Open the lab</a></div>':'');
+});
+`,
+);
+
 export const WIDGETS: Record<string, { uri: string; name: string; title: string; html: string }> = {
   "job-progress": {
     uri: UI.jobProgress,
@@ -401,6 +509,24 @@ export const WIDGETS: Record<string, { uri: string; name: string; title: string;
     name: "slides-tutor",
     title: "Interactive slides tutor",
     html: SLIDES_TUTOR_HTML,
+  },
+  "podcast-player": {
+    uri: UI.podcastPlayer,
+    name: "podcast-player",
+    title: "Podcast player",
+    html: PODCAST_PLAYER_HTML,
+  },
+  "quiz-runner": {
+    uri: UI.quizRunner,
+    name: "quiz-runner",
+    title: "Quiz",
+    html: QUIZ_RUNNER_HTML,
+  },
+  "interactive-lab": {
+    uri: UI.interactiveLab,
+    name: "interactive-lab",
+    title: "Interactive lab",
+    html: INTERACTIVE_LAB_HTML,
   },
 };
 

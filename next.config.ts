@@ -58,8 +58,15 @@ const nextConfig: NextConfig = {
         source: "/api/documents/:path*",
         destination: `${LOCAL_API}/api/documents/:path*`,
       },
+      { source: "/api/source", destination: `${LOCAL_API}/api/source` },
+      {
+        source: "/api/source/:path*",
+        destination: `${LOCAL_API}/api/source/:path*`,
+      },
       { source: "/api/tts/:path*", destination: `${LOCAL_API}/api/tts/:path*` },
       { source: "/api/video/:path*", destination: `${LOCAL_API}/api/video/:path*` },
+      { source: "/api/learn", destination: `${LOCAL_API}/api/learn` },
+      { source: "/api/learn/:path*", destination: `${LOCAL_API}/api/learn/:path*` },
     ];
   },
 };

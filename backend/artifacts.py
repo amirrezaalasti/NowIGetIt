@@ -344,24 +344,70 @@ def save_result(job_id: str, data: dict[str, Any]) -> str:
     return write_json(job_dir(job_id) / "result.json", data)
 
 
-def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[str, Any]]:
+def job_kind(job_id: str, meta: Optional[dict[str, Any]] = None) -> str:
+    """video | document | source | podcast | quiz | interactive."""
+    if isinstance(meta, dict):
+        kind = str(meta.get("kind") or "").strip()
+        if kind:
+            return kind
+    if job_id.startswith("doc_"):
+        return "document"
+    if job_id.startswith("src_"):
+        return "source"
+    if job_id.startswith("pod_"):
+        return "podcast"
+    if job_id.startswith("quiz_"):
+        return "quiz"
+    if job_id.startswith("lab_"):
+        return "interactive"
+    return "video"
+
+
+def _summarize_job_row(row: dict[str, Any], *, user_id: Optional[str] = None) -> dict[str, Any]:
+    job_id = str(row.get("job_id") or row.get("id") or "")
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else None
+    kind = job_kind(job_id, meta)
+    return {
+        "job_id": job_id,
+        "title": row.get("title"),
+        "prompt": row.get("prompt"),
+        "created_at": row.get("created_at"),
+        "has_result": bool(row.get("has_result")),
+        "has_final_video": bool(row.get("has_final_video")),
+        "user_id": row.get("user_id") or user_id,
+        "status": row.get("status"),
+        "kind": kind,
+    }
+
+
+def _is_source_job(job_id: str, kind: str) -> bool:
+    return kind == "source" or job_id.startswith("src_")
+
+
+def list_jobs(
+    limit: int = 50,
+    *,
+    user_id: Optional[str] = None,
+    include_sources: bool = False,
+) -> list[dict[str, Any]]:
     if user_id:
-        rows = db.list_user_jobs(user_id, limit=limit)
+        fetch_limit = limit if include_sources else max(limit * 2, 40)
+        rows = db.list_user_jobs(user_id, limit=fetch_limit)
         if rows:
-            return [
-                {
-                    "job_id": row.get("job_id") or row.get("id"),
-                    "title": row.get("title"),
-                    "prompt": row.get("prompt"),
-                    "created_at": row.get("created_at"),
-                    "has_result": bool(row.get("has_result")),
-                    "has_final_video": bool(row.get("has_final_video")),
-                    "user_id": row.get("user_id") or user_id,
-                    "status": row.get("status"),
-                }
-                for row in rows
-                if row.get("job_id") or row.get("id")
-            ]
+            jobs: list[dict[str, Any]] = []
+            for row in rows:
+                if not (row.get("job_id") or row.get("id")):
+                    continue
+                summary = _summarize_job_row(row, user_id=user_id)
+                if not include_sources and _is_source_job(
+                    str(summary.get("job_id") or ""), str(summary.get("kind") or "")
+                ):
+                    continue
+                jobs.append(summary)
+                if len(jobs) >= limit:
+                    break
+            if jobs:
+                return jobs
 
     root = artifacts_root()
     if not root.exists():
@@ -380,14 +426,21 @@ def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[st
         if user_id is not None and meta.get("user_id") != user_id:
             continue
         plan_path = path / "scene_plan.json"
-        title = None
+        title = meta.get("title") if isinstance(meta.get("title"), str) else None
         if plan_path.exists():
             try:
-                title = json.loads(plan_path.read_text(encoding="utf-8")).get("title")
+                title = json.loads(plan_path.read_text(encoding="utf-8")).get("title") or title
             except json.JSONDecodeError:
                 pass
         has_result = (path / "result.json").exists()
-        has_final_video = (path / "final.mp4").exists()
+        has_final_video = (
+            (path / "final.mp4").exists()
+            or (path / "podcast.wav").exists()
+            or (path / "podcast.mp3").exists()
+        )
+        kind = job_kind(path.name, meta)
+        if not include_sources and _is_source_job(path.name, kind):
+            continue
         if has_result or has_final_video:
             status = "complete"
         elif str(meta.get("status") or "").strip():
@@ -406,6 +459,7 @@ def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[st
                 "has_final_video": has_final_video,
                 "user_id": meta.get("user_id"),
                 "status": status,
+                "kind": kind,
             }
         )
         if len(jobs) >= limit:

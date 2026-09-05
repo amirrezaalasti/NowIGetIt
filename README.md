@@ -10,7 +10,7 @@
 [![OpenRouter](https://img.shields.io/badge/LLM-OpenRouter-6366f1)](https://openrouter.ai/)
 [![License](https://img.shields.io/badge/License-Proprietary-red)](./LICENSE)
 
-Turn a sentence into a **Manim explainer video** — or drop a PDF/deck and **quiz every slide**. Same engine in the browser **and** inside ChatGPT, Claude, and Cursor via a remote MCP connector.
+Turn a sentence into a **Manim explainer video**, a **podcast**, a **quiz**, or an **interactive lab** — or drop a PDF/deck and **quiz every slide**. Same engine in the browser **and** inside ChatGPT, Claude, and Cursor via a remote MCP connector.
 
 > **New:** the chat connector is first-class. You write the storyboard, pick audio / subtitles / voice, then the host writes Manim and we render. Jobs land in your Library.
 
@@ -21,6 +21,7 @@ Turn a sentence into a **Manim explainer video** — or drop a PDF/deck and **qu
 | I want to… | Go here |
 |---|---|
 | 🎬 Make a video in the browser | [Getting started](#getting-started) |
+| 🎧 Podcast, quiz, or interactive lab | [Learn](#learn) |
 | 📄 Study a PDF / PPTX | [Understand](#understand) |
 | 🔌 Use it from ChatGPT / Claude / Cursor | [MCP connector](#mcp) |
 | 🧪 Inspect tools locally | [MCP Inspector](#inspector) |
@@ -46,7 +47,16 @@ Then quiz me on slide 4, and turn the key formulas into a video prompt.
 Find my last Fourier video, retouch scene 2 so the axes are labeled, then re-render only that scene.
 ```
 
-On the website: open [http://localhost:3000](http://localhost:3000) after [Getting started](#-getting-started), sign in with Google, and type the same kind of prompt.
+```
+I marked a few frames on the video — read those comments and fix the scenes they point at.
+```
+
+```
+Let me play with projectile motion until I find why 45° goes farthest.
+Then quiz me, and make a short podcast of the same idea.
+```
+
+On the website: open [http://localhost:3000](http://localhost:3000) after [Getting started](#-getting-started), sign in with Google, and type the same kind of prompt. Learn modes live at `/learn`.
 
 ---
 
@@ -56,11 +66,23 @@ On the website: open [http://localhost:3000](http://localhost:3000) after [Getti
 
 LLM scene planning → Manim codegen → VLM frame review → TTS narration → stitched video.
 
-You always see a **storyboard first**. Change scenes, narration, voice, audio, and subtitles before anything renders.
+You always see a **storyboard first**. Change scenes, narration, voice, audio, and subtitles before anything renders. After a video exists, pause on a frame, **mark that moment**, leave a comment, and the agent retouches from that screenshot and timestamp.
+
+Attach a PDF, deck, or notes (or pick one from Library) — the storyboard is grounded in that material. The prompt can be empty.
 
 ### 📄 Understand (documents) <a id="understand"></a>
 
 [Docling](https://github.com/docling-project/docling) turns PDF / PPTX / DOCX into interactive HTML slides. Click a block for explanations, quizzes, figure readouts, formulas, misconceptions, or a video prompt.
+
+### 🎧 Learn (podcast · quiz · lab) <a id="learn"></a>
+
+Same teaching blueprint as video, three other ways to make it click:
+
+- **Podcast** — a conversation (or solo narration) with chapter markers and a transcript, spoken with Gemini TTS.
+- **Quiz** — mixed questions tied to teaching-step checkpoints, scored with explanations.
+- **Play** — an interactive lab: a live picture you drive with sliders, through phases **orient → explore → predict → test → challenge → check → reflect**.
+
+Open **`/learn`**. Jobs land in Library with a kind badge. Same file attach as Create: drop notes or pick a document, then generate from that source.
 
 ### 🔌 ChatGPT / Claude / Cursor
 
@@ -111,7 +133,7 @@ flowchart LR
 4. After you approve: Manim **one scene at a time** (`video_codegen_spec` → `submit_scene_code`). Each submit returns a **last-frame preview image**. The model looks at it, tells you what it sees, then continues. `Text()` only — never `MathTex`.
 5. Tap **Fix this scene** / **Looks good** on the in-chat storyboard, or just say so in chat.
 6. `render_video` with `user_confirmed: true`. If `poll_again`, keep calling `get_job` with the **same** `job_id`. Don’t start a new job.
-7. New stills keep arriving while it renders. Use `retouch_scene` to fix one clip.
+7. New stills keep arriving while it renders. Use `retouch_scene` to fix one clip. If they marked frames while watching, call `list_video_marks` then `retouch_scene` with that `comment_id` and timestamp.
 
 In-chat widgets: **job progress / storyboard**, **video player**, **slides tutor**.
 
@@ -185,12 +207,13 @@ Optional shared key: `MCP_CONNECTOR_TOKEN` (Inspector only).
 | `revise_plan` | Replace the whole storyboard JSON |
 | `edit_storyboard` | Plain-English edits (“add a numeric example”) |
 | `update_scene` | Tweak one scene’s title, narration, beats, … |
-| `get_scene` | Narration, Manim, preview image, VLM notes |
+| `get_scene` | Narration, Manim, preview image, VLM notes, marked-frame comments |
 | `video_codegen_spec` | Manim rules for one scene (after approval + options) |
 | `submit_scene_code` | Save one complete Manim Community Scene file and return a last-frame preview |
 | `render_video` | Render after every scene has code (`user_confirmed: true`) |
 | `continue_video` | Alias of `render_video` — prefer `render_video` |
-| `retouch_scene` | Rewrite + re-render one scene after a clip exists |
+| `list_video_marks` | Frames the learner marked while watching, with comments + screenshots |
+| `retouch_scene` | Rewrite + re-render one scene (`comment`, optional `timestamp` / `comment_id`) |
 | `get_job` | Poll. If `poll_again`, wait and call again with the **same** id |
 | `list_jobs` | Recent videos for this Google account |
 
@@ -202,6 +225,7 @@ Optional shared key: `MCP_CONNECTOR_TOKEN` (Inspector only).
 | Tool | What it does |
 |---|---|
 | `upload_document` | PDF/PPTX/DOCX → study slides (`file_url` or `file_base64`) |
+| `extract_source` | Read a file to text for video / podcast / quiz / lab (`source_doc_ids`) |
 | `list_documents` | Converted docs for this account |
 | `get_document` | Slide titles, block ids, signed HTML URLs — also used to poll |
 | `ask_document` | `explain`, `quiz`, `simplify`, `deepen`, `translate`, `extract_formula`, `misconceptions`, `turn_into_video_prompt`, `freeform`, … |
@@ -211,12 +235,25 @@ Max upload **25 MB**. Prefer a public HTTPS URL from chat clients.
 </details>
 
 <details>
+<summary>🎧 Learn tools</summary>
+
+| Tool | What it does |
+|---|---|
+| `create_podcast` | Teaching plan → script → spoken episode (`audio_url` + chapters). Optional `source_doc_ids` |
+| `create_quiz` | Standalone quiz from a prompt or attached notes |
+| `grade_quiz` | Score answers `{question_id, answer}` |
+| `create_interactive` | Parameterized lab with learning phases — open `learn_url` to play |
+| `get_learn_item` | Reload a `pod_` / `quiz_` / `lab_` item |
+
+</details>
+
+<details>
 <summary>📚 Library & quota</summary>
 
 | Tool | What it does |
 |---|---|
-| `search` | Find videos/docs by title or prompt (ChatGPT library search) |
-| `fetch` | Load a hit by `job:<id>` or `doc:<id>` |
+| `search` | Find videos/docs/podcasts/quizzes/labs by title or prompt |
+| `fetch` | Load a hit by `job:<id>`, `doc:<id>`, or `learn:<id>` |
 | `get_usage` | Remaining generation / token / storage quota |
 
 </details>
@@ -260,7 +297,7 @@ Upload → Docling (local or Railway) → HTML slides + block ids → LLM/VLM as
 ### Layout
 
 ```
-├── src/                    # Next.js App Router UI (/ = Create, /understand, /connect)
+├── src/                    # Next.js App Router UI (/ = Create, /learn, /understand, /connect)
 ├── src/lib/mcp/            # Remote MCP tools, OAuth, in-chat widgets
 ├── api/index.py            # FastAPI entry (Vercel)
 ├── render_worker/          # Manim HTTP worker (Railway)
@@ -367,6 +404,13 @@ Protected routes (except health) require `Authorization: Bearer <token>` from `G
 | `GET` | `/api/jobs` | List **your** jobs |
 | `GET` | `/api/jobs/{job_id}` | Job detail (owner only) |
 | `GET` | `/api/jobs/{job_id}/file/...` | Artifact files |
+| `POST` | `/api/source/extract` | Upload a file → extracted source id + text |
+| `GET` | `/api/source/library` | Recent documents and extracted sources |
+| `POST` | `/api/learn/generate` | Podcast / quiz / interactive lab |
+| `POST` | `/api/learn/generate/stream` | SSE progress for Learn |
+| `GET` | `/api/learn/{id}` | Load a Learn item |
+| `POST` | `/api/learn/{id}/grade` | Score a quiz |
+| `POST` | `/api/learn/{id}/progress` | Check a lab phase goal |
 | `GET/POST` | `/api/mcp` | ChatGPT / Claude / Cursor MCP connector (Streamable HTTP) |
 
 **Example request body:**

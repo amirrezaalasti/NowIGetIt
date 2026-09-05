@@ -295,6 +295,19 @@ def _job_payload(row: dict[str, Any]) -> dict[str, Any]:
 
     job_id = str(row.get("_id") or row.get("job_id") or "")
     root = artifacts_root() / job_id
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+    kind = str(meta.get("kind") or "")
+    if not kind:
+        if job_id.startswith("doc_"):
+            kind = "document"
+        elif job_id.startswith("pod_"):
+            kind = "podcast"
+        elif job_id.startswith("quiz_"):
+            kind = "quiz"
+        elif job_id.startswith("lab_"):
+            kind = "interactive"
+        else:
+            kind = "video"
     return {
         "id": job_id,
         "job_id": job_id,
@@ -308,8 +321,12 @@ def _job_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "has_result": (root / "result.json").exists(),
         "has_final_video": (root / "final.mp4").exists()
-        or (root / "document.json").exists(),
+        or (root / "document.json").exists()
+        or (root / "podcast.wav").exists()
+        or (root / "quiz.json").exists()
+        or (root / "interactive.json").exists(),
         "storage_bytes": int(row.get("storage_bytes") or 0),
+        "kind": kind,
     }
 
 

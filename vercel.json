@@ -19,7 +19,11 @@
     { "source": "/api/jobs/:path*", "destination": "/api/index" },
     { "source": "/api/documents", "destination": "/api/index" },
     { "source": "/api/documents/:path*", "destination": "/api/index" },
+    { "source": "/api/source", "destination": "/api/index" },
+    { "source": "/api/source/:path*", "destination": "/api/index" },
     { "source": "/api/tts/:path*", "destination": "/api/index" },
-    { "source": "/api/video/:path*", "destination": "/api/index" }
+    { "source": "/api/video/:path*", "destination": "/api/index" },
+    { "source": "/api/learn", "destination": "/api/index" },
+    { "source": "/api/learn/:path*", "destination": "/api/index" }
   ]
 }

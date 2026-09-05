@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { UI, widgetMeta } from "./config";
+import { MCP_SCOPES, UI, widgetMeta } from "./config";
 import { ApiError, apiBytes, apiJson, signedMediaUrl, startSse } from "./fastapi";
 import { resourceResult, WIDGETS } from "./widgets";
 
@@ -648,7 +648,86 @@ async function documentResult(
   return ok({ ...doc, ...extra }, UI.slidesTutor, textExtra, images, digest);
 }
 
+async function learnPayload(origin: string, item: Record<string, unknown>) {
+  const payload = (item.payload || {}) as Record<string, unknown>;
+  const urls = (item.urls || {}) as Record<string, string>;
+  const kind = String(item.kind || payload.kind || "");
+  const audioPath =
+    (typeof payload.audio_url === "string" && payload.audio_url) || urls.audio || "";
+  const audio_url = audioPath ? await signedMediaUrl(origin, audioPath) : "";
+  return {
+    id: String(item.id || payload.id || ""),
+    kind,
+    title: String(item.title || payload.title || "Untitled"),
+    status: String(item.status || payload.status || "ready"),
+    learn_url: `${origin}/learn?id=${encodeURIComponent(String(item.id || ""))}`,
+    audio_url: audio_url || null,
+    audio_skipped: Boolean(payload.audio_skipped),
+    script: payload.script || null,
+    takeaways: payload.takeaways || (payload.script as { takeaways?: string[] } | undefined)?.takeaways || [],
+    paper: payload.paper || null,
+    lesson: payload.lesson || null,
+    duration_seconds: payload.duration_seconds ?? null,
+  };
+}
+
+async function learnResult(
+  origin: string,
+  item: Record<string, unknown>,
+  widgetUri: string,
+) {
+  const data = await learnPayload(origin, item);
+  const kind = data.kind;
+  const digest: Record<string, unknown> = {
+    id: data.id,
+    kind,
+    title: data.title,
+    learn_url: data.learn_url,
+    status: data.status,
+  };
+  if (kind === "podcast") {
+    const script = (data.script || {}) as { chapters?: Array<{ id: string; title: string }>; tagline?: string };
+    digest.tagline = script.tagline;
+    digest.chapters = (script.chapters || []).map((c) => ({ id: c.id, title: c.title }));
+    digest.audio_url = data.audio_url;
+    digest.takeaways = data.takeaways;
+  }
+  if (kind === "quiz") {
+    const paper = (data.paper || {}) as { questions?: Array<{ id: string; prompt: string; type: string }>; intro?: string };
+    digest.intro = paper.intro;
+    digest.question_count = (paper.questions || []).length;
+    digest.questions = (paper.questions || []).map((q) => ({
+      id: q.id,
+      type: q.type,
+      prompt: q.prompt,
+    }));
+  }
+  if (kind === "interactive") {
+    const lesson = (data.lesson || {}) as {
+      core_question?: string;
+      visual?: { kind?: string };
+      parameters?: Array<{ id: string; label: string }>;
+      phases?: Array<{ id: string; kind: string; title: string }>;
+    };
+    digest.core_question = lesson.core_question;
+    digest.visual = lesson.visual?.kind;
+    digest.parameters = lesson.parameters;
+    digest.phases = lesson.phases;
+  }
+  return ok(data, widgetUri, undefined, undefined, digest);
+}
+
 export function registerNowIGetIt(server: McpServer, origin: string) {
+  const registerTool = ((name: string, config: object, handler: (...args: never[]) => unknown) =>
+    server.registerTool(
+      name,
+      {
+        ...config,
+        securitySchemes: [{ type: "oauth2", scopes: [...MCP_SCOPES] }],
+      } as never,
+      handler as never,
+    )) as typeof server.registerTool;
+
   for (const widget of Object.values(WIDGETS)) {
     server.registerResource(
       widget.name,
@@ -662,7 +741,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     );
   }
 
-  server.registerTool(
+  registerTool(
     "video_planning_spec",
     {
       title: "Video planning spec",
@@ -684,7 +763,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "create_video",
     {
       title: "Submit video storyboard",
@@ -727,18 +806,24 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         length_preset: z.enum(["short", "standard", "deep"]).optional(),
         audience: z.enum(["hs", "undergrad", "general"]).optional(),
         language: z.string().min(2).max(16).optional(),
+        source_doc_ids: z
+          .array(z.string().min(1))
+          .max(6)
+          .optional()
+          .describe("IDs from extract_source, upload_document, or list_documents"),
       }),
       _meta: widgetMeta(UI.jobProgress),
       outputSchema: JOB_OUTPUT,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ prompt, plan, length_preset, audience, language }) => {
+    async ({ prompt, plan, length_preset, audience, language, source_doc_ids }) => {
       try {
         const started = await startSse(
           origin,
           "/api/generate/stream",
           JSON.stringify({
             prompt,
+            source_doc_ids: source_doc_ids ?? [],
             resolution: "720p",
             skip_render: false,
             length_preset: length_preset ?? "standard",
@@ -771,7 +856,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "video_codegen_spec",
     {
       title: "Manim codegen spec",
@@ -808,7 +893,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "submit_scene_code",
     {
       title: "Submit scene Manim code",
@@ -945,7 +1030,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     return jobResult(origin, job);
   }
 
-  server.registerTool(
+  registerTool(
     "render_video",
     {
       title: "Render video",
@@ -985,7 +1070,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "continue_video",
     {
       title: "Continue video render",
@@ -1023,7 +1108,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "revise_plan",
     {
       title: "Replace storyboard",
@@ -1068,7 +1153,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "edit_storyboard",
     {
       title: "Edit storyboard from instructions",
@@ -1111,7 +1196,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "update_scene",
     {
       title: "Edit one scene",
@@ -1174,7 +1259,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "update_video_options",
     {
       title: "Save audio, subtitles, voice",
@@ -1229,7 +1314,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_scene",
     {
       title: "Get scene details",
@@ -1307,7 +1392,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "list_video_marks",
     {
       title: "List marked video frames",
@@ -1368,7 +1453,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "retouch_scene",
     {
       title: "Retouch a rendered scene",
@@ -1421,7 +1506,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_job",
     {
       title: "Get video job",
@@ -1457,7 +1542,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "list_jobs",
     {
       title: "List videos",
@@ -1488,7 +1573,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "upload_document",
     {
       title: "Upload document for slide study",
@@ -1555,7 +1640,64 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
+    "extract_source",
+    {
+      title: "Extract source notes",
+      description:
+        "Read a PDF, deck, document, or notes file into text for create_video / create_podcast / create_quiz / create_interactive. Faster than upload_document (no slides). Pass the returned id as source_doc_ids. Use file_url or file_base64+filename.",
+      inputSchema: z.object({
+        file_url: z.string().url().optional(),
+        file_base64: z.string().optional(),
+        filename: z.string().optional(),
+      }),
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async ({ file_url, file_base64, filename }) => {
+      try {
+        let bytes: Uint8Array;
+        let name = filename || "notes.txt";
+        if (file_url) {
+          const res = await fetch(file_url, { cache: "no-store" });
+          if (!res.ok) throw new Error(`Could not download file (${res.status}).`);
+          bytes = new Uint8Array(await res.arrayBuffer());
+          const urlName = new URL(file_url).pathname.split("/").pop();
+          if (!filename && urlName) name = urlName;
+        } else if (file_base64) {
+          bytes = Buffer.from(file_base64, "base64");
+        } else {
+          return fail(
+            new Error("Provide file_url or file_base64. A public HTTPS URL works best."),
+          );
+        }
+        if (bytes.byteLength > MAX_UPLOAD_BYTES) {
+          return fail(new Error("File is larger than 25 MB. Upload it on the website instead."));
+        }
+        const form = new FormData();
+        const copy = new Uint8Array(bytes.byteLength);
+        copy.set(bytes);
+        form.append("file", new Blob([copy]), name);
+        const extracted = await apiJson<{
+          id: string;
+          title: string;
+          filename: string;
+          char_count: number;
+          preview?: string;
+        }>(origin, "/api/source/extract", { method: "POST", body: form });
+        return ok({
+          ...extracted,
+          next_step:
+            "Call create_podcast, create_quiz, create_interactive, or create_video with source_doc_ids: [" +
+            extracted.id +
+            "]. Prompt can be empty.",
+        });
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  registerTool(
     "list_documents",
     {
       title: "List study documents",
@@ -1588,7 +1730,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "get_document",
     {
       title: "Get study document",
@@ -1615,7 +1757,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "ask_document",
     {
       title: "Study a slide or block",
@@ -1693,7 +1835,168 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
+    "create_podcast",
+    {
+      title: "Create podcast",
+      description:
+        "Generate an educational podcast from a prompt and/or attached files (source_doc_ids from extract_source or upload_document). Teaching plan → conversational script → spoken audio.",
+      inputSchema: z.object({
+        prompt: z.string().max(8000).optional(),
+        source_doc_ids: z.array(z.string().min(1)).max(6).optional(),
+        audience: z.enum(["hs", "undergrad", "general"]).optional(),
+        language: z.string().min(2).max(16).optional(),
+        length_preset: z.enum(["short", "standard", "deep"]).optional(),
+        style: z.enum(["dialogue", "solo"]).optional(),
+        tts_voice: z.string().optional(),
+        partner_voice: z.string().optional(),
+      }),
+      _meta: widgetMeta(UI.podcastPlayer),
+      annotations: { readOnlyHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      try {
+        const item = await apiJson<Record<string, unknown>>(origin, "/api/learn/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind: "podcast", ...args }),
+        });
+        return learnResult(origin, item, UI.podcastPlayer);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  registerTool(
+    "create_quiz",
+    {
+      title: "Create quiz",
+      description:
+        "Generate a standalone quiz for a concept (or attached notes via source_doc_ids). Mixed questions. After the user answers, call grade_quiz.",
+      inputSchema: z.object({
+        prompt: z.string().max(8000).optional(),
+        source_doc_ids: z.array(z.string().min(1)).max(6).optional(),
+        audience: z.enum(["hs", "undergrad", "general"]).optional(),
+        language: z.string().min(2).max(16).optional(),
+        question_count: z.number().min(3).max(20).optional(),
+        difficulty: z.enum(["easy", "medium", "hard", "mixed"]).optional(),
+      }),
+      _meta: widgetMeta(UI.quizRunner),
+      annotations: { readOnlyHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      try {
+        const item = await apiJson<Record<string, unknown>>(origin, "/api/learn/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind: "quiz", ...args }),
+        });
+        return learnResult(origin, item, UI.quizRunner);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  registerTool(
+    "create_interactive",
+    {
+      title: "Create interactive lab",
+      description:
+        "Generate an interactive learning lab from a prompt and/or attached files (source_doc_ids). Live visualization with sliders and learning phases.",
+      inputSchema: z.object({
+        prompt: z.string().max(8000).optional(),
+        source_doc_ids: z.array(z.string().min(1)).max(6).optional(),
+        audience: z.enum(["hs", "undergrad", "general"]).optional(),
+        language: z.string().min(2).max(16).optional(),
+      }),
+      _meta: widgetMeta(UI.interactiveLab),
+      annotations: { readOnlyHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      try {
+        const item = await apiJson<Record<string, unknown>>(origin, "/api/learn/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind: "interactive", ...args }),
+        });
+        return learnResult(origin, item, UI.interactiveLab);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  registerTool(
+    "get_learn_item",
+    {
+      title: "Get learn item",
+      description: "Load a podcast, quiz, or interactive lab by id (pod_…, quiz_…, lab_…).",
+      inputSchema: z.object({ id: z.string() }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ id }) => {
+      try {
+        const item = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/learn/${encodeURIComponent(id)}`,
+        );
+        const kind = String(item.kind || "");
+        const uri =
+          kind === "podcast"
+            ? UI.podcastPlayer
+            : kind === "quiz"
+              ? UI.quizRunner
+              : UI.interactiveLab;
+        return learnResult(origin, item, uri);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  registerTool(
+    "grade_quiz",
+    {
+      title: "Grade quiz",
+      description: "Score a quiz created with create_quiz. answers: [{question_id, answer}].",
+      inputSchema: z.object({
+        id: z.string(),
+        answers: z.array(
+          z.object({
+            question_id: z.string(),
+            answer: z.union([z.string(), z.number(), z.boolean()]).nullable(),
+          }),
+        ),
+      }),
+      _meta: widgetMeta(UI.quizRunner),
+      annotations: { readOnlyHint: false, openWorldHint: false },
+    },
+    async ({ id, answers }) => {
+      try {
+        const grade = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/learn/${encodeURIComponent(id)}/grade`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ answers }),
+          },
+        );
+        const item = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/learn/${encodeURIComponent(id)}`,
+        );
+        const payload = await learnPayload(origin, item);
+        return ok({ ...payload, grade }, UI.quizRunner);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  registerTool(
     "get_usage",
     {
       title: "Get usage",
@@ -1726,11 +2029,11 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "search",
     {
       title: "Search library",
-      description: "Search this connector's videos and documents by title or prompt.",
+      description: "Search this connector's videos, documents, podcasts, quizzes, and labs by title or prompt.",
       inputSchema: z.object({ query: z.string() }),
       annotations: { readOnlyHint: true, openWorldHint: false },
       outputSchema: SEARCH_OUTPUT,
@@ -1748,12 +2051,21 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         const results: Array<{ id: string; title: string; url: string }> = [];
         for (const job of jobs.jobs || []) {
           const title = String(job.title || job.prompt || job.job_id || "");
-          const hay = `${title} ${job.prompt || ""}`.toLowerCase();
+          const hay = `${title} ${job.prompt || ""} ${job.kind || ""}`.toLowerCase();
           if (!q || hay.includes(q)) {
+            const jobId = String(job.job_id);
+            const kind = String(job.kind || "");
+            const learn =
+              kind === "podcast" ||
+              kind === "quiz" ||
+              kind === "interactive" ||
+              jobId.startsWith("pod_") ||
+              jobId.startsWith("quiz_") ||
+              jobId.startsWith("lab_");
             results.push({
-              id: `job:${job.job_id}`,
-              title: title || String(job.job_id),
-              url: `${origin}/library`,
+              id: learn ? `learn:${jobId}` : `job:${jobId}`,
+              title: kind && kind !== "video" ? `${title} (${kind})` : title || jobId,
+              url: learn ? `${origin}/learn?id=${encodeURIComponent(jobId)}` : `${origin}/library`,
             });
           }
         }
@@ -1782,16 +2094,31 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
   );
 
-  server.registerTool(
+  registerTool(
     "fetch",
     {
       title: "Fetch library item",
-      description: "Fetch a search result by id (job:<id> or doc:<id>).",
+      description: "Fetch a search result by id (job:<id>, doc:<id>, or learn:<id>).",
       inputSchema: z.object({ id: z.string() }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ id }) => {
       try {
+        if (id.startsWith("learn:") || id.startsWith("pod_") || id.startsWith("quiz_") || id.startsWith("lab_")) {
+          const learnId = id.startsWith("learn:") ? id.slice(6) : id;
+          const item = await apiJson<Record<string, unknown>>(
+            origin,
+            `/api/learn/${encodeURIComponent(learnId)}`,
+          );
+          const kind = String(item.kind || "");
+          const uri =
+            kind === "podcast"
+              ? UI.podcastPlayer
+              : kind === "quiz"
+                ? UI.quizRunner
+                : UI.interactiveLab;
+          return learnResult(origin, item, uri);
+        }
         if (id.startsWith("job:")) {
           const jobId = id.slice(4);
           const job = await apiJson<Record<string, unknown>>(

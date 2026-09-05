@@ -12,6 +12,7 @@ export type JobSummary = {
   has_result?: boolean;
   has_final_video?: boolean;
   status?: string | null;
+  kind?: "video" | "document" | "podcast" | "quiz" | "interactive" | string;
 };
 
 export type HumanComment = {
@@ -578,6 +579,7 @@ export type ScenePlanDraft = {
 
 export type GenerateOptions = {
   prompt: string;
+  source_doc_ids?: string[];
   resolution?: "480p" | "720p" | "1080p";
   skip_render?: boolean;
   length_preset?: LengthPreset;
@@ -659,6 +661,7 @@ export async function streamGenerate(
       }),
       body: JSON.stringify({
         prompt: opts.prompt,
+        source_doc_ids: opts.source_doc_ids ?? [],
         skip_render: opts.skip_render ?? false,
         resolution: opts.resolution ?? "720p",
         length_preset: opts.length_preset ?? "standard",
@@ -1177,5 +1180,302 @@ export async function applySceneEdits(
   if (!res.ok) {
     throw await readError(res, `Apply edits failed (${res.status})`);
   }
+  return res.json();
+}
+
+export type LearnKind = "podcast" | "quiz" | "interactive";
+
+export type LearnGenerateOptions = {
+  kind: LearnKind;
+  prompt: string;
+  source_doc_ids?: string[];
+  audience?: Audience;
+  language?: string;
+  length_preset?: LengthPreset;
+  tts_voice?: string;
+  partner_voice?: string;
+  style?: "dialogue" | "solo";
+  question_count?: number;
+  difficulty?: "easy" | "medium" | "hard" | "mixed";
+};
+
+export type PodcastLine = { speaker: "host" | "guide"; text: string };
+export type PodcastChapter = {
+  id: string;
+  title: string;
+  covers_step?: string;
+  summary?: string;
+  lines: PodcastLine[];
+  duration_seconds: number;
+  start_seconds: number;
+};
+export type PodcastScript = {
+  title: string;
+  tagline?: string;
+  style: "dialogue" | "solo";
+  host_name?: string;
+  guide_name?: string;
+  chapters: PodcastChapter[];
+  takeaways: string[];
+};
+export type QuizChoice = { id: string; text: string };
+export type QuizQuestion = {
+  id: string;
+  type: "multiple_choice" | "true_false" | "numeric" | "short_answer";
+  prompt: string;
+  choices: QuizChoice[];
+  correct: string;
+  numeric_tolerance?: number;
+  explanation: string;
+  hint: string;
+  covers_step?: string;
+  difficulty?: string;
+  why_it_matters?: string;
+};
+export type QuizPaper = {
+  title: string;
+  intro: string;
+  questions: QuizQuestion[];
+  pass_score: number;
+};
+export type LabParameter = {
+  id: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+  unit: string;
+  description: string;
+};
+export type LabReadout = {
+  id: string;
+  label: string;
+  expr: string;
+  unit: string;
+  precision: number;
+};
+export type LabVisual = {
+  kind:
+    | "function_plot"
+    | "projectile"
+    | "wave"
+    | "compound_growth"
+    | "unit_circle"
+    | "spring"
+    | "vector_2d"
+    | "slope_line"
+    | "geometry";
+  title?: string;
+  x_label?: string;
+  y_label?: string;
+  x_min: number;
+  x_max: number;
+  y_min?: number | null;
+  y_max?: number | null;
+  expr?: string;
+  animate?: boolean;
+  points?: Array<{ id: string; x: string; y: string; label?: string }>;
+  segments?: string[][];
+  fills?: string[][];
+  target_x?: number | null;
+  target_y?: number | null;
+  target_radius?: number;
+};
+export type LabGoal = {
+  type: "observe" | "change_param" | "quiz" | "target" | "acknowledge";
+  param?: string;
+  min_delta?: number;
+  readout?: string;
+  value?: number;
+  tolerance?: number;
+  quiz?: {
+    prompt: string;
+    choices: QuizChoice[];
+    correct: string;
+    explanation: string;
+  } | null;
+};
+export type LabPhase = {
+  id: string;
+  kind:
+    | "orient"
+    | "explore"
+    | "predict"
+    | "test"
+    | "challenge"
+    | "check"
+    | "reflect";
+  title: string;
+  coach: string;
+  locked_params: string[];
+  suggested_params?: Record<string, number>;
+  goal: LabGoal;
+  hint: string;
+  success: string;
+};
+export type InteractiveLesson = {
+  title: string;
+  tagline?: string;
+  core_question?: string;
+  payoff?: string;
+  running_example?: string;
+  visual: LabVisual;
+  parameters: LabParameter[];
+  readouts: LabReadout[];
+  phases: LabPhase[];
+  misconceptions?: string[];
+};
+
+export type LearnItemDetail = {
+  id: string;
+  kind: LearnKind | string;
+  title: string;
+  status: string;
+  payload: Record<string, unknown>;
+  progress?: Record<string, unknown>;
+  urls?: Record<string, string>;
+};
+
+export type ExtractedSource = {
+  id: string;
+  title: string;
+  filename: string;
+  char_count: number;
+  preview?: string;
+  kind: "source" | "document";
+};
+
+export type SourceLibraryItem = {
+  id: string;
+  title: string;
+  filename: string;
+  kind: "source" | "document";
+  created_at?: string | null;
+  status?: string;
+};
+
+export async function extractSourceFile(file: File): Promise<ExtractedSource> {
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    const res = await fetch(`${apiBase()}/api/source/extract`, {
+      method: "POST",
+      headers: await authHeaders(),
+      body: form,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw await readError(res, `Could not read ${file.name}`);
+    }
+    return res.json();
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Read file");
+  }
+}
+
+export async function listSourceLibrary(limit = 30): Promise<SourceLibraryItem[]> {
+  const res = await fetch(`${apiBase()}/api/source/library?limit=${limit}`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to list attached files");
+  const data = (await res.json()) as { items: SourceLibraryItem[] };
+  return data.items || [];
+}
+
+export async function streamLearnGenerate(
+  options: LearnGenerateOptions,
+  onEvent: (event: PipelineEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    const res = await fetch(`${apiBase()}/api/learn/generate/stream`, {
+      method: "POST",
+      headers: await authHeaders({
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      }),
+      body: JSON.stringify(options),
+      signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `Learn generate failed (${res.status})`);
+    }
+    await readSseStream(res, onEvent);
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Learn generate");
+  }
+}
+
+export async function fetchLearnItem(itemId: string): Promise<LearnItemDetail> {
+  const res = await fetch(`${apiBase()}/api/learn/${encodeURIComponent(itemId)}`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) throw await readError(res, `Learn item not found: ${itemId}`);
+  return res.json();
+}
+
+export async function gradeQuiz(
+  itemId: string,
+  answers: Array<{ question_id: string; answer: string | number | boolean | null }>,
+): Promise<{
+  id: string;
+  score: number;
+  correct_count: number;
+  total: number;
+  passed: boolean;
+  questions: Array<{
+    question_id: string;
+    correct: boolean;
+    expected: string;
+    explanation: string;
+    hint: string;
+  }>;
+}> {
+  const res = await fetch(
+    `${apiBase()}/api/learn/${encodeURIComponent(itemId)}/grade`,
+    {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ answers }),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) throw await readError(res, "Grade failed");
+  return res.json();
+}
+
+export async function submitLabProgress(
+  itemId: string,
+  body: {
+    phase_id: string;
+    params: Record<string, number>;
+    answers: Record<string, string>;
+    completed_phases: string[];
+  },
+): Promise<{
+  id: string;
+  phase_id: string;
+  goal_met: boolean;
+  message: string;
+  readouts: Record<string, number>;
+  completed_phases: string[];
+}> {
+  const res = await fetch(
+    `${apiBase()}/api/learn/${encodeURIComponent(itemId)}/progress`,
+    {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) throw await readError(res, "Progress failed");
   return res.json();
 }

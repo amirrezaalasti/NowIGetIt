@@ -18,7 +18,8 @@ from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
 
 
 class GenerateRequest(BaseModel):
-    prompt: str = Field(..., min_length=3, max_length=32000)
+    prompt: str = Field(default="", max_length=32000)
+    source_doc_ids: list[str] = Field(default_factory=list, max_length=6)
     resolution: str = Field(default="720p", pattern="^(480p|720p|1080p)$")
     skip_render: bool = False
     # short ≈ 60s intuition · standard ≈ 90s · deep ≈ 3 min
@@ -55,6 +56,27 @@ class GenerateRequest(BaseModel):
     @classmethod
     def _normalize_language(cls, value: str) -> str:
         return normalize_language(value)
+
+    @field_validator("source_doc_ids")
+    @classmethod
+    def _source_ids(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in value or []:
+            item_id = str(raw or "").strip()
+            if not item_id or item_id in seen:
+                continue
+            seen.add(item_id)
+            cleaned.append(item_id)
+            if len(cleaned) >= 6:
+                break
+        return cleaned
+
+    @model_validator(mode="after")
+    def _prompt_or_source(self) -> "GenerateRequest":
+        if not (self.prompt or "").strip() and not self.source_doc_ids:
+            raise ValueError("Provide a prompt or attach a file")
+        return self
 
 
 class ContinueRequest(BaseModel):

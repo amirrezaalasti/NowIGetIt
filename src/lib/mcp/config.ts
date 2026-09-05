@@ -9,6 +9,9 @@ export const UI = {
   jobProgress: "ui://nowigetit/job-progress",
   videoPlayer: "ui://nowigetit/video-player",
   slidesTutor: "ui://nowigetit/slides-tutor",
+  podcastPlayer: "ui://nowigetit/podcast-player",
+  quizRunner: "ui://nowigetit/quiz-runner",
+  interactiveLab: "ui://nowigetit/interactive-lab",
 } as const;
 
 export const MCP_APP_MIME = "text/html;profile=mcp-app";
@@ -34,6 +37,15 @@ export function fallbackPublicOrigin(): string {
 
 export function publicOriginFrom(req?: Request): string {
   if (req) {
+    const forwardedHost = req.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+    const host = forwardedHost || req.headers.get("host")?.split(",")[0]?.trim();
+    if (host) {
+      const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+      const proto =
+        forwardedProto ||
+        (host.includes("localhost") || host.startsWith("127.") ? "http" : "https");
+      return `${proto}://${host}`.replace(/\/$/, "");
+    }
     try {
       return getPublicOrigin(req).replace(/\/$/, "");
     } catch {

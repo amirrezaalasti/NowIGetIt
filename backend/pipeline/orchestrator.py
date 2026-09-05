@@ -24,6 +24,7 @@ from backend.code_utils import (
     validate_manim_code,
 )
 from backend.config import get_settings
+from backend.documents.source import prepare_generation_prompt
 from backend.llm import OpenRouterClient
 from backend.pipeline.compose import (
     compose_final_video,
@@ -1976,12 +1977,18 @@ def run_pipeline(
     """
     settings = get_settings()
     host_plan = request.scene_plan
+    teaching_prompt, display_prompt, source_names = prepare_generation_prompt(
+        request.prompt,
+        request.source_doc_ids,
+        user_id=user_id,
+    )
+    request = request.model_copy(update={"prompt": teaching_prompt})
     need_llm = host_plan is None or not request.plan_only
     client = OpenRouterClient(settings) if need_llm else None
     job_id = uuid.uuid4().hex[:12]
     work_dir = store.init_job(
         job_id,
-        prompt=request.prompt,
+        prompt=display_prompt,
         settings_snapshot={
             "model": settings.openrouter_model_manim,
             "vlm_model": settings.openrouter_vlm_model,
@@ -1998,6 +2005,8 @@ def run_pipeline(
             "plan_only": request.plan_only,
             "production_options_confirmed": not request.plan_only,
             "host_authored": host_plan is not None,
+            "source_doc_ids": list(request.source_doc_ids),
+            "source_filenames": source_names,
             **(
                 {
                     "tts_voice": request.tts_voice,
@@ -2023,7 +2032,7 @@ def run_pipeline(
         db.upsert_job(
             job_id=job_id,
             user_id=user_id,
-            prompt=request.prompt,
+            prompt=display_prompt,
             status="running",
         )
 
@@ -2136,7 +2145,7 @@ def run_pipeline(
         db.upsert_job(
             job_id=job_id,
             user_id=user_id,
-            prompt=request.prompt,
+            prompt=display_prompt,
             title=plan.title,
             status="awaiting_plan" if request.plan_only else "running",
         )

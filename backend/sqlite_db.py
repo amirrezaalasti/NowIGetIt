@@ -415,6 +415,7 @@ def _job_payload(row: sqlite3.Row) -> dict[str, Any]:
     from backend.artifacts import artifacts_root
 
     root = artifacts_root() / row["id"]
+    meta = _loads(row["meta_json"], None)
     return {
         "id": row["id"],
         "job_id": row["id"],
@@ -422,14 +423,29 @@ def _job_payload(row: sqlite3.Row) -> dict[str, Any]:
         "prompt": row["prompt"],
         "title": row["title"],
         "status": row["status"],
-        "meta": _loads(row["meta_json"], None),
+        "meta": meta,
         "plan": _loads(row["plan_json"], None),
         "events": _loads(row["events_json"], []),
         "created_at": row["created_at"],
         "has_result": (root / "result.json").exists(),
         "has_final_video": (root / "final.mp4").exists()
-        or (root / "document.json").exists(),
+        or (root / "document.json").exists()
+        or (root / "podcast.wav").exists()
+        or (root / "quiz.json").exists()
+        or (root / "interactive.json").exists(),
         "storage_bytes": int(row["storage_bytes"] or 0),
+        "kind": (meta.get("kind") if isinstance(meta, dict) else None)
+        or (
+            "document"
+            if row["id"].startswith("doc_")
+            else "podcast"
+            if row["id"].startswith("pod_")
+            else "quiz"
+            if row["id"].startswith("quiz_")
+            else "interactive"
+            if row["id"].startswith("lab_")
+            else "video"
+        ),
     }
 
 

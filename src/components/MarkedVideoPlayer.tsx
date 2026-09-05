@@ -89,6 +89,7 @@ export function MarkedVideoPlayer({
   const [retouchingId, setRetouchingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
+  const [hovered, setHovered] = useState(false);
 
   useEffect(() => {
     if (initialMarks) setMarks(initialMarks);
@@ -174,6 +175,7 @@ export function MarkedVideoPlayer({
   }, [sceneId, timeline]);
 
   useEffect(() => {
+    if (!hovered) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "m" && event.key !== "M") return;
       const target = event.target as HTMLElement | null;
@@ -185,7 +187,7 @@ export function MarkedVideoPlayer({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [beginMark]);
+  }, [beginMark, hovered]);
 
   const seekTo = (seconds: number) => {
     const video = videoRef.current;
@@ -248,7 +250,11 @@ export function MarkedVideoPlayer({
   if (!src) return null;
 
   return (
-    <div className="space-y-3">
+    <div
+      className="space-y-3"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
       <div className="relative overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface-video)]">
         {playUrl ? (
           <video

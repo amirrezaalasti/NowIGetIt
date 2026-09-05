@@ -8,6 +8,11 @@ import { AuthMedia } from "@/components/AuthMedia";
 import { MarkedVideoPlayer } from "@/components/MarkedVideoPlayer";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import {
+  SourceAttachments,
+  readySourceIds,
+  type AttachedSource,
+} from "@/components/SourceAttachments";
+import {
   ensureApiToken,
   assetUrl,
   fetchHealth,
@@ -267,6 +272,7 @@ export function Generator() {
   const { status: authStatus } = useSession();
   const searchParams = useSearchParams();
   const [prompt, setPrompt] = useState("");
+  const [attachments, setAttachments] = useState<AttachedSource[]>([]);
   const [lengthPreset, setLengthPreset] = useState<LengthPreset>("standard");
   const [scenePacing, setScenePacing] = useState<ScenePacing>("balanced");
   const [audience, setAudience] = useState<Audience>("general");
@@ -1038,7 +1044,9 @@ export function Generator() {
   }
 
   async function onGenerate() {
-    if (!prompt.trim() || running || restoring) return;
+    const sourceIds = readySourceIds(attachments);
+    if ((!prompt.trim() && sourceIds.length === 0) || running || restoring) return;
+    if (attachments.some((item) => item.status === "uploading")) return;
     if (!signedIn) {
       window.location.href = "/login";
       return;
@@ -1070,6 +1078,7 @@ export function Generator() {
       await streamGenerate(
         {
           prompt: prompt.trim(),
+          source_doc_ids: sourceIds,
           length_preset: lengthPreset,
           scene_pacing: scenePacing,
           audience,
@@ -1336,8 +1345,13 @@ export function Generator() {
               onFocus={() => setPromptFocused(true)}
               onBlur={() => setPromptFocused(false)}
               rows={4}
-              placeholder="What should click? Describe the concept you want animated…"
+              placeholder="What should click? Describe the concept — or attach notes and leave this blank."
               className="mt-10 w-full resize-none rounded-2xl border border-[var(--line)] bg-[var(--surface)] px-5 py-4 text-lg leading-relaxed text-[var(--ink)] outline-none transition focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--glow)] placeholder:text-[var(--ink-muted)]"
+              disabled={running}
+            />
+            <SourceAttachments
+              items={attachments}
+              onChange={setAttachments}
               disabled={running}
             />
 
@@ -1406,7 +1420,11 @@ export function Generator() {
             <div className="mt-8 flex flex-wrap items-center gap-4">
               <button
                 type="button"
-                disabled={running || !prompt.trim()}
+                disabled={
+                  running ||
+                  attachments.some((item) => item.status === "uploading") ||
+                  (!prompt.trim() && readySourceIds(attachments).length === 0)
+                }
                 onClick={onGenerate}
                 className="rounded-full bg-[var(--accent)] px-8 py-3 text-base font-semibold text-[var(--on-accent)] transition enabled:hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
               >

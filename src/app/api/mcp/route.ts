@@ -52,7 +52,9 @@ function mcpFor(origin: string) {
         "4) Show preview images and VLM notes when get_job / get_scene / render_video return them — they are in the tool result as images. " +
         "5) Only after they approve the storyboard AND update_video_options has production_options_confirmed: video_codegen_spec + submit_scene_code one scene at a time. Each submit returns a preview IMAGE — show it, write 1-2 sentences about what the frame shows (and any layout issues), then continue. Never dump a dozen submits with no commentary. " +
         "6) After every scene has code, render_video with user_confirmed true. Render takes minutes. If get_job/render_video returns poll_again, wait poll_after_seconds and call get_job again with the same job_id. Show new preview images as they arrive. Do not start a new job. " +
-        "Never MathTex — Text() only. Documents: upload_document, poll get_document, ask_document. Show figure images from those tools.",
+        "Never MathTex — Text() only. Documents: upload_document, poll get_document, ask_document. Show figure images from those tools. " +
+        "LEARN MODES: create_podcast (spoken episode), create_quiz then grade_quiz, create_interactive (parameterized lab with learning phases). " +
+        "Point the user at learn_url to play labs in the browser. get_learn_item reloads a pod_/quiz_/lab_ id.",
     },
   );
 }

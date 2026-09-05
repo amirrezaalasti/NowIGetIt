@@ -67,6 +67,42 @@ function jobStatusMeta(job: JobSummary): { label: string; tone: StatusTone } {
   return { label: status.replace(/_/g, " "), tone: "muted" };
 }
 
+function jobHref(job: JobSummary): string {
+  const kind = job.kind || "";
+  const id = job.job_id;
+  if (
+    kind === "podcast" ||
+    kind === "quiz" ||
+    kind === "interactive" ||
+    id.startsWith("pod_") ||
+    id.startsWith("quiz_") ||
+    id.startsWith("lab_")
+  ) {
+    return `/learn?id=${encodeURIComponent(id)}`;
+  }
+  if (kind === "document" || id.startsWith("doc_")) {
+    return `/understand?doc=${encodeURIComponent(id)}`;
+  }
+  return `/?job=${encodeURIComponent(id)}`;
+}
+
+function kindLabel(job: JobSummary): string | null {
+  const kind =
+    job.kind ||
+    (job.job_id.startsWith("pod_")
+      ? "podcast"
+      : job.job_id.startsWith("quiz_")
+        ? "quiz"
+        : job.job_id.startsWith("lab_")
+          ? "interactive"
+          : job.job_id.startsWith("doc_")
+            ? "document"
+            : "");
+  if (!kind || kind === "video") return null;
+  if (kind === "interactive") return "lab";
+  return kind;
+}
+
 function matchesFilter(job: JobSummary, filter: JobFilter): boolean {
   if (filter === "all") return true;
   const status = (job.status || "").toLowerCase();
@@ -999,10 +1035,17 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                             {j.title?.trim() || "Untitled explanation"}
                           </span>
                         </span>
-                        <span
-                          className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium capitalize ${statusToneClass(status.tone)}`}
-                        >
-                          {status.label}
+                        <span className="flex shrink-0 flex-col items-end gap-1">
+                          {kindLabel(j) ? (
+                            <span className="rounded-md bg-[var(--surface-strong)] px-1.5 py-0.5 text-[10px] capitalize text-[var(--ink-muted)]">
+                              {kindLabel(j)}
+                            </span>
+                          ) : null}
+                          <span
+                            className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium capitalize ${statusToneClass(status.tone)}`}
+                          >
+                            {status.label}
+                          </span>
                         </span>
                       </div>
                       <span className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--ink-muted)]">
@@ -1094,10 +1137,15 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <Link
-                      href={`/?job=${encodeURIComponent(job.job_id)}`}
+                      href={jobHref({
+                        job_id: job.job_id,
+                        kind:
+                          selectedSummary?.kind ||
+                          (typeof job.meta?.kind === "string" ? job.meta.kind : undefined),
+                      })}
                       className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] transition hover:border-[var(--accent)] hover:text-[var(--ink)]"
                     >
-                      Open in Create
+                      Open
                     </Link>
                     {(job.final_video_url || job.urls?.final_video) && (
                       <a

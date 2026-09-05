@@ -3,6 +3,7 @@ import { BrandLogo } from "@/components/BrandLogo";
 import {
   clientAllowsRedirect,
   issueAuthorizationCode,
+  issuerFrom,
   loadClient,
   readPendingAuthorize,
 } from "@/lib/mcp/oauth";
@@ -13,14 +14,6 @@ import type { ReactNode } from "react";
 export const dynamic = "force-dynamic";
 
 const PENDING_COOKIE = "mcp_oauth_pending";
-
-function originFromHeaders(h: Headers): string {
-  const host = h.get("x-forwarded-host") || h.get("host") || "localhost:3000";
-  const proto =
-    h.get("x-forwarded-proto") ||
-    (host.includes("localhost") || host.startsWith("127.") ? "http" : "https");
-  return `${proto}://${host}`;
-}
 
 async function approve() {
   "use server";
@@ -35,7 +28,7 @@ async function approve() {
     redirect("/connect");
   }
   const hdrs = await headers();
-  const origin = originFromHeaders(hdrs);
+  const origin = issuerFrom(new Request("https://local.invalid", { headers: hdrs }));
   const code = await issueAuthorizationCode({
     sub: session.user.id,
     email: session.user.email,
