@@ -66,6 +66,7 @@ type Props = {
   initialMarks?: HumanComment[];
   timeline?: VideoTimelineEntry[];
   onMarksChange?: (marks: HumanComment[]) => void;
+  loop?: boolean;
 };
 
 export function MarkedVideoPlayer({
@@ -76,6 +77,7 @@ export function MarkedVideoPlayer({
   initialMarks,
   timeline: timelineProp,
   onMarksChange,
+  loop = false,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -264,6 +266,7 @@ export function MarkedVideoPlayer({
             src={playUrl}
             controls
             playsInline
+            loop={loop}
             preload="metadata"
             onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
           />

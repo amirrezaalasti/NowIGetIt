@@ -174,3 +174,35 @@ def test_short_pacing_accepts_many_quick_scenes() -> None:
     _validate_plan_length(
         plan, length_preset="standard", language="en", scene_pacing="short"
     )
+
+
+def test_clip_preset_is_one_or_two_scenes() -> None:
+    assert scene_count_range("clip", "balanced") == (1, 2)
+    assert scene_count_range("clip", "short") == (1, 2)
+    assert scene_count_range("clip", "long") == (1, 2)
+
+
+def test_clip_preset_accepts_one_short_scene() -> None:
+    scene = SceneSection(
+        id="scene_1",
+        title="Halve",
+        narration="Half gone.",
+        visual_description="A bar splits.",
+        duration_seconds=12.0,
+    )
+    plan = ScenePlan(title="Binary search", concept_summary="Halve the list", scenes=[scene])
+    _validate_plan_length(plan, length_preset="clip", language="en")
+
+
+def test_clip_preset_rejects_a_lecture() -> None:
+    scenes = [_scene(f"scene_{i}", 30) for i in range(6)]
+    plan = ScenePlan(title="t", concept_summary="c", scenes=scenes)
+    with pytest.raises(ValueError, match="GIF clip"):
+        _validate_plan_length(plan, length_preset="clip", language="en")
+
+
+def test_gif_export_skips_missing_video(tmp_path) -> None:
+    from backend.pipeline.compose import export_looping_gif
+
+    assert export_looping_gif(tmp_path / "missing.mp4", tmp_path / "out.gif") is None
+

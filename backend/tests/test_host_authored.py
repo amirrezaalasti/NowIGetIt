@@ -60,6 +60,16 @@ def test_generate_request_accepts_host_scene_plan() -> None:
     assert req.scene_plan.title == "Backpropagation"
 
 
+def test_generate_request_accepts_clip_preset() -> None:
+    req = GenerateRequest.model_validate(
+        {"prompt": "Looping binary search", "length_preset": "clip"}
+    )
+    assert req.length_preset == "clip"
+    spec = planning_spec_payload()
+    assert "clip" in spec["length_target_seconds"]
+    assert spec["length_target_seconds"]["clip"]["max"] <= 16
+
+
 def test_run_pipeline_host_plan_skips_openrouter(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
     from backend.pipeline import orchestrator as orch

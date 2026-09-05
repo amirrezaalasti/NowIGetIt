@@ -18,6 +18,7 @@ import {
   type JobSummary,
 } from "@/lib/api";
 import { SceneEditor } from "@/components/SceneEditor";
+import { AuthMedia } from "@/components/AuthMedia";
 import { captureVideoFrame, formatMarkTime, MarkedVideoPlayer } from "@/components/MarkedVideoPlayer";
 
 type JobFilter = "all" | "ready" | "in_progress";
@@ -1156,6 +1157,15 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                         Download
                       </a>
                     )}
+                    {(job.gif_url || job.urls?.final_gif) && (
+                      <a
+                        href={assetUrl(job.gif_url || job.urls?.final_gif)}
+                        download
+                        className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] transition hover:border-[var(--accent)] hover:text-[var(--ink)]"
+                      >
+                        Download GIF
+                      </a>
+                    )}
                   </div>
                 </div>
                 {selectedSummary?.prompt ? (
@@ -1177,7 +1187,19 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                     timeline={job.timeline}
                     initialMarks={job.video_marks}
                     onMarksChange={() => bumpRefresh()}
+                    loop={Boolean(job.gif_url || job.urls?.final_gif)}
                   />
+                  {(job.gif_url || job.urls?.final_gif) && (
+                    <div className="mt-4">
+                      <p className="mb-2 text-sm text-[var(--ink)]">Looping GIF</p>
+                      <AuthMedia
+                        kind="image"
+                        src={job.gif_url || job.urls?.final_gif}
+                        alt="Looping GIF"
+                        className="w-full max-w-md overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface-video)]"
+                      />
+                    </div>
+                  )}
                 </div>
               ) : (
                 !loading && (

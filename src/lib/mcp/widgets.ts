@@ -145,7 +145,7 @@ function render(){
   var confirmed=!!((s.options||{}).production_options_confirmed);
   var current=s.current_scene_id||"";
   var head="Video job";
-  if(s.has_final_video||s.video_url) head="Video is ready";
+  if(s.has_final_video||s.video_url) head=s.gif_url?"GIF clip is ready":"Video is ready";
   else if(status==="running"||s.running) head="Rendering clips…";
   else if(writing) head="Writing Manim · "+saved+" of "+total;
   else if(s.awaiting_render) head="Ready to render — confirm in chat";
@@ -182,7 +182,8 @@ function render(){
       ask+clip+
     '</li>';
   }).join("");
-  var video=s.video_url?('<video controls playsinline src="'+esc(s.video_url)+'"></video>'):"";
+  var video=s.video_url?('<video controls playsinline'+(s.gif_url?' loop':'')+' src="'+esc(s.video_url)+'"></video>'):"";
+  var gif=s.gif_url?('<img class="frame" alt="Looping GIF" src="'+esc(s.gif_url)+'"/>'):"";
   var opt=s.options||{};
   var options='<div class="panel"><div class="muted">'+(confirmed?"Voice, language, audio":"Choose these before we build — spoken audio, subtitles, and voice")+'</div>'+
     '<input id="voice" placeholder="Voice (Kore, alloy, …)" value="'+esc(opt.tts_voice||"")+'"/>'+
@@ -210,6 +211,7 @@ function render(){
     '<div class="muted">'+esc(head)+'</div>'+
     bar+
     video+
+    gif+
     (scenes?'<ol>'+scenes+'</ol>':'')+
     (s.job_id?options:"")+
     '<div class="row">'+actions+open+'</div>'+
@@ -287,7 +289,8 @@ onOutput(function(s){
   s=s||{};
   var open=s.library_url?('<a class="btn ghost" href="'+esc(s.library_url)+'" target="_blank" rel="noreferrer">Open in Library</a>'):"";
   el.innerHTML='<h1>'+esc(s.title||"Explanation")+'</h1>'+
-    (s.video_url?('<video controls autoplay playsinline src="'+esc(s.video_url)+'"></video>'):'<p class="muted">Video is not ready yet. Ask to check the job.</p>')+
+    (s.video_url?('<video controls autoplay playsinline'+(s.gif_url?' loop':'')+' src="'+esc(s.video_url)+'"></video>'):'<p class="muted">Video is not ready yet. Ask to check the job.</p>')+
+    (s.gif_url?('<img class="frame" alt="Looping GIF" src="'+esc(s.gif_url)+'"/>'):'')+
     ((s.scenes||[]).map(function(sc){
       return sc.preview_url?('<img class="frame" alt="'+esc(sc.title||"")+'" src="'+esc(sc.preview_url)+'"/>'):"";
     }).join(""))+

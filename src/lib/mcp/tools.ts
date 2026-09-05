@@ -42,6 +42,7 @@ const JOB_OUTPUT = z.looseObject({
   awaiting_render: z.boolean(),
   has_final_video: z.boolean(),
   video_url: z.string().nullable(),
+  gif_url: z.string().nullable().optional(),
   scenes: z.array(z.looseObject({ id: z.string(), title: z.string() })),
 });
 
@@ -276,6 +277,12 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     (typeof job.final_video_url === "string" && job.final_video_url) ||
     (runtime.has_final_video ? `/api/jobs/${job.job_id}/file/final.mp4` : null);
   const video_url = videoPath ? await signedMediaUrl(origin, videoPath) : "";
+  const gifPath =
+    (typeof job.gif_url === "string" && job.gif_url) ||
+    (typeof (job.urls as Record<string, unknown> | undefined)?.final_gif === "string"
+      ? String((job.urls as Record<string, unknown>).final_gif)
+      : null);
+  const gif_url = gifPath ? await signedMediaUrl(origin, gifPath) : "";
   const awaiting =
     status === "awaiting_plan" ||
     Boolean((job.result as Record<string, unknown> | undefined)?.awaiting_plan_confirm);
@@ -331,7 +338,9 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     message =
       markCount > 0
         ? `Video is ready. The learner marked ${markCount} frame(s) with comments. Call list_video_marks to see the screenshots and metadata, then retouch_scene with that comment, timestamp, and comment_id.`
-        : "Video is ready. Show video_url and the scene preview images to the user. They can still retouch a scene, mark a frame on the video, or change narration.";
+        : gif_url
+          ? "Clip is ready. Show video_url (looping) and gif_url (shareable GIF) to the user."
+          : "Video is ready. Show video_url and the scene preview images to the user. They can still retouch a scene, mark a frame on the video, or change narration.";
     next_step = markCount > 0 ? "apply_video_marks" : "show_video";
   } else if (running) {
     message = "Still rendering. Wait poll_after_seconds, then call get_job with the same job_id. Do not start a new job.";
@@ -390,19 +399,30 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
       include_audio: includeAudio,
       include_subtitles: includeSubtitles,
       production_options_confirmed: optionsConfirmed,
+      length_preset: typeof settings.length_preset === "string" ? settings.length_preset : null,
     },
     ask_after_plan: optionsConfirmed
       ? []
       : awaiting
-        ? [
-            { id: "include_audio", question: "Spoken narration on or off?" },
-            { id: "include_subtitles", question: "Burned-in subtitles on or off?" },
-            { id: "tts_voice", question: "Which narrator voice?" },
-          ]
+        ? settings.length_preset === "clip"
+          ? [
+              {
+                id: "include_audio",
+                question: "GIF clips are usually silent so they loop cleanly. Spoken narration on or off?",
+              },
+              { id: "include_subtitles", question: "Burned-in subtitles on or off? Usually off for a GIF." },
+              { id: "tts_voice", question: "Which narrator voice? Skip if audio is off." },
+            ]
+          : [
+              { id: "include_audio", question: "Spoken narration on or off?" },
+              { id: "include_subtitles", question: "Burned-in subtitles on or off?" },
+              { id: "tts_voice", question: "Which narrator voice?" },
+            ]
         : [],
     scenes,
     results: resultScenes,
     video_url: video_url || null,
+    gif_url: gif_url || null,
     library_url: `${origin}/library`,
     has_final_video: Boolean(runtime.has_final_video || video_url),
     video_marks: Array.isArray(job.video_marks)
@@ -459,6 +479,7 @@ function jobDigest(payload: Record<string, unknown>): Record<string, unknown> {
     ask_after_plan: payload.ask_after_plan,
     options: payload.options,
     video_url: payload.video_url ?? null,
+    gif_url: payload.gif_url ?? null,
     has_final_video: Boolean(payload.has_final_video),
     library_url: payload.library_url,
     video_marks: Array.isArray(payload.video_marks) ? payload.video_marks : [],
@@ -746,7 +767,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Video planning spec",
       description:
-        "Return the ScenePlan JSON schema. Next: YOU write the plan as a JSON object, then call create_video with a `plan` argument (not inside prompt).",
+        "Return the ScenePlan JSON schema. Next: YOU write the plan as a JSON object, then call create_video with a `plan` argument (not inside prompt). For a looping GIF use length_preset clip (1–2 scenes, ~12s).",
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
@@ -768,7 +789,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Submit video storyboard",
       description:
-        "Save YOUR ScenePlan. `plan` is a required JSON object argument (title, concept_summary, scenes[] with beats). Do not put JSON inside prompt. Do not choose voice, audio, or subtitles here. After this tool returns, STOP, show the storyboard, and ask the user those production options. Wait for approval. Do not call render_video yet.",
+        "Save YOUR ScenePlan. `plan` is a required JSON object argument (title, concept_summary, scenes[] with beats). Do not put JSON inside prompt. Do not choose voice, audio, or subtitles here. After this tool returns, STOP, show the storyboard, and ask the user those production options. Wait for approval. Do not call render_video yet. Use length_preset `clip` for a looping ~12s GIF (1–2 scenes); short/standard/deep are lecture videos.",
       inputSchema: z.object({
         prompt: z.string().min(3).max(8000).describe("Short user request, e.g. explain backpropagation"),
         plan: z
@@ -803,7 +824,12 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
               .min(1),
           })
           .describe("ScenePlan object. Required. Not a string. Not inside prompt."),
-        length_preset: z.enum(["short", "standard", "deep"]).optional(),
+        length_preset: z
+          .enum(["clip", "short", "standard", "deep"])
+          .optional()
+          .describe(
+            "clip = looping ~12s GIF (1–2 scenes). short ≈ 60s, standard ≈ 90s, deep ≈ 3 min.",
+          ),
         audience: z.enum(["hs", "undergrad", "general"]).optional(),
         language: z.string().min(2).max(16).optional(),
         source_doc_ids: z

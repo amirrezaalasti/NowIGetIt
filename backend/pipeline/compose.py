@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Optional
 
 
+logger = logging.getLogger(__name__)
+
+
 def probe_duration(path: Path) -> float:
     """Return media duration in seconds, or 0 if unknown."""
     path = Path(path)
@@ -651,3 +654,49 @@ def _probe_has_audio(path: Path) -> bool:
         return "audio" in (proc.stdout or "")
     except Exception:  # noqa: BLE001
         return False
+
+
+def export_looping_gif(
+    video_path: Path,
+    output_path: Path,
+    *,
+    width: int = 480,
+    fps: int = 12,
+) -> Optional[str]:
+    """Turn a short mp4 into a looping GIF suitable for sharing."""
+    video_path = Path(video_path)
+    output_path = Path(output_path)
+    if not video_path.exists() or not shutil.which("ffmpeg"):
+        return None
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    vf = (
+        f"fps={fps},scale={width}:-1:flags=lanczos,"
+        "split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=full[p];"
+        "[s1][p]paletteuse=dither=bayer:bayer_scale=5"
+    )
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
+                "-vf",
+                vf,
+                "-loop",
+                "0",
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("gif export failed: %s", exc)
+        return None
+    if proc.returncode != 0 or not output_path.exists() or output_path.stat().st_size < 100:
+        err = (proc.stderr or "")[-400:]
+        logger.warning("gif export failed: %s", err)
+        output_path.unlink(missing_ok=True)
+        return None
+    return str(output_path)

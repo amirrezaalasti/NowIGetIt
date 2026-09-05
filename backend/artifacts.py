@@ -546,6 +546,8 @@ def load_job(job_id: str, *, user_id: Optional[str] = None) -> dict[str, Any]:
     }
     if (root / "final.mp4").exists():
         urls["final_video"] = f"/api/jobs/{job_id}/file/final.mp4"
+    if (root / "final.gif").exists():
+        urls["final_gif"] = f"/api/jobs/{job_id}/file/final.gif"
 
     timeline = job_timeline(job_id, scenes)
     marks = list_job_marks(job_id, scenes=scenes, timeline=timeline)
@@ -558,6 +560,7 @@ def load_job(job_id: str, *, user_id: Optional[str] = None) -> dict[str, Any]:
         "scenes": scenes,
         "events": events,
         "final_video_url": urls.get("final_video"),
+        "gif_url": urls.get("final_gif"),
         "urls": urls,
         "timeline": timeline,
         "video_marks": marks,

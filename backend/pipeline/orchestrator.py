@@ -28,6 +28,7 @@ from backend.documents.source import prepare_generation_prompt
 from backend.llm import OpenRouterClient
 from backend.pipeline.compose import (
     compose_final_video,
+    export_looping_gif,
     mux_scene_audio,
     probe_duration,
 )
@@ -35,6 +36,7 @@ from backend.pipeline.pedagogy import create_teaching_blueprint
 from backend.pipeline.planner import (
     AUDIENCE_GUIDANCE,
     create_scene_plan,
+    is_clip_preset,
     revise_scene_plan as _revise_plan_llm,
     scene_count_range,
 )
@@ -419,11 +421,24 @@ def _job_length_preset(job_id: str, fallback: str = "standard") -> str:
         meta = store.load_job(job_id).get("meta") or {}
         settings = meta.get("settings") or {}
         preset = settings.get("length_preset")
-        if isinstance(preset, str) and preset in {"short", "standard", "deep"}:
+        if isinstance(preset, str) and preset in {"clip", "short", "standard", "deep"}:
             return preset
     except Exception:  # noqa: BLE001
         pass
     return fallback
+
+
+def _maybe_gif_url(job_id: str) -> Optional[str]:
+    if not is_clip_preset(_job_length_preset(job_id)):
+        return None
+    root = store.job_dir(job_id)
+    mp4 = root / "final.mp4"
+    if not mp4.exists():
+        return None
+    path = export_looping_gif(mp4, root / "final.gif")
+    if path:
+        return f"/api/jobs/{job_id}/file/final.gif"
+    return None
 
 
 def _job_scene_pacing(job_id: str, fallback: str = "balanced") -> str:
@@ -1637,6 +1652,7 @@ def _compose_and_finish(
             store.job_dir(job_id) / "final.mp4",
         )
     final_url = f"/api/jobs/{job_id}/file/final.mp4" if final_path else None
+    gif_url = _maybe_gif_url(job_id) if final_path else None
 
     result = GenerateResult(
         title=plan.title,
@@ -1645,6 +1661,7 @@ def _compose_and_finish(
         final_debug_notes=notes,
         final_video_path=final_path,
         final_video_url=final_url,
+        gif_url=gif_url,
         render_enabled=settings.enable_manim_render and not skip_render,
         job_id=job_id,
         artifact_url=f"/api/jobs/{job_id}",
@@ -1688,6 +1705,7 @@ def _compose_and_finish(
             "job_id": job_id,
             "title": plan.title,
             "final_video_url": final_url,
+            "gif_url": gif_url,
             "artifact_url": result.artifact_url,
             "scene_count": len(artifacts),
             "scenes": [
@@ -2079,10 +2097,22 @@ def run_pipeline(
         min_scenes, max_scenes = scene_count_range(
             request.length_preset, request.scene_pacing
         )
+        if is_clip_preset(request.length_preset):
+            min_steps, max_steps = 2, max(2, max_scenes)
+            blueprint_prompt = (
+                request.prompt
+                + "\n\nFORMAT: this will be a looping ~12 second GIF clip "
+                "(1–2 scenes). Keep the teaching ladder to two short rungs. "
+                "One motion should make one idea obvious."
+            )
+        else:
+            min_steps = max(3, min_scenes)
+            max_steps = max(4, max_scenes)
+            blueprint_prompt = request.prompt
         try:
             blueprint = create_teaching_blueprint(
                 client,
-                request.prompt,
+                blueprint_prompt,
                 audience=request.audience,
                 audience_guidance=AUDIENCE_GUIDANCE.get(
                     request.audience, AUDIENCE_GUIDANCE["general"]
@@ -2091,8 +2121,8 @@ def run_pipeline(
                 # One step per scene is the target: the planner may merge two small
                 # steps or split a big one, but a blueprint far off the scene budget
                 # forces it into an awkward staging.
-                min_steps=max(3, min_scenes),
-                max_steps=max(4, max_scenes),
+                min_steps=min_steps,
+                max_steps=max_steps,
                 on_progress=_plan_progress,
             )
         except Exception as e:  # noqa: BLE001
@@ -2314,6 +2344,7 @@ def _recompose_final(
         if not muxed_clips:
             return None
         compose_final_video(muxed_clips, store.job_dir(job_id) / "final.mp4")
+    _maybe_gif_url(job_id)
     return f"/api/jobs/{job_id}/file/final.mp4"
 
 
@@ -2415,6 +2446,11 @@ def regenerate_scene(
         "video_url": video_url,
         "frame_url": artifact.vlm_frame_urls[-1] if artifact.vlm_frame_urls else None,
         "final_video_url": final_url,
+        "gif_url": (
+            f"/api/jobs/{job_id}/file/final.gif"
+            if (store.job_dir(job_id) / "final.gif").exists()
+            else None
+        ),
         "vlm_approved": artifact.vlm_approved,
         "title": scene.title,
     }
@@ -3048,6 +3084,7 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
         )
 
     final_url = None
+    gif_url = None
     if job_runner.is_pipeline_running(job_id):
         # Generation is still producing later scenes — it composes the final
         # video itself when it finishes, and this scene's clip is already in.
@@ -3065,6 +3102,7 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
             if muxed_clips:
                 compose_final_video(muxed_clips, store.job_dir(job_id) / "final.mp4")
                 final_url = f"/api/jobs/{job_id}/file/final.mp4"
+                gif_url = _maybe_gif_url(job_id)
 
     scene_video_url = (
         f"/api/jobs/{job_id}/file/scenes/{scene_id}/scene_vo.mp4"
@@ -3078,5 +3116,6 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
         "scene_id": scene_id,
         "approved": True,
         "final_video_url": final_url,
+        "gif_url": gif_url,
         "scene_video_url": scene_video_url,
     }

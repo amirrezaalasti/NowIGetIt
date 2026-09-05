@@ -9,6 +9,7 @@ type Props = {
   kind?: "video" | "image";
   className?: string;
   alt?: string;
+  loop?: boolean;
   /**
    * Bump this (e.g. an incrementing counter) whenever the underlying file at
    * `src` has been overwritten in place — regenerate/retouch always publish
@@ -30,6 +31,7 @@ export function AuthMedia({
   className,
   alt = "",
   cacheBust,
+  loop = false,
 }: Props) {
   const [playUrl, setPlayUrl] = useState<string | null>(null);
   const [posterUrl, setPosterUrl] = useState<string | null>(null);
@@ -132,6 +134,7 @@ export function AuthMedia({
           poster={posterUrl || undefined}
           controls
           playsInline
+          loop={loop}
           preload="metadata"
         />
       ) : (

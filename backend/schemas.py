@@ -22,9 +22,9 @@ class GenerateRequest(BaseModel):
     source_doc_ids: list[str] = Field(default_factory=list, max_length=6)
     resolution: str = Field(default="720p", pattern="^(480p|720p|1080p)$")
     skip_render: bool = False
-    # short ≈ 60s intuition · standard ≈ 90s · deep ≈ 3 min
+    # clip ≈ 12s looping GIF · short ≈ 60s · standard ≈ 90s · deep ≈ 3 min
     length_preset: str = Field(
-        default="standard", pattern="^(short|standard|deep)$"
+        default="standard", pattern="^(clip|short|standard|deep)$"
     )
     # short = many quick scenes · balanced = default · long = fewer deeper scenes
     scene_pacing: str = Field(
@@ -440,6 +440,7 @@ class GenerateResult(BaseModel):
     final_debug_notes: str = ""
     final_video_path: Optional[str] = None
     final_video_url: Optional[str] = None
+    gif_url: Optional[str] = None
     render_enabled: bool = False
     job_id: str = ""
     artifact_url: Optional[str] = None

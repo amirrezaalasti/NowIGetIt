@@ -765,6 +765,7 @@ def planning_spec_payload() -> dict[str, Any]:
             "Reuse palette + recurring_elements so scenes look like one video.",
             "Do not use MathTex/LaTeX in later Manim code — plan visuals that work with plain Text().",
             "Total spoken duration should land inside length_target_seconds for the chosen preset.",
+            "If length_preset is clip: 1–2 scenes totaling 8–15 seconds, looping GIF. One motion, one idea. Match the opening and closing pose. Narration is optional short labels — not a lecture.",
         ],
         "plan_schema": ScenePlan.model_json_schema(),
         "example_scene": {

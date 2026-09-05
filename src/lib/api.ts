@@ -65,6 +65,7 @@ export type JobDetail = {
   final_debug?: Record<string, unknown> | null;
   result?: Record<string, unknown> | null;
   final_video_url?: string | null;
+  gif_url?: string | null;
   scenes: Array<{
     scene_id: string;
     section?: Record<string, unknown>;
@@ -391,7 +392,7 @@ export type LanguageOption = {
   native_label: string;
 };
 
-export type LengthPreset = "short" | "standard" | "deep";
+export type LengthPreset = "clip" | "short" | "standard" | "deep";
 /** Many short scenes vs fewer longer ones (total video length unchanged). */
 export type ScenePacing = "short" | "balanced" | "long";
 export type Audience = "hs" | "undergrad" | "general";

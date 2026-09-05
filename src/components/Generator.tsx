@@ -115,9 +115,11 @@ const EXAMPLES = [
   "Explain gradient descent on a simple parabola",
   "Show why the Pythagorean theorem works visually",
   "Animate how sine and cosine relate on the unit circle",
+  "A looping GIF of binary search splitting a sorted list in half",
 ];
 
 const LENGTH_OPTIONS: { id: LengthPreset; label: string; hint: string }[] = [
+  { id: "clip", label: "GIF", hint: "~12s loop" },
   { id: "short", label: "60s", hint: "Quick intuition" },
   { id: "standard", label: "90s", hint: "Balanced" },
   { id: "deep", label: "3 min", hint: "Deep dive" },
@@ -292,6 +294,7 @@ export function Generator() {
   const [scenes, setScenes] = useState<ScenePreview[]>([]);
   const [finalNotes, setFinalNotes] = useState<string | null>(null);
   const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(null);
+  const [finalGifUrl, setFinalGifUrl] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<string>("Checking API…");
@@ -358,6 +361,14 @@ export function Generator() {
     // Seed once from ?prompt= (e.g. Understand → Create handoff)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlPrompt]);
+
+  function onLengthPresetChange(next: LengthPreset) {
+    setLengthPreset(next);
+    if (next === "clip") {
+      setIncludeAudio(false);
+      setIncludeSubtitles(false);
+    }
+  }
 
   useEffect(() => {
     eventsLenRef.current = events.length;
@@ -669,6 +680,9 @@ export function Generator() {
         setFinalVideoUrl(event.data.final_video_url);
         setFinalVideoVersion((v) => v + 1);
       }
+      if (typeof event.data.gif_url === "string") {
+        setFinalGifUrl(event.data.gif_url);
+      }
       const completedScenes = event.data.scenes as
         | Array<Record<string, unknown>>
         | undefined;
@@ -735,6 +749,9 @@ export function Generator() {
           setFinalVideoUrl(event.data.final_video_url);
           setFinalVideoVersion((v) => v + 1);
         }
+        if (typeof event.data.gif_url === "string") {
+          setFinalGifUrl(event.data.gif_url);
+        }
       }
     }
   }
@@ -789,6 +806,7 @@ export function Generator() {
         language?: unknown;
         include_audio?: unknown;
         include_subtitles?: unknown;
+        length_preset?: unknown;
       };
       if (typeof s.tts_voice === "string") setTtsVoice(s.tts_voice);
       if (typeof s.language === "string") setLanguage(s.language);
@@ -796,8 +814,18 @@ export function Generator() {
       if (typeof s.include_subtitles === "boolean") {
         setIncludeSubtitles(s.include_subtitles);
       }
+      if (
+        s.length_preset === "clip" ||
+        s.length_preset === "short" ||
+        s.length_preset === "standard" ||
+        s.length_preset === "deep"
+      ) {
+        setLengthPreset(s.length_preset);
+      }
     }
     if (job.final_video_url) setFinalVideoUrl(job.final_video_url);
+    if (job.gif_url) setFinalGifUrl(job.gif_url);
+    else if (job.urls?.final_gif) setFinalGifUrl(job.urls.final_gif);
     if (job.final_debug && typeof job.final_debug.notes === "string") {
       setFinalNotes(job.final_debug.notes);
     }
@@ -992,6 +1020,7 @@ export function Generator() {
     setScenes([]);
     setFinalNotes(null);
     setFinalVideoUrl(null);
+    setFinalGifUrl(null);
     setJobId(null);
     setStoredActiveJobId(null);
     setError(null);
@@ -1063,6 +1092,7 @@ export function Generator() {
     setScenes([]);
     setFinalNotes(null);
     setFinalVideoUrl(null);
+    setFinalGifUrl(null);
     setJobId(null);
     setLiveMessage("Planning storyboard…");
     setLatestCode(null);
@@ -1360,16 +1390,18 @@ export function Generator() {
                 label="Length"
                 value={lengthPreset}
                 options={LENGTH_OPTIONS}
-                onChange={setLengthPreset}
+                onChange={onLengthPresetChange}
                 disabled={running}
               />
-              <SegmentedControl
-                label="Scenes"
-                value={scenePacing}
-                options={SCENE_PACING_OPTIONS}
-                onChange={setScenePacing}
-                disabled={running}
-              />
+              {lengthPreset !== "clip" && (
+                <SegmentedControl
+                  label="Scenes"
+                  value={scenePacing}
+                  options={SCENE_PACING_OPTIONS}
+                  onChange={setScenePacing}
+                  disabled={running}
+                />
+              )}
               <SegmentedControl
                 label="Audience"
                 value={audience}
@@ -1431,7 +1463,9 @@ export function Generator() {
                 Plan storyboard
               </button>
               <p className="text-sm text-[var(--ink-muted)]">
-                Voice, spoken audio, and subtitles come after you review the plan.
+                {lengthPreset === "clip"
+                  ? "One idea, one motion, ~12 seconds. Exports as a looping GIF. Audio stays off unless you turn it on after the plan."
+                  : "Voice, spoken audio, and subtitles come after you review the plan."}
               </p>
             </div>
 
@@ -1459,8 +1493,9 @@ export function Generator() {
                   Edit the plan
                 </h2>
                 <p className="mt-2 max-w-xl text-sm text-[var(--ink-muted)]">
-                  Tweak narration and visuals, then choose spoken audio, subtitles,
-                  and voice before you confirm.
+                  {lengthPreset === "clip"
+                    ? "Keep this to one looping motion. Spoken audio is off by default — turn it on only if a short label needs a voice."
+                    : "Tweak narration and visuals, then choose spoken audio, subtitles, and voice before you confirm."}
                   {editingPlan.visual_identity
                     ? ` ${editingPlan.visual_identity}`
                     : ""}
@@ -1490,7 +1525,9 @@ export function Generator() {
                 After the plan · audio &amp; subtitles
               </span>
               <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                These are applied when you generate — not while planning scenes.
+                {lengthPreset === "clip"
+                  ? "GIF clips usually stay silent so they loop cleanly. Turn audio on only if you want a short voiceover."
+                  : "These are applied when you generate — not while planning scenes."}
               </p>
               <div className="mt-3 flex flex-wrap items-end gap-4">
                 <label className="flex min-w-[12rem] flex-1 flex-col gap-1.5">
@@ -1888,26 +1925,52 @@ export function Generator() {
               </div>
             )}
 
-            {mode === "result" && finalVideoUrl && (
+            {mode === "result" && (finalVideoUrl || finalGifUrl) && (
               <div className="mt-8">
-                {jobId ? (
-                  <>
-                    <p className="mb-2 text-sm text-[var(--ink-muted)]">
-                      Mark a frame while watching, add a comment, and the agent can retouch that scene from the screenshot.
-                    </p>
-                    <MarkedVideoPlayer
-                      jobId={jobId}
+                {finalVideoUrl &&
+                  (jobId ? (
+                    <>
+                      <p className="mb-2 text-sm text-[var(--ink-muted)]">
+                        {lengthPreset === "clip" || finalGifUrl
+                          ? "This clip loops. Mark a frame if you want the agent to retouch the motion."
+                          : "Mark a frame while watching, add a comment, and the agent can retouch that scene from the screenshot."}
+                      </p>
+                      <MarkedVideoPlayer
+                        jobId={jobId}
+                        src={finalVideoUrl}
+                        cacheBust={finalVideoVersion}
+                        timeline={timelineFromPreviews(scenes)}
+                        loop={lengthPreset === "clip" || Boolean(finalGifUrl)}
+                      />
+                    </>
+                  ) : (
+                    <AuthMedia
                       src={finalVideoUrl}
                       cacheBust={finalVideoVersion}
-                      timeline={timelineFromPreviews(scenes)}
+                      loop={lengthPreset === "clip" || Boolean(finalGifUrl)}
+                      className="w-full overflow-hidden rounded-2xl border border-[var(--line)]"
                     />
-                  </>
-                ) : (
-                  <AuthMedia
-                    src={finalVideoUrl}
-                    cacheBust={finalVideoVersion}
-                    className="w-full overflow-hidden rounded-2xl border border-[var(--line)]"
-                  />
+                  ))}
+                {finalGifUrl && (
+                  <div className="mt-6">
+                    <p className="mb-2 text-sm text-[var(--ink-muted)]">
+                      Looping GIF · share this anywhere
+                    </p>
+                    <AuthMedia
+                      kind="image"
+                      src={finalGifUrl}
+                      alt="Looping GIF"
+                      cacheBust={finalVideoVersion}
+                      className="w-full max-w-md overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface-video)]"
+                    />
+                    <a
+                      href={assetUrl(finalGifUrl)}
+                      download
+                      className="mt-3 inline-block text-sm font-medium text-[var(--accent)] underline-offset-4 hover:underline"
+                    >
+                      Download GIF
+                    </a>
+                  </div>
                 )}
                 {jobId && (
                   <p className="mt-3 text-sm text-[var(--ink-muted)]">

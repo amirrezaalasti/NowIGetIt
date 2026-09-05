@@ -68,7 +68,7 @@ LLM scene planning → Manim codegen → VLM frame review → TTS narration → 
 
 You always see a **storyboard first**. Change scenes, narration, voice, audio, and subtitles before anything renders. After a video exists, pause on a frame, **mark that moment**, leave a comment, and the agent retouches from that screenshot and timestamp.
 
-Attach a PDF, deck, or notes (or pick one from Library) — the storyboard is grounded in that material. The prompt can be empty.
+Length: **GIF** (~12s looping clip, also exported as `final.gif`), **60s**, **90s**, or **3 min**. Attach a PDF, deck, or notes (or pick one from Library) — the storyboard is grounded in that material. The prompt can be empty.
 
 ### 📄 Understand (documents) <a id="understand"></a>
 
