@@ -30,6 +30,46 @@ const MAX_EMBED_IMAGES = 4;
 
 type ImagePart = { type: "image"; data: string; mimeType: string };
 
+const JOB_OUTPUT = z.looseObject({
+  job_id: z.string(),
+  title: z.string(),
+  status: z.string(),
+  next_step: z.string(),
+  message: z.string(),
+  error: z.string().nullable(),
+  poll_again: z.boolean(),
+  awaiting_user: z.boolean(),
+  awaiting_render: z.boolean(),
+  has_final_video: z.boolean(),
+  video_url: z.string().nullable(),
+  scenes: z.array(z.looseObject({ id: z.string(), title: z.string() })),
+});
+
+const SCENE_OUTPUT = z.looseObject({
+  job_id: z.string(),
+  id: z.string(),
+  title: z.string(),
+  narration: z.string(),
+  has_code: z.boolean(),
+  code: z.string().nullable(),
+});
+
+const DOCUMENT_OUTPUT = z.looseObject({
+  doc_id: z.string(),
+  title: z.string(),
+  status: z.string(),
+  slide_count: z.number(),
+  current_slide_id: z.string().nullable(),
+  slides: z.array(z.looseObject({ id: z.string(), index: z.number(), title: z.string() })),
+});
+
+const JOB_LIST_OUTPUT = z.looseObject({ jobs: z.array(z.looseObject({})) });
+const DOCUMENT_LIST_OUTPUT = z.looseObject({ documents: z.array(z.looseObject({})) });
+const USAGE_OUTPUT = z.looseObject({ storage_mode: z.string(), note: z.string() });
+const SEARCH_OUTPUT = z.looseObject({
+  results: z.array(z.looseObject({ id: z.string(), title: z.string(), url: z.string() })),
+});
+
 function fail(err: unknown) {
   const message =
     err instanceof ApiError
@@ -48,13 +88,20 @@ function fail(err: unknown) {
   };
 }
 
+/**
+ * `structuredContent` carries the full payload. The text block is the fallback for
+ * hosts that ignore structured output, so pass `textData` to put a digest there
+ * rather than a second copy of everything.
+ */
 function ok(
   data: Record<string, unknown>,
   widgetUri?: string,
   textExtra?: string,
   images?: ImagePart[],
+  textData?: Record<string, unknown>,
 ) {
-  const text = textExtra ? `${textExtra}\n\n${JSON.stringify(data)}` : JSON.stringify(data);
+  const body = JSON.stringify(textData ?? data);
+  const text = textExtra ? `${textExtra}\n\n${body}` : body;
   return {
     structuredContent: data,
     content: [
@@ -153,7 +200,6 @@ function sceneSummaries(
 }
 
 function storyboardStop(payload: Record<string, unknown>): Record<string, unknown> {
-  const scenes = Array.isArray(payload.scenes) ? payload.scenes : [];
   const options = (payload.options || {}) as Record<string, unknown>;
   const optionsConfirmed = Boolean(options.production_options_confirmed);
   return {
@@ -177,7 +223,6 @@ function storyboardStop(payload: Record<string, unknown>): Record<string, unknow
           { id: "include_subtitles", question: "Burned-in subtitles on or off?" },
           { id: "tts_voice", question: "Which narrator voice?" },
         ],
-    user_facing_storyboard: scenes,
   };
 }
 
@@ -349,28 +394,87 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
   };
 }
 
+/**
+ * What goes in the text block. Structured content still carries everything; this
+ * drops what the model does not need for the turn it is on — scene narration
+ * while a render is in flight, review details before a clip exists.
+ */
+function jobDigest(payload: Record<string, unknown>): Record<string, unknown> {
+  const scenes = Array.isArray(payload.scenes)
+    ? (payload.scenes as Array<Record<string, unknown>>)
+    : [];
+  const polling = Boolean(payload.poll_again);
+  const awaitingUser = Boolean(payload.awaiting_user);
+  return {
+    job_id: payload.job_id,
+    title: payload.title,
+    status: payload.status,
+    next_step: payload.next_step,
+    message: payload.message,
+    error: payload.error ?? null,
+    awaiting_user: awaitingUser,
+    awaiting_render: Boolean(payload.awaiting_render),
+    poll_again: polling,
+    poll_after_seconds: payload.poll_after_seconds ?? 0,
+    do_not_call: payload.do_not_call,
+    ask_after_plan: payload.ask_after_plan,
+    options: payload.options,
+    video_url: payload.video_url ?? null,
+    has_final_video: Boolean(payload.has_final_video),
+    library_url: payload.library_url,
+    scenes: scenes.map((scene, i) => {
+      const base = {
+        id: String(scene.id || `scene_${i + 1}`),
+        title: String(scene.title || `Scene ${i + 1}`),
+        has_code: Boolean(scene.has_code),
+      };
+      // Mid-render polls repeat every 8s and nothing per-scene has changed.
+      if (polling) return base;
+      // The storyboard turn is the one where narration has to be read out loud.
+      if (awaitingUser) {
+        return {
+          ...base,
+          duration_seconds: scene.duration_seconds ?? null,
+          narration: String(scene.narration || ""),
+        };
+      }
+      return {
+        ...base,
+        narration: String(scene.narration || ""),
+        preview_url: scene.preview_url || "",
+        clip_url: scene.clip_url || "",
+        vlm: scene.vlm ?? null,
+      };
+    }),
+  };
+}
+
 async function jobResult(origin: string, job: Record<string, unknown>, extraText?: string) {
   const payload = await jobPayload(origin, job);
-  const images = await embedImages(
-    origin,
-    payload.scenes.map((scene) => {
-      const match = (job.scenes as Array<Record<string, unknown>> | undefined)?.find(
-        (art) => String(art.scene_id) === scene.id,
+  // Each frame is ~500 KB of base64. A render poll returns the same frames it
+  // returned 8 seconds ago, so only pay for them once the job stops moving.
+  const images = payload.poll_again
+    ? []
+    : await embedImages(
+        origin,
+        payload.scenes.map((scene) => {
+          const match = (job.scenes as Array<Record<string, unknown>> | undefined)?.find(
+            (art) => String(art.scene_id) === scene.id,
+          );
+          const reviews = Array.isArray(match?.vlm_reviews)
+            ? (match?.vlm_reviews as Array<Record<string, unknown>>)
+            : [];
+          const last = reviews.length ? reviews[reviews.length - 1] : null;
+          return typeof last?.frame_url === "string" ? last.frame_url : null;
+        }),
       );
-      const reviews = Array.isArray(match?.vlm_reviews)
-        ? (match?.vlm_reviews as Array<Record<string, unknown>>)
-        : [];
-      const last = reviews.length ? reviews[reviews.length - 1] : null;
-      return typeof last?.frame_url === "string" ? last.frame_url : null;
-    }),
-  );
   const widget = payload.has_final_video ? UI.videoPlayer : UI.jobProgress;
   const text =
     extraText ||
     (payload.has_final_video
       ? "Video is ready. Show video_url and the preview images."
       : payload.message);
-  return ok(payload, widget, text, images);
+  return ok(payload, widget, text, images, jobDigest(payload));
 }
 
 async function documentPayload(
@@ -453,7 +557,34 @@ async function documentResult(
   const figures = blocks.filter((block) => block.image_path);
   const paths = (wanted.length ? wanted : figures).map((block) => block.image_path);
   const images = await embedImages(origin, paths);
-  return ok({ ...doc, ...extra }, UI.slidesTutor, textExtra, images);
+  const extras = { ...(extra || {}) };
+  // The reply is already the text prefix — don't repeat it inside the digest.
+  if (textExtra && extras.reply === textExtra) delete extras.reply;
+  const digest = {
+    doc_id: doc.doc_id,
+    title: doc.title,
+    status: doc.status,
+    slide_count: doc.slide_count,
+    current_slide_id: doc.current_slide_id,
+    understand_url: doc.understand_url,
+    ...extras,
+    current_slide: slide
+      ? {
+          id: slide.id,
+          index: slide.index,
+          title: slide.title,
+          html_url: slide.html_url,
+          blocks: slide.blocks,
+        }
+      : null,
+    // Ids and titles only — ask for a slide by id to get its blocks.
+    slides: doc.slides.map((item) => ({
+      id: item.id,
+      index: item.index,
+      title: item.title,
+    })),
+  };
+  return ok({ ...doc, ...extra }, UI.slidesTutor, textExtra, images, digest);
 }
 
 export function registerNowIGetIt(server: McpServer, origin: string) {
@@ -476,6 +607,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
       title: "Video planning spec",
       description:
         "Return the ScenePlan JSON schema. Next: YOU write the plan as a JSON object, then call create_video with a `plan` argument (not inside prompt).",
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
       try {
@@ -536,6 +668,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         language: z.string().min(2).max(16).optional(),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ prompt, plan, length_preset, audience, language }) => {
       try {
@@ -567,6 +701,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           payload,
           UI.jobProgress,
           "STOP AND SHOW THE USER THIS STORYBOARD. Numbered scenes with titles and narration. Then ask whether they want spoken audio, burned-in subtitles, and which voice. Call update_video_options with their answers. Do not render, do not write Manim, do not list_jobs until they reply.",
+          undefined,
+          jobDigest(payload),
         );
       } catch (err) {
         return fail(err);
@@ -584,6 +720,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         job_id: z.string().min(4),
         scene_id: z.string().min(1).describe("e.g. scene_1"),
       }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ job_id, scene_id }) => {
       try {
@@ -626,6 +763,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           .describe("Complete Python source: from manim import * and a Scene subclass."),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ job_id, scene_id, code }) => {
       try {
@@ -652,12 +791,15 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         );
         const payload = await jobPayload(origin, job);
         const ready = Boolean(saved.ready_to_render);
+        const merged = { ...payload, ...saved };
         return ok(
-          { ...payload, ...saved },
+          merged,
           UI.jobProgress,
           ready
             ? "All scenes have code. Call render_video with user_confirmed true, then keep polling get_job if poll_again is true."
             : `Saved ${scene_id}. Still missing: ${JSON.stringify(saved.scenes_missing_code)}.`,
+          undefined,
+          jobDigest(merged),
         );
       } catch (err) {
         return fail(err);
@@ -701,11 +843,13 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
       );
     }
     if (waited.payload.poll_again) {
-      const payload = await jobPayload(origin, job);
+      const payload = { ...(await jobPayload(origin, job)), poll_again: true, poll_after_seconds: 8 };
       return ok(
-        { ...payload, poll_again: true, poll_after_seconds: 8 },
+        payload,
         UI.jobProgress,
         "Still rendering. Wait 8 seconds, then call get_job with this same job_id. Do not start a new job.",
+        undefined,
+        jobDigest(payload),
       );
     }
     if (waited.payload.status === "awaiting_render") {
@@ -731,6 +875,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           .describe("Must be true. Confirms the user already approved the storyboard in chat."),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ job_id, user_confirmed }) => {
       try {
@@ -767,6 +913,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         user_confirmed: z.boolean().optional(),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ job_id, user_confirmed }) => {
       try {
@@ -809,6 +957,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           .describe("Full ScenePlan JSON object. There is no instructions field."),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
     async ({ job_id, plan }) => {
       try {
@@ -826,6 +976,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           payload,
           UI.jobProgress,
           "STOP. Show the updated storyboard to the user and wait for approval. They can still change any scene. Do not render yet.",
+          undefined,
+          jobDigest(payload),
         );
       } catch (err) {
         return fail(err);
@@ -848,6 +1000,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           .describe("What the user wants changed, in their own words."),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     async ({ job_id, instructions }) => {
       try {
@@ -860,10 +1014,13 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           origin,
           `/api/jobs/${encodeURIComponent(job_id)}`,
         );
+        const payload = storyboardStop(await jobPayload(origin, job));
         return ok(
-          storyboardStop(await jobPayload(origin, job)),
+          payload,
           UI.jobProgress,
           "STOP. Show the revised storyboard and wait for approval. Do not render yet.",
+          undefined,
+          jobDigest(payload),
         );
       } catch (err) {
         return fail(err);
@@ -896,6 +1053,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           .optional(),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ job_id, scene_id, ...patch }) => {
       try {
@@ -918,10 +1077,13 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           origin,
           `/api/jobs/${encodeURIComponent(job_id)}`,
         );
+        const payload = storyboardStop(await jobPayload(origin, job));
         return ok(
-          storyboardStop(await jobPayload(origin, job)),
+          payload,
           UI.jobProgress,
           `Updated ${scene_id}. Show the new storyboard and wait — do not render until they approve.`,
+          undefined,
+          jobDigest(payload),
         );
       } catch (err) {
         return fail(err);
@@ -947,6 +1109,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         language: z.string().min(2).max(16).optional(),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ job_id, tts_voice, language, include_audio, include_subtitles }) => {
       try {
@@ -973,6 +1137,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           payload,
           UI.jobProgress,
           "Production options saved. Show the storyboard, wait for them to approve the plan, then write Manim. Do not invent a different voice or subtitle setting.",
+          undefined,
+          jobDigest(payload),
         );
       } catch (err) {
         return fail(err);
@@ -991,6 +1157,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         scene_id: z.string().min(1),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: SCENE_OUTPUT,
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ job_id, scene_id }) => {
       try {
@@ -1011,23 +1179,26 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         const last = reviews.length ? reviews[reviews.length - 1] : null;
         const framePath = typeof last?.frame_url === "string" ? last.frame_url : null;
         const images = await embedImages(origin, [framePath]);
+        const detail = {
+          job_id,
+          ...scene,
+          code: code || null,
+          vlm_reviews: reviews.map((review) => ({
+            approved: review.approved,
+            issues: review.issues,
+            clarity_score: review.clarity_score,
+            frame_url: review.frame_url,
+          })),
+        };
         return ok(
-          {
-            job_id,
-            ...scene,
-            code: code || null,
-            vlm_reviews: reviews.map((review) => ({
-              approved: review.approved,
-              issues: review.issues,
-              clarity_score: review.clarity_score,
-              frame_url: review.frame_url,
-            })),
-          },
+          detail,
           UI.jobProgress,
           code
             ? "Scene details plus Manim. The user can change narration with update_scene or the code with submit_scene_code / retouch_scene."
             : "Scene details. No Manim yet — wait for storyboard approval before writing code.",
           images,
+          // Only the newest review informs the next edit; earlier ones are history.
+          { ...detail, vlm_reviews: detail.vlm_reviews.slice(-1) },
         );
       } catch (err) {
         return fail(err);
@@ -1051,6 +1222,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           .describe("What the user wants changed in this scene."),
       }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     async ({ job_id, scene_id, comment }) => {
       try {
@@ -1084,6 +1257,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         "Poll one job. If poll_again is true, wait poll_after_seconds and call again with the SAME job_id. If awaiting_user, show the storyboard and wait — do not render. If video_url is set, play it. Never start a new job because a poll is still running.",
       inputSchema: z.object({ job_id: z.string().min(4) }),
       _meta: widgetMeta(UI.jobProgress),
+      outputSchema: JOB_OUTPUT,
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ job_id }) => {
       try {
@@ -1118,6 +1293,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
       inputSchema: z.object({
         limit: z.number().int().min(1).max(50).optional(),
       }),
+      outputSchema: JOB_LIST_OUTPUT,
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ limit }) => {
       try {
@@ -1151,6 +1328,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         filename: z.string().optional(),
       }),
       _meta: widgetMeta(UI.slidesTutor),
+      outputSchema: DOCUMENT_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async ({ file_url, file_base64, filename }) => {
       try {
@@ -1212,6 +1391,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
       inputSchema: z.object({
         limit: z.number().int().min(1).max(50).optional(),
       }),
+      outputSchema: DOCUMENT_LIST_OUTPUT,
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ limit }) => {
       try {
@@ -1246,6 +1427,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         slide_id: z.string().optional(),
       }),
       _meta: widgetMeta(UI.slidesTutor),
+      outputSchema: DOCUMENT_OUTPUT,
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ doc_id, slide_id }) => {
       try {
@@ -1285,6 +1468,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           .optional(),
       }),
       _meta: widgetMeta(UI.slidesTutor),
+      outputSchema: DOCUMENT_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({
       doc_id,
@@ -1341,6 +1526,8 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Get usage",
       description: "Show remaining generation/token/storage quota for this connector identity.",
+      outputSchema: USAGE_OUTPUT,
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
       try {
@@ -1374,6 +1561,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
       description: "Search this connector's videos and documents by title or prompt.",
       inputSchema: z.object({ query: z.string() }),
       annotations: { readOnlyHint: true, openWorldHint: false },
+      outputSchema: SEARCH_OUTPUT,
     },
     async ({ query }) => {
       try {
