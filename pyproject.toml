@@ -20,26 +20,9 @@ dependencies = [
   "setuptools>=70.0.0; python_version >= '3.12'",
 ]
 
-# Manim/cairo stay optional. Vercel uv installs this package from pyproject.toml
-# and has no pangocairo; local/Railway worker use `pip install -e ".[manim]"`
-# or requirements-local.txt / requirements-render.txt.
-[project.optional-dependencies]
-manim = [
-  "manim>=0.18.0",
-  "manimgl>=1.7.0",
-  "imageio>=2.31.0",
-  "imageio-ffmpeg>=0.4.9",
-  "scipy>=1.11.0",
-  "pycairo>=1.24.0",
-  "manimpango>=0.5.0",
-  "PyOpenGL>=3.1.0",
-  "moderngl>=5.8.0",
-]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend", "api"]
-
