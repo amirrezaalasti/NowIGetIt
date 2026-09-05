@@ -26,7 +26,7 @@ export type HumanComment = {
 
 export type JobRuntimeStatus = {
   job_id: string;
-  status: "complete" | "running" | "awaiting_plan" | "interrupted" | "unknown" | string;
+  status: "complete" | "running" | "awaiting_plan" | "awaiting_render" | "interrupted" | "error" | "unknown" | string;
   /** The main generation pipeline is building scenes. */
   running: boolean;
   /** True when the pipeline OR any single-scene edit is in flight. */
@@ -347,6 +347,10 @@ export async function fetchHealth(): Promise<{
   manim_version?: string;
   auth_configured?: boolean;
   supabase_configured?: boolean;
+  storage_mode?: "local" | "mongo" | "supabase";
+  supabase_available?: boolean;
+  database?: string;
+  mongodb_configured?: boolean;
   render_worker_configured?: boolean;
   render_worker_ok?: boolean | null;
   render_worker_detail?: string | null;
@@ -373,6 +377,7 @@ export type UsageSnapshot = {
     bytes_used: number;
     bytes_limit: number;
   };
+  unlimited?: boolean;
 };
 
 export async function fetchMe(signal?: AbortSignal): Promise<{
@@ -384,6 +389,9 @@ export async function fetchMe(signal?: AbortSignal): Promise<{
   };
   usage: UsageSnapshot | null;
   supabase_configured: boolean;
+  storage_mode: "local" | "mongo" | "supabase";
+  supabase_available: boolean;
+  artifacts_root?: string;
 }> {
   try {
     const res = await fetch(`${apiBase()}/api/me`, {
@@ -397,6 +405,35 @@ export async function fetchMe(signal?: AbortSignal): Promise<{
     if ((err as Error).name === "AbortError") throw err;
     throw friendlyFetchError(err, "Account usage");
   }
+}
+
+export async function setStorageMode(
+  mode: "local" | "mongo" | "supabase",
+): Promise<{
+  storage_mode: "local" | "mongo" | "supabase";
+  supabase_configured: boolean;
+  supabase_available: boolean;
+}> {
+  const res = await fetch(`${apiBase()}/api/me/storage`, {
+    method: "PUT",
+    cache: "no-store",
+    headers: {
+      ...(await authHeaders()),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) {
+    let message = "Failed to update storage mode";
+    try {
+      const body = (await res.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") message = body.detail;
+    } catch {
+      /* keep default */
+    }
+    throw new Error(message);
+  }
+  return res.json();
 }
 
 export async function listJobs(): Promise<JobSummary[]> {

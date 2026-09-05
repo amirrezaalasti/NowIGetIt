@@ -43,6 +43,8 @@ class GenerateRequest(BaseModel):
     include_subtitles: bool = True
     # If true, stop after planning so the UI can edit the storyboard
     plan_only: bool = False
+    # Host-authored storyboard (ChatGPT/Claude MCP). Skips OpenRouter planning.
+    scene_plan: Optional["ScenePlan"] = None
 
     @field_validator("tts_voice")
     @classmethod
@@ -64,6 +66,10 @@ class ContinueRequest(BaseModel):
     tts_voice: Optional[str] = Field(default=None, max_length=64)
     include_audio: Optional[bool] = None
     include_subtitles: Optional[bool] = None
+    # Use Manim already saved via PUT .../scenes/{id}/code (no OpenRouter codegen).
+    skip_codegen: bool = False
+    # Skip VLM review/auto-revise (MCP host is the reviewer).
+    skip_vlm: bool = False
 
     @field_validator("tts_voice")
     @classmethod
@@ -267,6 +273,10 @@ class UpdatePlanRequest(BaseModel):
     plan: ScenePlan
 
 
+class SubmitSceneCodeRequest(BaseModel):
+    code: str = Field(..., min_length=40, max_length=120_000)
+
+
 class RevisePlanRequest(BaseModel):
     """Ask the AI planner to add/remove/edit scenes via natural language."""
 
@@ -363,3 +373,10 @@ class GenerateResult(BaseModel):
     artifact_url: Optional[str] = None
     scene_plan_url: Optional[str] = None
     awaiting_plan_confirm: bool = False
+
+
+class StorageModeRequest(BaseModel):
+    mode: str = Field(..., pattern="^(local|mongo|supabase)$")
+
+
+GenerateRequest.model_rebuild()

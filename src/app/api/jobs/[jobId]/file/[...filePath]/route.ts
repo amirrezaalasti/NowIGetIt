@@ -120,6 +120,10 @@ export async function GET(
     "Content-Type": contentType,
     "Accept-Ranges": "bytes",
     "Cache-Control": "private, max-age=30",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Expose-Headers":
+      "Content-Length, Content-Range, Accept-Ranges",
+    "Cross-Origin-Resource-Policy": "cross-origin",
   });
 
   if (range) {
@@ -148,4 +152,17 @@ export async function GET(
   const nodeStream = createReadStream(abs);
   const webStream = Readable.toWeb(nodeStream) as ReadableStream;
   return new NextResponse(webStream, { status: 200, headers });
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Range, Authorization, Content-Type",
+      "Access-Control-Max-Age": "86400",
+      "Cross-Origin-Resource-Policy": "cross-origin",
+    },
+  });
 }

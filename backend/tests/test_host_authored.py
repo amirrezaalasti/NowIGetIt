@@ -1,0 +1,177 @@
+"""Host-authored MCP storyboards skip OpenRouter planning."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from backend.pipeline.orchestrator import continue_pipeline, run_pipeline
+from backend.pipeline.planner import planning_spec_payload
+from backend.schemas import ContinueRequest, GenerateRequest, ScenePlan
+
+
+def _host_plan() -> dict:
+    spec = planning_spec_payload()
+    return {
+        "title": "Backpropagation",
+        "concept_summary": "Gradients from the loss.",
+        "scenes": [spec["example_scene"]],
+    }
+
+
+def _stub_db(monkeypatch) -> None:
+    from backend.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch.db, "ensure_user", lambda **_k: None)
+    monkeypatch.setattr(orch.db, "upsert_job", lambda **_k: None)
+    monkeypatch.setattr(orch.db, "save_job_state", lambda **_k: None)
+
+
+def test_planning_spec_example_is_a_valid_scene_plan() -> None:
+    spec = planning_spec_payload()
+    assert "plan_schema" in spec
+    plan = ScenePlan.model_validate(
+        {
+            "title": "Backpropagation",
+            "concept_summary": "Error flows backward so weights can share the blame.",
+            "scenes": [spec["example_scene"]],
+        }
+    )
+    assert plan.scenes[0].id == "scene_1"
+    assert plan.scenes[0].beats
+    assert plan.scenes[0].narration
+
+
+def test_generate_request_accepts_host_scene_plan() -> None:
+    spec = planning_spec_payload()
+    req = GenerateRequest.model_validate(
+        {
+            "prompt": "Explain backpropagation",
+            "plan_only": True,
+            "scene_plan": {
+                "title": "Backpropagation",
+                "concept_summary": "Gradients from the loss.",
+                "scenes": [spec["example_scene"]],
+            },
+        }
+    )
+    assert req.scene_plan is not None
+    assert req.scene_plan.title == "Backpropagation"
+
+
+def test_run_pipeline_host_plan_skips_openrouter(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend.pipeline import orchestrator as orch
+
+    def _boom(*_a, **_k):
+        raise AssertionError("OpenRouterClient must not be constructed for host plans")
+
+    monkeypatch.setattr(orch, "OpenRouterClient", _boom)
+    _stub_db(monkeypatch)
+    spec = planning_spec_payload()
+    req = GenerateRequest.model_validate(
+        {
+            "prompt": "Explain backpropagation",
+            "plan_only": True,
+            "scene_plan": {
+                "title": "Backpropagation",
+                "concept_summary": "Gradients from the loss.",
+                "scenes": [spec["example_scene"]],
+            },
+        }
+    )
+    result = run_pipeline(req, user_id="mcp-connector")
+    assert result.awaiting_plan_confirm is True
+    assert result.job_id
+    assert result.plan.title == "Backpropagation"
+
+
+def test_job_status_saved_code_is_awaiting_render(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend import job_runner
+
+    job_id = "codeonly1234"
+    root = tmp_path / job_id
+    (root / "scenes" / "scene_1").mkdir(parents=True)
+    (root / "meta.json").write_text(json.dumps({"job_id": job_id}), encoding="utf-8")
+    (root / "scene_plan.json").write_text(json.dumps(_host_plan()), encoding="utf-8")
+    (root / "scenes" / "scene_1" / "code_final.py").write_text("x = 1\n", encoding="utf-8")
+    status = job_runner.job_status(job_id)
+    assert status["status"] == "awaiting_render"
+    assert status["running"] is False
+    assert not status["error"]
+
+
+def test_job_status_clip_without_final_is_interrupted(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend import job_runner
+
+    job_id = "partialclip12"
+    root = tmp_path / job_id
+    (root / "scenes" / "scene_1").mkdir(parents=True)
+    (root / "meta.json").write_text(json.dumps({"job_id": job_id}), encoding="utf-8")
+    (root / "scene_plan.json").write_text(json.dumps(_host_plan()), encoding="utf-8")
+    (root / "scenes" / "scene_1" / "code_final.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "scenes" / "scene_1" / "scene.mp4").write_bytes(b"fake")
+    status = job_runner.job_status(job_id)
+    assert status["status"] == "interrupted"
+
+
+def test_job_status_persisted_error_is_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend import job_runner
+
+    job_id = "renderfail123"
+    root = tmp_path / job_id
+    (root / "scenes" / "scene_1").mkdir(parents=True)
+    (root / "meta.json").write_text(json.dumps({"job_id": job_id}), encoding="utf-8")
+    (root / "scene_plan.json").write_text(json.dumps(_host_plan()), encoding="utf-8")
+    (root / "scenes" / "scene_1" / "code_final.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "last_error.txt").write_text(
+        "Manim render failed for scene_1", encoding="utf-8"
+    )
+    status = job_runner.job_status(job_id)
+    assert status["status"] == "error"
+    assert "Manim render failed" in (status["error"] or "")
+
+
+def test_continue_host_authored_skips_openrouter_without_flags(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend.pipeline import orchestrator as orch
+
+    _stub_db(monkeypatch)
+    spec = planning_spec_payload()
+    req = GenerateRequest.model_validate(
+        {
+            "prompt": "Explain backpropagation",
+            "plan_only": True,
+            "scene_plan": {
+                "title": "Backpropagation",
+                "concept_summary": "Gradients from the loss.",
+                "scenes": [spec["example_scene"]],
+            },
+        }
+    )
+    result = run_pipeline(req, user_id="mcp-connector")
+
+    def _boom(*_a, **_k):
+        raise AssertionError(
+            "OpenRouterClient must not be constructed for host-authored continue"
+        )
+
+    captured: dict = {}
+
+    def _fake_loop(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop-after-flags")
+
+    monkeypatch.setattr(orch, "OpenRouterClient", _boom)
+    monkeypatch.setattr(orch, "_run_scenes_loop", _fake_loop)
+    with pytest.raises(RuntimeError, match="stop-after-flags"):
+        continue_pipeline(result.job_id, ContinueRequest(), user_id="mcp-connector")
+    assert captured["skip_codegen"] is True
+    assert captured["skip_vlm"] is True
+    assert captured["client"] is None

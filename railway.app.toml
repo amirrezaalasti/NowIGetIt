@@ -1,0 +1,12 @@
+# Next.js + FastAPI (MCP connector). Deploy as a *separate* Railway service.
+# Do not use this file for the Manim worker (that stays on railway.toml / Dockerfile).
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.app"
+
+[deploy]
+startCommand = "./scripts/start-app.sh"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

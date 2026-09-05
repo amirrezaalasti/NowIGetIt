@@ -15,7 +15,9 @@ export default async function LoginPage({
 }) {
   const session = await auth();
   const params = await searchParams;
-  const callbackUrl = params.callbackUrl || "/";
+  const raw = params.callbackUrl || "/";
+  const callbackUrl =
+    raw.startsWith("/") && !raw.startsWith("//") ? raw : "/";
 
   if (session?.user) {
     redirect(callbackUrl);

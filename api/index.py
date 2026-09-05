@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -32,10 +32,14 @@ from backend.pipeline.orchestrator import (
     iter_pipeline_events,
     iter_regenerate_scene,
     iter_retouch_scene,
+    job_codegen_spec,
+    job_is_host_authored,
     revise_scene_plan,
     run_pipeline,
+    submit_host_scene_code,
     update_scene_plan,
 )
+from backend.pipeline.planner import planning_spec_payload
 from backend.pipeline.tts import synthesize_narration
 from backend.documents import store as doc_store
 from backend.documents.pipeline import (
@@ -59,8 +63,38 @@ from backend.schemas import (
     RevisePlanRequest,
     SceneComment,
     SceneCommentRequest,
+    StorageModeRequest,
+    SubmitSceneCodeRequest,
     UpdatePlanRequest,
 )
+
+
+def _storage_mode() -> str:
+    from backend.local_db import storage_mode
+
+    get_settings()
+    return storage_mode()
+
+
+def _database_name() -> str:
+    mode = _storage_mode()
+    if mode == "local":
+        return "sqlite"
+    return mode
+
+
+def _mongo_configured() -> bool:
+    from backend.local_db import mongo_configured
+
+    get_settings()
+    return mongo_configured()
+
+
+def _supabase_available() -> bool:
+    from backend.local_db import supabase_available
+
+    get_settings()
+    return supabase_available()
 
 
 def _quota_http(exc: db.QuotaExceededError) -> HTTPException:
@@ -199,6 +233,10 @@ def health() -> dict:
         "artifacts_root": artifacts_path,
         "auth_configured": auth_is_configured(),
         "supabase_configured": db.supabase_enabled(),
+        "storage_mode": _storage_mode(),
+        "supabase_available": _supabase_available(),
+        "database": _database_name(),
+        "mongodb_configured": _mongo_configured(),
         "render_worker_configured": bool(settings.render_worker_url),
         "render_worker_ok": worker_ok,
         "render_worker_detail": worker_detail,
@@ -213,10 +251,14 @@ def health() -> dict:
 @app.get("/api/me")
 async def me(user: CurrentUser) -> dict:
     """Current user profile + monthly LLM/storage usage."""
-    # Run sync Supabase I/O off the event loop so usage stays responsive
-    # even while generation SSE streams are open.
-    await asyncio.to_thread(_prepare_user, user)
-    usage = await asyncio.to_thread(db.get_user_usage, user.id)
+    try:
+        await asyncio.to_thread(_prepare_user, user)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        usage = await asyncio.to_thread(db.get_user_usage, user.id)
+    except Exception:  # noqa: BLE001
+        usage = None
     return {
         "user": {
             "id": user.id,
@@ -226,6 +268,30 @@ async def me(user: CurrentUser) -> dict:
         },
         "usage": usage,
         "supabase_configured": db.supabase_enabled(),
+        "storage_mode": _storage_mode(),
+        "supabase_available": _supabase_available(),
+        "database": _database_name(),
+        "mongodb_configured": _mongo_configured(),
+        "artifacts_root": str(store.artifacts_root()),
+    }
+
+
+@app.put("/api/me/storage")
+async def set_my_storage(request: StorageModeRequest, user: CurrentUser) -> dict:
+    """Switch between local disk and Supabase for this server."""
+    del user
+    from backend.local_db import set_storage_mode
+
+    get_settings()
+    try:
+        mode = await asyncio.to_thread(set_storage_mode, request.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "storage_mode": mode,
+        "supabase_configured": db.supabase_enabled(),
+        "supabase_available": _supabase_available(),
+        "artifacts_root": str(store.artifacts_root()),
     }
 
 
@@ -296,10 +362,11 @@ def generate_stream(request: GenerateRequest, user: CurrentUser) -> StreamingRes
     settings = get_settings()
     try:
         _prepare_user(user)
-        db.reserve_generation(
-            user.id,
-            estimated_tokens=settings.default_llm_estimate_tokens,
-        )
+        if request.scene_plan is None:
+            db.reserve_generation(
+                user.id,
+                estimated_tokens=settings.default_llm_estimate_tokens,
+            )
     except db.QuotaExceededError as exc:
         raise _quota_http(exc) from exc
 
@@ -330,7 +397,17 @@ def generate_stream(request: GenerateRequest, user: CurrentUser) -> StreamingRes
 
 @app.get("/api/jobs")
 def list_jobs(user: CurrentUser, limit: int = 50) -> dict:
-    return {"jobs": store.list_jobs(limit=limit, user_id=user.id)}
+    jobs = store.list_jobs(limit=limit, user_id=user.id)
+    for job in jobs:
+        job_id = str(job.get("job_id") or "")
+        if not job_id:
+            continue
+        runtime = job_runner.job_status(job_id)
+        if runtime.get("running"):
+            job["status"] = "running"
+        elif runtime.get("status"):
+            job["status"] = runtime["status"]
+    return {"jobs": jobs}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -373,6 +450,38 @@ def put_scene_plan(
     _require_job_owner(job_id, user.id)
     plan = update_scene_plan(job_id, body.plan)
     return {"ok": True, "job_id": job_id, "plan": plan.model_dump()}
+
+
+@app.get("/api/video/planning-spec")
+def video_planning_spec(_user: CurrentUser) -> dict:
+    """Constraints + ScenePlan schema for host-authored MCP storyboards."""
+    return planning_spec_payload()
+
+
+@app.get("/api/jobs/{job_id}/scenes/{scene_id}/codegen-spec")
+def scene_codegen_spec(job_id: str, scene_id: str, user: CurrentUser) -> dict:
+    """Manim codegen prompt pack for one scene (host LLM writes the code)."""
+    _require_job_owner(job_id, user.id)
+    try:
+        return job_codegen_spec(job_id, scene_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put("/api/jobs/{job_id}/scenes/{scene_id}/code")
+def put_scene_code(
+    job_id: str, scene_id: str, body: SubmitSceneCodeRequest, user: CurrentUser
+) -> dict:
+    """Save host-authored Manim for a scene. Call continue with skip_codegen after all scenes."""
+    _require_job_owner(job_id, user.id)
+    try:
+        return submit_host_scene_code(job_id, scene_id, body.code)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/jobs/{job_id}/plan/revise")
@@ -427,14 +536,16 @@ async def job_events_stream(
 async def continue_stream(
     job_id: str,
     user: CurrentUser,
-    body: ContinueRequest = ContinueRequest(),
+    body: ContinueRequest = Body(default_factory=ContinueRequest),
 ) -> StreamingResponse:
     """SSE: continue a plan_only job after the user confirms the storyboard."""
     _require_job_owner(job_id, user.id)
-    try:
-        await asyncio.to_thread(db.assert_within_quotas, user.id, need_tokens=20_000)
-    except db.QuotaExceededError as exc:
-        raise _quota_http(exc) from exc
+    skip_quota = body.skip_codegen or job_is_host_authored(job_id)
+    if not skip_quota:
+        try:
+            await asyncio.to_thread(db.assert_within_quotas, user.id, need_tokens=20_000)
+        except db.QuotaExceededError as exc:
+            raise _quota_http(exc) from exc
 
     async def event_stream():
         try:
@@ -931,6 +1042,7 @@ def get_job_file(job_id: str, file_path: str, user: MediaUser) -> FileResponse:
         "Cache-Control": "private, max-age=60",
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+        "Cross-Origin-Resource-Policy": "cross-origin",
     }
     return FileResponse(
         path,

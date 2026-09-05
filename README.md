@@ -15,9 +15,10 @@ Turn a natural-language prompt into an educational video — or upload a PDF/dec
 
 - **Create (video)** — LLM scene planning, Manim codegen, VLM review, TTS narration
 - **Understand (documents)** — Docling converts PDF/PPTX/DOCX/… into interactive HTML slides; click any block for explanations, quizzes, figure readouts, and more
+- **ChatGPT / Claude connector** — same Create + Understand tools in chat via remote MCP (`/api/mcp`); setup at `/connect`
 - **Live progress** — streaming events while pipelines run
 - **Debug artifacts** — full job history scoped per user
-- **Google sign-in** — Auth.js sessions; jobs and media are scoped per user
+- **Google sign-in** — Auth.js sessions; jobs and media are scoped per user, including videos created through the ChatGPT/Claude connector
 
 ## Architecture
 
@@ -37,7 +38,7 @@ Upload → Docling (local or Railway) → HTML slides + block ids → LLM/VLM as
 - **Railway (Docling)** — `Dockerfile.docling` / `POST /convert`
 - **Local** — Manim via `ENABLE_MANIM_RENDER=true`; Docling via `pip install -r requirements-docling.txt` or `DOCLING_WORKER_URL`
 
-**Stack:** Next.js · FastAPI · OpenRouter · Manim CE · Docling · Supabase
+**Stack:** Next.js · FastAPI · OpenRouter · Manim CE · Docling · SQLite + local files
 
 ## Project layout
 
@@ -81,11 +82,14 @@ cp .env.example .env
 | `NEXT_PUBLIC_API_BASE_URL` | No | API origin (local: `http://127.0.0.1:8000`) |
 | `AUTH_SECRET` | Yes | Shared secret for Auth.js + API JWTs (`openssl rand -hex 32`) |
 | `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | Yes | Google OAuth client credentials |
-| `SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes (API) | Service role key for user/quota writes ([API settings](https://supabase.com/dashboard/project/rhoulajitzoaxivyfvxn/settings/api)) |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Optional | Publishable/anon key (frontend; usage still goes through the API) |
+| `MONGODB_URI` | No | Atlas connection string. When set, users/Library/usage go to MongoDB |
+| `MONGODB_DB` | No | Database name (default `nowigetit`) |
+| `USE_SUPABASE` | No | Keep `false` unless you opt back into Supabase |
+| `SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_URL` | No | Unused unless you opt back into Supabase |
+| `SUPABASE_SERVICE_ROLE_KEY` | No | Unused unless you opt back into Supabase |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | No | Unused unless you opt back into Supabase |
 
-Default monthly quotas per user: **40 generations**, **500k LLM tokens**, **500 MB** artifact storage (reset each calendar month).
+Default storage is **MongoDB Atlas + local files** when `MONGODB_URI` is set: users, Library, and usage live in MongoDB; videos stay under `ARTIFACTS_ROOT`. Without a URI, SQLite on disk is the fallback. Supabase remains optional.
 
 #### Google OAuth setup
 
@@ -116,7 +120,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), sign in with Google, then generate. In development, Next rewrites job/generate/health routes to uvicorn when `NEXT_PUBLIC_API_BASE_URL` is unset; `/api/auth/*` stays on Next.js.
+Open [http://localhost:3000](http://localhost:3000), sign in with Google, then generate. In development, Next rewrites job/generate/health routes to uvicorn when `NEXT_PUBLIC_API_BASE_URL` is unset; `/api/auth/*` and `/api/mcp` stay on Next.js.
 
 Run both with `npm run dev:all`.
 
@@ -133,6 +137,7 @@ Protected routes (except health) require `Authorization: Bearer <token>` from `G
 | `GET` | `/api/jobs` | List **your** jobs |
 | `GET` | `/api/jobs/{job_id}` | Job detail (owner only) |
 | `GET` | `/api/jobs/{job_id}/file/...` | Artifact files |
+| `GET/POST` | `/api/mcp` | ChatGPT/Claude MCP connector (Streamable HTTP) |
 
 **Example request body:**
 
@@ -143,6 +148,39 @@ Protected routes (except health) require `Authorization: Bearer <token>` from `G
   "skip_render": false
 }
 ```
+
+## ChatGPT and Claude
+
+The same Create + Understand APIs are exposed as a remote MCP server at **`/api/mcp`**. ChatGPT (Developer Mode custom connector) and Claude (Customize → Connectors) both speak Streamable HTTP over HTTPS.
+
+1. Deploy (or run locally with a public HTTPS tunnel).
+2. Open **`/connect`** on your deployment — it shows the exact connector URL.
+3. Add the connector in ChatGPT or Claude. Auth is **OAuth** (Google), not a pasted API key. In Claude’s OAuth modal choose **No client ID — register automatically** and leave client ID/secret/headers empty.
+4. Sign in with the same Google account you use on the website. Jobs created in chat appear in **Library**.
+5. Add this app’s `/api/auth/callback/google` URL to your Google OAuth client (listed on `/connect`).
+
+Local Inspector:
+
+```bash
+npx @modelcontextprotocol/inspector@latest
+```
+
+Transport: Streamable HTTP, URL: `http://localhost:3000/api/mcp`.
+
+### Railway (public connector)
+
+The Manim worker stays on the `NowIGetIt` Railway service. The chat connector is a **separate** `app` service (`Dockerfile.app` + `railway.app.toml`): Next.js + FastAPI, calling `RENDER_WORKER_URL` for video.
+
+Current production URL: `https://app-production-5eb7.up.railway.app/api/mcp`  
+Setup page: `https://app-production-5eb7.up.railway.app/connect`
+
+Auth is **Google OAuth**. ChatGPT/Claude open this site to sign in; leave client ID/secret empty. Optional `MCP_CONNECTOR_TOKEN` still works as a shared key for Inspector. Redeploy from this repo:
+
+```bash
+railway up --service app --environment production --ci
+```
+
+Video: the chat model writes a storyboard, **shows it to the user for approval**, then writes Manim and renders (`create_video` with a `plan` object → wait → `submit_scene_code` → `render_video`). Poll `get_job` while `poll_again` is true. Documents: `upload_document` then `get_document`.
 
 ## Debug artifacts
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Any, Optional
 
 from backend.code_utils import clean_manim_code, lint_scene_code, validate_manim_code
 from backend.languages import language_display_name, normalize_language
@@ -118,8 +118,7 @@ CRITICAL RULES (Manim Community / `manim`, NOT ManimGL):
 """
 
 
-def generate_scene_code(
-    client: OpenRouterClient,
+def build_codegen_user_prompt(
     *,
     plan: ScenePlan,
     scene: SceneSection,
@@ -184,7 +183,7 @@ unrelated clips, and the learner is tracking them from scene to scene.
         else ""
     )
 
-    user = f"""Video title: {plan.title}
+    return f"""Video title: {plan.title}
 Concept: {plan.concept_summary}
 Style: {plan.style_notes}
 Visual identity: {plan.visual_identity or "(none)"}
@@ -246,6 +245,30 @@ mismatch means the video freezes or runs silent against the voiceover):
 
 Return one complete runnable Manim Community Scene file.
 """
+
+
+def generate_scene_code(
+    client: OpenRouterClient,
+    *,
+    plan: ScenePlan,
+    scene: SceneSection,
+    previous_context: str = "",
+    next_context: str = "",
+    target_duration_seconds: Optional[float] = None,
+    creative_direction: str = "",
+    language: str = "en",
+) -> str:
+    duration = target_duration_seconds or scene.duration_seconds
+    lang = normalize_language(language)
+    user = build_codegen_user_prompt(
+        plan=plan,
+        scene=scene,
+        previous_context=previous_context,
+        next_context=next_context,
+        target_duration_seconds=target_duration_seconds,
+        creative_direction=creative_direction,
+        language=language,
+    )
     raw = client.chat(
         system=MANIM_SYSTEM,
         user=user,
@@ -424,3 +447,35 @@ Current code (base your edits on this — keep what already works):
     repaired_ok, _ = validate_manim_code(repaired)
     # Neither is valid — hand back the one the caller can still diff against.
     return repaired if repaired_ok else revised
+
+
+def codegen_spec_payload(
+    *,
+    plan: ScenePlan,
+    scene: SceneSection,
+    previous_context: str = "",
+    next_context: str = "",
+    language: str = "en",
+) -> dict[str, Any]:
+    """Prompt pack for a host LLM to write Manim Community code for one scene."""
+    duration = float(scene.duration_seconds)
+    return {
+        "scene_id": scene.id,
+        "title": scene.title,
+        "target_duration_seconds": duration,
+        "system": MANIM_SYSTEM,
+        "user": build_codegen_user_prompt(
+            plan=plan,
+            scene=scene,
+            previous_context=previous_context,
+            next_context=next_context,
+            target_duration_seconds=duration,
+            language=language,
+        ),
+        "hard_rules": [
+            "from manim import * and a Scene subclass with construct(self).",
+            "Text() only — never MathTex, Tex, or TexText.",
+            "Output raw Python only (no markdown fences).",
+            f"Total play/wait time (excluding a final 0.5s hold) ≈ {duration:.1f}s.",
+        ],
+    }

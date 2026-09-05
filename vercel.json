@@ -4,14 +4,22 @@
     "api/index.py": {
       "maxDuration": 300,
       "memory": 1024
+    },
+    "src/app/api/mcp/route.ts": {
+      "maxDuration": 300
     }
   },
   "rewrites": [
     { "source": "/api/health", "destination": "/api/index" },
     { "source": "/api/me", "destination": "/api/index" },
+    { "source": "/api/me/:path*", "destination": "/api/index" },
     { "source": "/api/generate", "destination": "/api/index" },
     { "source": "/api/generate/:path*", "destination": "/api/index" },
     { "source": "/api/jobs", "destination": "/api/index" },
-    { "source": "/api/jobs/:path*", "destination": "/api/index" }
+    { "source": "/api/jobs/:path*", "destination": "/api/index" },
+    { "source": "/api/documents", "destination": "/api/index" },
+    { "source": "/api/documents/:path*", "destination": "/api/index" },
+    { "source": "/api/tts/:path*", "destination": "/api/index" },
+    { "source": "/api/video/:path*", "destination": "/api/index" }
   ]
 }

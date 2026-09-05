@@ -16,7 +16,9 @@ from backend import artifacts as store
 from backend import job_runner
 from backend import supabase_db as db
 from backend.code_utils import (
+    clean_manim_code,
     layout_revision_instructions,
+    lint_scene_code,
     parse_layout_report,
     scene_body,
     validate_manim_code,
@@ -36,7 +38,11 @@ from backend.pipeline.planner import (
     scene_count_range,
 )
 from backend.pipeline.renderer import extract_review_frames, render_scene
-from backend.pipeline.scene_generator import generate_scene_code, revise_scene_code
+from backend.pipeline.scene_generator import (
+    codegen_spec_payload,
+    generate_scene_code,
+    revise_scene_code,
+)
 from backend.pipeline.storyboard import create_storyboard_frame
 from backend.pipeline.tts import synthesize_scene_narration
 from backend.pipeline.visual_preview import create_visual_preview
@@ -502,6 +508,47 @@ def update_scene_section(
     return plan
 
 
+def job_codegen_spec(job_id: str, scene_id: str) -> dict[str, Any]:
+    """Prompt pack so a host LLM can write Manim for one scene (no OpenRouter)."""
+    plan = _load_plan(job_id)
+    index = next((i for i, s in enumerate(plan.scenes) if s.id == scene_id), None)
+    if index is None:
+        raise ValueError(f"Scene {scene_id} not found")
+    scene = plan.scenes[index]
+    return codegen_spec_payload(
+        plan=plan,
+        scene=scene,
+        previous_context=_plan_previous_context(plan, index),
+        next_context=_plan_next_context(plan, index),
+        language=_job_language(job_id),
+    )
+
+
+def submit_host_scene_code(job_id: str, scene_id: str, code: str) -> dict[str, Any]:
+    """Validate and persist host-authored Manim for a scene."""
+    plan = _load_plan(job_id)
+    scene = next((s for s in plan.scenes if s.id == scene_id), None)
+    if scene is None:
+        raise ValueError(f"Scene {scene_id} not found")
+    cleaned = clean_manim_code(code)
+    ok, err = validate_manim_code(cleaned)
+    if not ok:
+        raise ValueError(err)
+    store.save_code(job_id, scene_id, cleaned, revision=0)
+    warnings = lint_scene_code(cleaned, target_duration=float(scene.duration_seconds))
+    with_code = [s.id for s in plan.scenes if store.load_code(job_id, s.id)]
+    missing = [s.id for s in plan.scenes if s.id not in with_code]
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "scene_id": scene_id,
+        "lint_warnings": warnings,
+        "scenes_with_code": with_code,
+        "scenes_missing_code": missing,
+        "ready_to_render": not missing,
+    }
+
+
 def revise_scene_plan(job_id: str, instructions: str) -> ScenePlan:
     """Ask the AI planner to add/remove/reorder/rewrite scenes in an existing
     plan based on a free-text instruction, then persist the result.
@@ -546,7 +593,7 @@ MAX_RENDER_FIX_ATTEMPTS = 10
 
 def _process_one_scene(
     *,
-    client: OpenRouterClient,
+    client: Optional[OpenRouterClient],
     job_id: str,
     work_dir: Path,
     plan: ScenePlan,
@@ -561,6 +608,7 @@ def _process_one_scene(
     creative_direction: str = "",
     tts_voice: Optional[str] = None,
     skip_vlm_review: bool = False,
+    provided_code: Optional[str] = None,
 ) -> SceneArtifact:
     """TTS-first → codegen (timed) → render → optional VLM for a single scene."""
     settings = get_settings()
@@ -665,7 +713,11 @@ def _process_one_scene(
     _emit(
         on_event,
         PipelineEventType.status,
-        f"Writing Manim code for {scene.id} ({target_duration:.1f}s)…",
+        (
+            f"Using submitted Manim code for {scene.id} ({target_duration:.1f}s)…"
+            if provided_code
+            else f"Writing Manim code for {scene.id} ({target_duration:.1f}s)…"
+        ),
         data={
             "scene_id": scene.id,
             "job_id": job_id,
@@ -674,19 +726,32 @@ def _process_one_scene(
                 f"{scene.visual_device or 'animation'} · "
                 f"{len(scene.animation_beats)} beats"
             ),
+            "host_authored": bool(provided_code),
         },
         job_id=job_id,
     )
-    code = generate_scene_code(
-        client,
-        plan=plan,
-        scene=scene,
-        previous_context=previous_context,
-        next_context=next_context,
-        target_duration_seconds=target_duration,
-        creative_direction=creative_direction,
-        language=language,
-    )
+    host_code = bool((provided_code or "").strip())
+    if host_code:
+        skip_vlm_review = True
+        code = clean_manim_code(provided_code or "")
+        ok, err = validate_manim_code(code)
+        if not ok:
+            raise ValueError(f"Submitted Manim code for {scene.id} is invalid: {err}")
+    else:
+        if client is None:
+            raise ValueError(
+                f"No Manim code on disk for {scene.id}. Submit scene code first."
+            )
+        code = generate_scene_code(
+            client,
+            plan=plan,
+            scene=scene,
+            previous_context=previous_context,
+            next_context=next_context,
+            target_duration_seconds=target_duration,
+            creative_direction=creative_direction,
+            language=language,
+        )
     store.save_code(job_id, scene.id, code, revision=0)
     _emit(
         on_event,
@@ -733,7 +798,7 @@ def _process_one_scene(
             scene_id=f"{scene.id}_r{revision_count}",
         )
 
-        while not video_path and revision_count < MAX_RENDER_FIX_ATTEMPTS:
+        while not host_code and not video_path and revision_count < MAX_RENDER_FIX_ATTEMPTS:
             # Don't burn LLM revisions on infra failures (bad worker URL, manim missing).
             infra = (render_log or "").lower()
             if any(
@@ -812,6 +877,11 @@ def _process_one_scene(
             )
 
         preview_note = None if video_path else render_log
+        if host_code and not video_path and not skip_render:
+            raise ValueError(
+                f"Manim render failed for {scene.id}. Fix the submitted code and "
+                f"call submit_scene_code again.\n{render_log[-1500:] if render_log else 'Unknown error'}"
+            )
         if frame_path:
             frame_source = "manim_preview"
         _emit(
@@ -832,10 +902,10 @@ def _process_one_scene(
         # A clean render whose PACING drifts from the audio is exactly what
         # produces "video freezes / goes silent while narration keeps talking".
         # Fix this BEFORE spending VLM-review budget on a mistimed clip.
-        mismatch = _duration_mismatch(video_path, target_duration)
+        mismatch = None if host_code else _duration_mismatch(video_path, target_duration)
         resync_budget = max(0, settings.max_scene_revisions - revision_count)
         resync_attempts = 0
-        while mismatch is not None and resync_attempts < min(2, resync_budget):
+        while (not host_code) and mismatch is not None and resync_attempts < min(2, resync_budget):
             _check_cancel(job_id)
             resync_attempts += 1
             revision_count += 1
@@ -1316,7 +1386,7 @@ def _process_one_scene(
 
 def _compose_and_finish(
     *,
-    client: OpenRouterClient,
+    client: Optional[OpenRouterClient],
     job_id: str,
     plan: ScenePlan,
     artifacts: list[SceneArtifact],
@@ -1406,11 +1476,12 @@ def _compose_and_finish(
     )
     store.save_result(job_id, result.model_dump())
     if user_id:
-        db.flush_client_usage(
-            user_id=user_id,
-            job_id=job_id,
-            usage_log=client.drain_usage_log(),
-        )
+        if client is not None:
+            db.flush_client_usage(
+                user_id=user_id,
+                job_id=job_id,
+                usage_log=client.drain_usage_log(),
+            )
         db.upsert_job(
             job_id=job_id,
             user_id=user_id,
@@ -1587,7 +1658,7 @@ def _load_existing_scene_artifact(
 
 def _run_scenes_loop(
     *,
-    client: OpenRouterClient,
+    client: Optional[OpenRouterClient],
     job_id: str,
     plan: ScenePlan,
     resolution: str,
@@ -1596,6 +1667,8 @@ def _run_scenes_loop(
     prompt: str,
     on_event: Optional[EventCallback],
     tts_voice: Optional[str] = None,
+    skip_codegen: bool = False,
+    skip_vlm: bool = False,
 ) -> GenerateResult:
     settings = get_settings()
     voice = tts_voice or _job_tts_voice(job_id)
@@ -1631,14 +1704,26 @@ def _run_scenes_loop(
         else:
             to_run.append((index, scene))
 
-    def _flush_client(c: OpenRouterClient) -> None:
-        if not user_id:
+    def _flush_client(c: Optional[OpenRouterClient]) -> None:
+        if not user_id or c is None:
             return
         db.flush_client_usage(
             user_id=user_id,
             job_id=job_id,
             usage_log=c.drain_usage_log(),
         )
+
+    if skip_codegen:
+        missing = [
+            scene.id
+            for _, scene in to_run
+            if not store.load_code(job_id, scene.id)
+        ]
+        if missing:
+            raise ValueError(
+                "Submit Manim code for every scene before rendering. Missing: "
+                + ", ".join(missing)
+            )
 
     if to_run:
         _emit(
@@ -1679,6 +1764,8 @@ def _run_scenes_loop(
                 skip_render=skip_render,
                 on_event=on_event,
                 tts_voice=voice,
+                skip_vlm_review=skip_vlm or skip_codegen,
+                provided_code=store.load_code(job_id, scene.id) if skip_codegen else None,
             )
         results[index] = artifact
         _flush_client(client)
@@ -1712,7 +1799,9 @@ def run_pipeline(
       3) Else: TTS → generate → render → VLM → compose
     """
     settings = get_settings()
-    client = OpenRouterClient(settings)
+    host_plan = request.scene_plan
+    need_llm = host_plan is None or not request.plan_only
+    client = OpenRouterClient(settings) if need_llm else None
     job_id = uuid.uuid4().hex[:12]
     work_dir = store.init_job(
         job_id,
@@ -1734,6 +1823,7 @@ def run_pipeline(
             "include_audio": request.include_audio,
             "include_subtitles": request.include_subtitles,
             "plan_only": request.plan_only,
+            "host_authored": host_plan is not None,
         },
         user_id=user_id,
         user_email=user_email,
@@ -1755,21 +1845,13 @@ def run_pipeline(
         )
 
     def _flush_usage() -> None:
-        if not user_id:
+        if not user_id or client is None:
             return
         db.flush_client_usage(
             user_id=user_id,
             job_id=job_id,
             usage_log=client.drain_usage_log(),
         )
-
-    _emit(
-        on_event,
-        PipelineEventType.status,
-        f"Working out how to explain this… (job {job_id})",
-        data={"job_id": job_id, "step": "blueprint.start"},
-        job_id=job_id,
-    )
 
     def _plan_progress(message: str, data: dict[str, Any]) -> None:
         _emit(
@@ -1780,71 +1862,89 @@ def run_pipeline(
             job_id=job_id,
         )
 
-    # Step 0 — decide the teaching itself (question, running example, notation and
-    # its visual encoding, the order the relations are earned) before any scene
-    # exists. Planning straight to scenes improvises those choices one scene at a
-    # time, which is what makes a video look right and still explain nothing.
-    min_scenes, max_scenes = scene_count_range(
-        request.length_preset, request.scene_pacing
-    )
-    try:
-        blueprint = create_teaching_blueprint(
-            client,
-            request.prompt,
-            audience=request.audience,
-            audience_guidance=AUDIENCE_GUIDANCE.get(
-                request.audience, AUDIENCE_GUIDANCE["general"]
-            ),
-            language=request.language,
-            # One step per scene is the target: the planner may merge two small
-            # steps or split a big one, but a blueprint far off the scene budget
-            # forces it into an awkward staging.
-            min_steps=max(3, min_scenes),
-            max_steps=max(4, max_scenes),
-            on_progress=_plan_progress,
-        )
-    except Exception as e:  # noqa: BLE001
-        # The planner still teaches on its own — a video planned without the
-        # blueprint beats no video, so this degrades rather than fails.
-        blueprint = None
+    if host_plan is not None:
+        plan = host_plan
         _emit(
             on_event,
             PipelineEventType.status,
-            "Could not build a teaching plan — planning scenes directly.",
-            data={"job_id": job_id, "step": "blueprint.failed", "detail": str(e)[:400]},
+            f"Using host-authored storyboard ({len(plan.scenes)} scenes)…",
+            data={"job_id": job_id, "step": "planning.host", "scene_count": len(plan.scenes)},
             job_id=job_id,
         )
-    _flush_usage()
-    _emit(
-        on_event,
-        PipelineEventType.status,
-        (
-            f"Storyboarding {len(blueprint.steps)} teaching steps into scenes…"
-            if blueprint
-            else "Planning scenes from prompt…"
-        ),
-        data={
-            "job_id": job_id,
-            "step": "planning.start",
-            "step_count": len(blueprint.steps) if blueprint else 0,
-            "core_question": blueprint.core_question if blueprint else None,
-            "teaching_steps": (
-                [f"{s.id}: {s.claim}" for s in blueprint.steps] if blueprint else None
-            ),
-        },
-        job_id=job_id,
-    )
+    else:
+        _emit(
+            on_event,
+            PipelineEventType.status,
+            f"Working out how to explain this… (job {job_id})",
+            data={"job_id": job_id, "step": "blueprint.start"},
+            job_id=job_id,
+        )
 
-    plan = create_scene_plan(
-        client,
-        request.prompt,
-        length_preset=request.length_preset,
-        scene_pacing=request.scene_pacing,
-        audience=request.audience,
-        language=request.language,
-        blueprint=blueprint,
-        on_progress=_plan_progress,
-    )
+        # Step 0 — decide the teaching itself (question, running example, notation and
+        # its visual encoding, the order the relations are earned) before any scene
+        # exists. Planning straight to scenes improvises those choices one scene at a
+        # time, which is what makes a video look right and still explain nothing.
+        min_scenes, max_scenes = scene_count_range(
+            request.length_preset, request.scene_pacing
+        )
+        try:
+            blueprint = create_teaching_blueprint(
+                client,
+                request.prompt,
+                audience=request.audience,
+                audience_guidance=AUDIENCE_GUIDANCE.get(
+                    request.audience, AUDIENCE_GUIDANCE["general"]
+                ),
+                language=request.language,
+                # One step per scene is the target: the planner may merge two small
+                # steps or split a big one, but a blueprint far off the scene budget
+                # forces it into an awkward staging.
+                min_steps=max(3, min_scenes),
+                max_steps=max(4, max_scenes),
+                on_progress=_plan_progress,
+            )
+        except Exception as e:  # noqa: BLE001
+            # The planner still teaches on its own — a video planned without the
+            # blueprint beats no video, so this degrades rather than fails.
+            blueprint = None
+            _emit(
+                on_event,
+                PipelineEventType.status,
+                "Could not build a teaching plan — planning scenes directly.",
+                data={"job_id": job_id, "step": "blueprint.failed", "detail": str(e)[:400]},
+                job_id=job_id,
+            )
+        _flush_usage()
+        _emit(
+            on_event,
+            PipelineEventType.status,
+            (
+                f"Storyboarding {len(blueprint.steps)} teaching steps into scenes…"
+                if blueprint
+                else "Planning scenes from prompt…"
+            ),
+            data={
+                "job_id": job_id,
+                "step": "planning.start",
+                "step_count": len(blueprint.steps) if blueprint else 0,
+                "core_question": blueprint.core_question if blueprint else None,
+                "teaching_steps": (
+                    [f"{s.id}: {s.claim}" for s in blueprint.steps] if blueprint else None
+                ),
+            },
+            job_id=job_id,
+        )
+
+        plan = create_scene_plan(
+            client,
+            request.prompt,
+            length_preset=request.length_preset,
+            scene_pacing=request.scene_pacing,
+            audience=request.audience,
+            language=request.language,
+            blueprint=blueprint,
+            on_progress=_plan_progress,
+        )
     plan_path = store.save_scene_plan(job_id, plan.model_dump())
     for scene in plan.scenes:
         store.save_scene_section(job_id, scene.id, scene.model_dump())
@@ -1913,6 +2013,17 @@ def run_pipeline(
     )
 
 
+def job_is_host_authored(job_id: str) -> bool:
+    """True when the storyboard (and usually Manim) came from the MCP host LLM."""
+    try:
+        job = store.load_job(job_id)
+    except FileNotFoundError:
+        return False
+    meta = job.get("meta") or {}
+    snap = meta.get("settings") if isinstance(meta, dict) else {}
+    return bool(isinstance(snap, dict) and snap.get("host_authored"))
+
+
 def continue_pipeline(
     job_id: str,
     request: Optional[ContinueRequest] = None,
@@ -1923,9 +2034,15 @@ def continue_pipeline(
     """Resume a plan_only job: run scenes from the (possibly edited) plan."""
     request = request or ContinueRequest()
     settings = get_settings()
-    client = OpenRouterClient(settings)
     job = store.load_job(job_id)
     meta = job.get("meta") or {}
+    snap = meta.get("settings") if isinstance(meta, dict) else {}
+    host_authored = bool(isinstance(snap, dict) and snap.get("host_authored"))
+    # MCP host already wrote the Manim. Never construct OpenRouter on that path,
+    # even if the continue body omitted skip_codegen (FastAPI default body).
+    skip_codegen = bool(request.skip_codegen or host_authored)
+    skip_vlm = bool(request.skip_vlm or host_authored or skip_codegen)
+    client = None if skip_codegen else OpenRouterClient(settings)
     prompt = str(meta.get("prompt") or "")
     owner = meta.get("user_id") if isinstance(meta, dict) else None
     if user_id and owner and owner != user_id:
@@ -1970,6 +2087,8 @@ def continue_pipeline(
         prompt=prompt,
         on_event=on_event,
         tts_voice=tts_voice,
+        skip_codegen=skip_codegen,
+        skip_vlm=skip_vlm,
     )
 
 

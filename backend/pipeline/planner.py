@@ -690,3 +690,51 @@ array — never omit scenes.
     raise ValueError(
         f"Failed to revise ScenePlan after 3 attempts: {last_err}"
     ) from last_err
+
+
+def planning_spec_payload() -> dict[str, Any]:
+    """Constraints + ScenePlan JSON schema for a host LLM (MCP) to author the plan."""
+    from backend.schemas import ScenePlan
+
+    return {
+        "role": "You write the storyboard. Now I Get It only validates, renders Manim, and stitches audio.",
+        "length_target_seconds": {
+            key: {"min": lo, "max": hi} for key, (lo, hi) in LENGTH_TARGET_SECONDS.items()
+        },
+        "scene_count": {
+            length: {
+                pacing: {"min": lo, "max": hi}
+                for pacing, (lo, hi) in counts.items()
+            }
+            for length, counts in SCENE_PACING_COUNT.items()
+        },
+        "min_scene_seconds": MIN_SCENE_SECONDS,
+        "audience_guidance": AUDIENCE_GUIDANCE,
+        "pacing_guidance": SCENE_PACING_GUIDANCE,
+        "rules": [
+            "Every scene needs an id (scene_1, scene_2, …), title, duration_seconds, and beats.",
+            "Each beat has visual_action (what moves on screen) and narration (spoken, not on-screen dump).",
+            "Narration language must match the requested language. Keep on-screen text sparse.",
+            "Reuse palette + recurring_elements so scenes look like one video.",
+            "Do not use MathTex/LaTeX in later Manim code — plan visuals that work with plain Text().",
+            "Total spoken duration should land inside length_target_seconds for the chosen preset.",
+        ],
+        "plan_schema": ScenePlan.model_json_schema(),
+        "example_scene": {
+            "id": "scene_1",
+            "title": "The question",
+            "duration_seconds": 12,
+            "visual_description": "A simple two-node network; an arrow labeled error points backward.",
+            "visual_device": "equation_reveal",
+            "beats": [
+                {
+                    "visual_action": "Fade in two circles labeled input and output, then grow an arrow between them.",
+                    "narration": "A neural net turns inputs into a prediction.",
+                },
+                {
+                    "visual_action": "Show a small number next to the arrow, then reverse the arrow in a contrasting color.",
+                    "narration": "Backpropagation sends the error backward so each weight can take a share of the blame.",
+                },
+            ],
+        },
+    }

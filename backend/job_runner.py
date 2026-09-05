@@ -84,10 +84,40 @@ def active_tasks(job_id: str) -> list[str]:
         )
 
 
+def _error_file(job_id: str) -> Path:
+    return Path(store.job_dir(job_id)) / "last_error.txt"
+
+
 def last_error(job_id: str) -> Optional[str]:
     """Last unhandled error from the job's main pipeline task."""
     with _lock:
-        return _errors.get(job_id)
+        mem = _errors.get(job_id)
+    if mem:
+        return mem
+    path = _error_file(job_id)
+    try:
+        if path.exists():
+            text = path.read_text(encoding="utf-8").strip()
+            return text or None
+    except OSError:
+        return None
+    return None
+
+
+def _clear_persisted_error(job_id: str) -> None:
+    path = _error_file(job_id)
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _persist_error(job_id: str, message: str) -> None:
+    try:
+        _error_file(job_id).write_text(message, encoding="utf-8")
+    except OSError:
+        pass
 
 
 def task_error(job_id: str, task_key: str) -> Optional[str]:
@@ -218,6 +248,7 @@ def start_task(
         _task_errors.pop(key, None)
         if task_key == PIPELINE_TASK:
             _errors.pop(job_id, None)
+            _clear_persisted_error(job_id)
             # Only a fresh pipeline run clears a cancel: a scene edit starting
             # mid-cancel must not resurrect the job.
             _cancelled.discard(job_id)
@@ -230,6 +261,8 @@ def start_task(
                     _task_errors[key] = str(exc)
                     if task_key == PIPELINE_TASK:
                         _errors[job_id] = str(exc)
+                if task_key == PIPELINE_TASK:
+                    _persist_error(job_id, str(exc))
                 # Persist pipeline errors so reconnecting clients see them.
                 # Scene-edit errors stay on their own stream — appending them
                 # here would terminate every client tailing the job log.
@@ -362,23 +395,32 @@ def job_status(job_id: str) -> dict[str, Any]:
     has_plan = (root / "scene_plan.json").exists()
     running = is_running(job_id)
     pipeline_running = is_pipeline_running(job_id)
+    err = last_error(job_id)
 
     scenes_root = root / "scenes"
-    scene_work = False
+    has_code = False
+    has_clip = False
     if scenes_root.exists():
         for sdir in scenes_root.iterdir():
             if not sdir.is_dir():
                 continue
-            if (sdir / "code_final.py").exists() or (sdir / "scene.mp4").exists():
-                scene_work = True
-                break
+            if (sdir / "code_final.py").exists():
+                has_code = True
+            if (sdir / "scene.mp4").exists() or (sdir / "scene_vo.mp4").exists():
+                has_clip = True
 
+    # Host-authored MCP writes code_final.py *before* render. That is not a
+    # crashed pipeline — it is waiting to be rendered.
     if has_result or has_final:
         status = "complete"
     elif pipeline_running:
         status = "running"
-    elif scene_work:
+    elif err:
+        status = "error"
+    elif has_clip:
         status = "interrupted"
+    elif has_code and has_plan:
+        status = "awaiting_render"
     elif has_plan:
         status = "awaiting_plan"
     else:
@@ -396,5 +438,5 @@ def job_status(job_id: str) -> dict[str, Any]:
         "event_count": event_count(job_id),
         "has_result": has_result,
         "has_final_video": has_final,
-        "error": last_error(job_id),
+        "error": err,
     }

@@ -114,7 +114,7 @@ def sync_job_state(
 
 
 def hydrate_job_from_db(job_id: str, user_id: str) -> bool:
-    """Rebuild local job folder from Supabase when /tmp was wiped."""
+    """Rebuild local job folder from SQLite/Supabase when files were wiped."""
     row = db.get_job_state(job_id, user_id)
     if not row:
         return False
@@ -237,6 +237,14 @@ def save_code(job_id: str, scene_id: str, code: str, *, revision: int) -> str:
     return str(path)
 
 
+def load_code(job_id: str, scene_id: str) -> Optional[str]:
+    path = scene_dir(job_id, scene_id) / "code_final.py"
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8").strip()
+    return text or None
+
+
 def save_vlm_review(
     job_id: str,
     scene_id: str,
@@ -336,8 +344,7 @@ def save_result(job_id: str, data: dict[str, Any]) -> str:
 
 
 def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[str, Any]]:
-    # Prefer Supabase — local /tmp on Vercel is incomplete across instances.
-    if user_id and db.supabase_enabled():
+    if user_id:
         rows = db.list_user_jobs(user_id, limit=limit)
         if rows:
             return [
@@ -360,7 +367,7 @@ def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[st
         return []
     jobs: list[dict[str, Any]] = []
     for path in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if not path.is_dir() or path.name.startswith("."):
+        if not path.is_dir() or path.name.startswith((".", "_")):
             continue
         meta_path = path / "meta.json"
         meta: dict[str, Any] = {"job_id": path.name}
@@ -382,10 +389,12 @@ def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[st
         has_final_video = (path / "final.mp4").exists()
         if has_result or has_final_video:
             status = "complete"
+        elif str(meta.get("status") or "").strip():
+            status = str(meta.get("status"))
         elif (path / "scene_plan.json").exists():
-            status = "running"
+            status = "awaiting_plan"
         else:
-            status = meta.get("status") or "unknown"
+            status = "unknown"
         jobs.append(
             {
                 "job_id": path.name,

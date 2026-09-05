@@ -865,6 +865,12 @@ export function Generator() {
       setLiveMessage("Storyboard ready — confirm to generate video");
       return;
     }
+    if (status === "awaiting_render") {
+      setAwaitingPlan(true);
+      setRunning(false);
+      setLiveMessage("Scene code is ready — confirm to render video");
+      return;
+    }
     if (status === "complete") {
       setAwaitingPlan(false);
       setRunning(false);
