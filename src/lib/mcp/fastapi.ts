@@ -179,6 +179,19 @@ export async function startSse(
   return { events, jobId, docId };
 }
 
+export async function apiBytes(
+  publicOrigin: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<{ bytes: Buffer; mimeType: string }> {
+  const res = await apiFetch(publicOrigin, path, init);
+  const mimeType = (res.headers.get("content-type") || "application/octet-stream")
+    .split(";")[0]
+    .trim();
+  const bytes = Buffer.from(await res.arrayBuffer());
+  return { bytes, mimeType };
+}
+
 export async function signedMediaUrl(
   publicOrigin: string,
   path: string | null | undefined,

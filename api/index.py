@@ -34,9 +34,11 @@ from backend.pipeline.orchestrator import (
     iter_retouch_scene,
     job_codegen_spec,
     job_is_host_authored,
+    patch_scene_section,
     revise_scene_plan,
     run_pipeline,
     submit_host_scene_code,
+    update_job_settings,
     update_scene_plan,
 )
 from backend.pipeline.planner import planning_spec_payload
@@ -59,6 +61,8 @@ from backend.schemas import (
     ContinueRequest,
     GenerateRequest,
     GenerateResult,
+    JobSettingsRequest,
+    PatchSceneRequest,
     RegenerateSceneRequest,
     RevisePlanRequest,
     SceneComment,
@@ -452,6 +456,55 @@ def put_scene_plan(
     _require_job_owner(job_id, user.id)
     plan = update_scene_plan(job_id, body.plan)
     return {"ok": True, "job_id": job_id, "plan": plan.model_dump()}
+
+
+@app.patch("/api/jobs/{job_id}/scenes/{scene_id}")
+def patch_scene(
+    job_id: str, scene_id: str, body: PatchSceneRequest, user: CurrentUser
+) -> dict:
+    """Edit one scene's title, narration, beats, or visuals without rewriting the plan."""
+    _require_job_owner(job_id, user.id)
+    try:
+        plan = patch_scene_section(
+            job_id,
+            scene_id,
+            title=body.title,
+            narration=body.narration,
+            visual_description=body.visual_description,
+            duration_seconds=body.duration_seconds,
+            visual_device=body.visual_device,
+            camera_notes=body.camera_notes,
+            beats=(
+                [beat.model_dump() for beat in body.beats]
+                if body.beats is not None
+                else None
+            ),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "job_id": job_id, "plan": plan.model_dump()}
+
+
+@app.put("/api/jobs/{job_id}/settings")
+def put_job_settings(
+    job_id: str, body: JobSettingsRequest, user: CurrentUser
+) -> dict:
+    """Change narrator voice, language, audio, or subtitles before render."""
+    _require_job_owner(job_id, user.id)
+    try:
+        store.load_job(job_id, user_id=user.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+    settings = update_job_settings(
+        job_id,
+        tts_voice=body.tts_voice,
+        language=body.language,
+        include_audio=body.include_audio,
+        include_subtitles=body.include_subtitles,
+    )
+    return {"ok": True, **settings}
 
 
 @app.get("/api/video/planning-spec")

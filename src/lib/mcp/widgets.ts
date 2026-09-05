@@ -16,6 +16,7 @@ h1{font-size:16px;margin:0;font-weight:650}
 .panel{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:10px 12px}
 ol{margin:0;padding-left:18px}
 video{width:100%;border-radius:12px;background:#000;max-height:360px}
+img.frame{width:100%;border-radius:12px;background:#000;max-height:220px;object-fit:contain;margin:6px 0}
 iframe.slide{width:100%;height:280px;border:1px solid var(--line);border-radius:12px;background:#fff}
 .err{color:var(--danger);font-size:13px}
 .reply{white-space:pre-wrap;font-size:13px}
@@ -112,9 +113,33 @@ function render(){
   var status=s.status||"unknown";
   var scenes=(s.scenes||[]).map(function(sc,i){
     var nar=sc.narration||"";
-    return "<li><strong>"+esc(sc.title||("Scene "+(i+1)))+"</strong>"+(sc.duration_seconds?(" · "+sc.duration_seconds+"s"):"")+(nar?("<div class=\\"muted\\">"+esc(nar)+"</div>"):"")+"</li>";
+    var img=sc.preview_url?('<img class="frame" alt="" src="'+esc(sc.preview_url)+'"/>'):"";
+    var clip=sc.clip_url?('<video controls playsinline src="'+esc(sc.clip_url)+'"></video>'):"";
+    var vlm="";
+    if(sc.vlm){
+      vlm='<div class="muted">'+(sc.vlm.approved?"Review: looks good":"Review: needs work");
+      if(sc.vlm.issues&&sc.vlm.issues.length) vlm+=" — "+esc(sc.vlm.issues.join("; "));
+      vlm+="</div>";
+    }
+    return "<li data-id=\\""+esc(sc.id||"")+"\\">"+img+
+      "<label class=\\"muted\\">Title</label>"+
+      "<input class=\\"scene-title\\" value=\\""+esc(sc.title||("Scene "+(i+1)))+"\\"/>"+
+      (sc.duration_seconds?("<div class=\\"muted\\">"+sc.duration_seconds+"s</div>"):"")+
+      vlm+
+      "<label class=\\"muted\\">Narration</label>"+
+      "<textarea class=\\"scene-nar\\" rows=\\"3\\">"+esc(nar)+"</textarea>"+
+      "<button class=\\"chip save-scene\\" type=\\"button\\">Save scene</button>"+
+      clip+
+    "</li>";
   }).join("");
   var video=s.video_url?('<video controls playsinline src="'+esc(s.video_url)+'"></video>'):"";
+  var opt=s.options||{};
+  var options='<div class="panel"><div class="muted">Voice, language, audio</div>'+
+    '<input id="voice" placeholder="Voice (Kore, alloy, …)" value="'+esc(opt.tts_voice||"")+'"/>'+
+    '<input id="lang" placeholder="Language" value="'+esc(opt.language||"en")+'"/>'+
+    '<label class="muted"><input type="checkbox" id="audio"'+(opt.include_audio===false?"":" checked")+'> Spoken audio</label>'+
+    '<label class="muted"><input type="checkbox" id="subs"'+(opt.include_subtitles===false?"":" checked")+'> Subtitles</label>'+
+    '<button class="chip" type="button" id="save-opts">Save options</button></div>';
   var actions="";
   if(s.has_final_video||s.video_url){
     actions="";
@@ -132,8 +157,34 @@ function render(){
     '<div class="muted">'+esc(s.job_id||"")+' · '+esc(status)+(s.message?(" — "+s.message):"")+'</div>'+
     video+
     (scenes?'<div class="panel"><ol>'+scenes+'</ol></div>':'')+
+    (s.job_id?options:"")+
     '<div class="row">'+actions+open+'</div>'+
     '<div class="err" id="err"></div>';
+  el.querySelectorAll(".save-scene").forEach(function(btn){
+    btn.onclick=function(){
+      var li=btn.closest("li"); if(!li||!state.job_id) return;
+      var err=document.getElementById("err"); if(err) err.textContent="";
+      callTool("update_scene",{
+        job_id:state.job_id,
+        scene_id:li.getAttribute("data-id"),
+        title:(li.querySelector(".scene-title")||{}).value,
+        narration:(li.querySelector(".scene-nar")||{}).value
+      }).then(function(r){ apply(structured(r)); }).catch(function(e){ if(err) err.textContent=e.message; });
+    };
+  });
+  var saveOpts=document.getElementById("save-opts");
+  if(saveOpts){
+    saveOpts.onclick=function(){
+      var err=document.getElementById("err"); if(err) err.textContent="";
+      callTool("update_video_options",{
+        job_id:state.job_id,
+        tts_voice:(document.getElementById("voice")||{}).value,
+        language:(document.getElementById("lang")||{}).value,
+        include_audio:!!(document.getElementById("audio")||{}).checked,
+        include_subtitles:!!(document.getElementById("subs")||{}).checked
+      }).then(function(r){ apply(structured(r)); }).catch(function(e){ if(err) err.textContent=e.message; });
+    };
+  }
 }
 function apply(next){
   if(!next||typeof next!=="object") return;
@@ -166,6 +217,9 @@ onOutput(function(s){
   var open=s.library_url?('<a class="btn ghost" href="'+esc(s.library_url)+'" target="_blank" rel="noreferrer">Open in Library</a>'):"";
   el.innerHTML='<h1>'+esc(s.title||"Explanation")+'</h1>'+
     (s.video_url?('<video controls autoplay playsinline src="'+esc(s.video_url)+'"></video>'):'<p class="muted">Video is not ready yet. Ask to check the job.</p>')+
+    ((s.scenes||[]).map(function(sc){
+      return sc.preview_url?('<img class="frame" alt="'+esc(sc.title||"")+'" src="'+esc(sc.preview_url)+'"/>'):"";
+    }).join(""))+
     '<div class="row">'+open+'</div>';
   try{ if(window.openai&&window.openai.requestDisplayMode) window.openai.requestDisplayMode({mode:"pip"}); }catch(e){}
 });
@@ -188,7 +242,10 @@ function render(){
   var total=slides().length;
   var blocks=(s&&s.blocks||[]).map(function(b){
     var on=b.id===state.block_id?" on":"";
-    return '<button class="block'+on+'" data-id="'+esc(b.id)+'">'+esc((b.type||"block")+" · "+(b.text||"").slice(0,140))+'</button>';
+    return '<button class="block'+on+'" data-id="'+esc(b.id)+'">'+
+      (b.image_url?('<img class="frame" alt="" src="'+esc(b.image_url)+'"/>'):"")+
+      esc((b.type||"block")+" · "+(b.text||"").slice(0,140))+
+    '</button>';
   }).join("");
   var chips=ACTIONS.map(function(a){
     return '<button class="chip" data-act="'+a[0]+'">'+a[1]+'</button>';

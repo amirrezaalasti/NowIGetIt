@@ -273,6 +273,37 @@ class UpdatePlanRequest(BaseModel):
     plan: ScenePlan
 
 
+class JobSettingsRequest(BaseModel):
+    tts_voice: Optional[str] = Field(default=None, max_length=64)
+    language: Optional[str] = Field(default=None, max_length=16)
+    include_audio: Optional[bool] = None
+    include_subtitles: Optional[bool] = None
+
+    @field_validator("tts_voice")
+    @classmethod
+    def _normalize_voice(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        return normalize_tts_voice(value)
+
+    @field_validator("language")
+    @classmethod
+    def _normalize_language(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        return normalize_language(value)
+
+
+class PatchSceneRequest(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=200)
+    narration: Optional[str] = Field(default=None, max_length=8000)
+    visual_description: Optional[str] = Field(default=None, max_length=4000)
+    duration_seconds: Optional[float] = Field(default=None, ge=2.0, le=120.0)
+    visual_device: Optional[str] = Field(default=None, max_length=200)
+    camera_notes: Optional[str] = Field(default=None, max_length=2000)
+    beats: Optional[list[AnimationBeat]] = None
+
+
 class SubmitSceneCodeRequest(BaseModel):
     code: str = Field(..., min_length=40, max_length=120_000)
 

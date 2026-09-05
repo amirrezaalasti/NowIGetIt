@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { UI, widgetMeta } from "./config";
-import { ApiError, apiJson, signedMediaUrl, startSse } from "./fastapi";
+import { ApiError, apiBytes, apiJson, signedMediaUrl, startSse } from "./fastapi";
 import { resourceResult, WIDGETS } from "./widgets";
 
 const ASK_ACTIONS = [
@@ -25,6 +25,10 @@ const ASK_ACTIONS = [
 ] as const;
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_EMBED_IMAGE_BYTES = 400_000;
+const MAX_EMBED_IMAGES = 4;
+
+type ImagePart = { type: "image"; data: string; mimeType: string };
 
 function fail(err: unknown) {
   const message =
@@ -48,17 +52,61 @@ function ok(
   data: Record<string, unknown>,
   widgetUri?: string,
   textExtra?: string,
+  images?: ImagePart[],
 ) {
   const text = textExtra ? `${textExtra}\n\n${JSON.stringify(data)}` : JSON.stringify(data);
   return {
     structuredContent: data,
-    content: [{ type: "text" as const, text }],
+    content: [
+      { type: "text" as const, text },
+      ...(images || []),
+    ],
     _meta: widgetUri ? widgetMeta(widgetUri) : undefined,
   };
 }
 
-function sceneSummaries(plan: Record<string, unknown> | null | undefined) {
+async function embedImage(
+  origin: string,
+  path: string | null | undefined,
+): Promise<ImagePart | null> {
+  if (!path) return null;
+  try {
+    const { bytes, mimeType } = await apiBytes(origin, path);
+    if (!mimeType.startsWith("image/") || bytes.byteLength === 0) return null;
+    if (bytes.byteLength > MAX_EMBED_IMAGE_BYTES) return null;
+    return {
+      type: "image",
+      data: bytes.toString("base64"),
+      mimeType,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function embedImages(
+  origin: string,
+  paths: Array<string | null | undefined>,
+): Promise<ImagePart[]> {
+  const out: ImagePart[] = [];
+  for (const path of paths) {
+    if (out.length >= MAX_EMBED_IMAGES) break;
+    const part = await embedImage(origin, path);
+    if (part) out.push(part);
+  }
+  return out;
+}
+
+function sceneSummaries(
+  plan: Record<string, unknown> | null | undefined,
+  artifacts?: Array<Record<string, unknown>>,
+) {
   const scenes = Array.isArray(plan?.scenes) ? (plan.scenes as Record<string, unknown>[]) : [];
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const art of artifacts || []) {
+    const id = String(art.scene_id || "");
+    if (id) byId.set(id, art);
+  }
   return scenes.map((scene, i) => {
     const beats = Array.isArray(scene.beats)
       ? (scene.beats as Array<Record<string, unknown>>).map((beat) => ({
@@ -70,13 +118,36 @@ function sceneSummaries(plan: Record<string, unknown> | null | undefined) {
       typeof scene.narration === "string" && scene.narration.trim()
         ? scene.narration
         : beats.map((b) => b.narration).filter(Boolean).join(" ");
+    const id = String(scene.id || scene.scene_id || `scene_${i + 1}`);
+    const art = byId.get(id) || {};
+    const reviews = Array.isArray(art.vlm_reviews)
+      ? (art.vlm_reviews as Array<Record<string, unknown>>)
+      : [];
+    const lastReview = reviews.length ? reviews[reviews.length - 1] : null;
+    const previewPath =
+      (typeof lastReview?.frame_url === "string" && lastReview.frame_url) ||
+      (typeof art.video_url === "string" ? null : null);
     return {
-      id: String(scene.id || scene.scene_id || `scene_${i + 1}`),
+      id,
       title: String(scene.title || `Scene ${i + 1}`),
       duration_seconds: Number(scene.duration_seconds) || null,
       visual_description: typeof scene.visual_description === "string" ? scene.visual_description : "",
       narration,
       beats,
+      has_code: typeof art.code_final === "string" && art.code_final.length > 40,
+      clip_path: typeof art.video_url === "string" ? art.video_url : null,
+      preview_path:
+        typeof lastReview?.frame_url === "string" ? lastReview.frame_url : previewPath,
+      vlm: lastReview
+        ? {
+            approved: Boolean(lastReview.approved),
+            issues: Array.isArray(lastReview.issues)
+              ? (lastReview.issues as unknown[]).map(String).slice(0, 8)
+              : [],
+            clarity_score:
+              typeof lastReview.clarity_score === "number" ? lastReview.clarity_score : null,
+          }
+        : null,
     };
   });
 }
@@ -138,6 +209,7 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
   const runtime = (job.runtime || {}) as Record<string, unknown>;
   const meta = (job.meta || {}) as Record<string, unknown>;
   const plan = (job.scene_plan || {}) as Record<string, unknown>;
+  const settings = (meta.settings || {}) as Record<string, unknown>;
   const status = String(runtime.status || meta.status || "unknown");
   const error =
     typeof runtime.error === "string" && runtime.error.trim() ? runtime.error : null;
@@ -160,14 +232,15 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     next_step = "fix_and_rerender";
   } else if (awaiting) {
     message =
-      "STOP. Show the numbered storyboard to the user (title + narration per scene) and wait for approval or edit requests. Do not render or write Manim yet.";
+      "STOP. Show the numbered storyboard to the user (title + narration per scene) and wait for approval or edit requests. They can change any scene with update_scene, or you can rewrite the plan with revise_plan / edit_storyboard. Do not render or write Manim yet.";
     next_step = "present_storyboard_to_user";
   } else if (awaitingRender) {
     message =
       "All scene code is saved. Call render_video with user_confirmed true, then poll get_job if poll_again is true.";
     next_step = "call_render_video";
   } else if (done) {
-    message = "Video is ready. Show video_url to the user.";
+    message =
+      "Video is ready. Show video_url and the scene preview images to the user. They can still retouch a scene or change narration.";
     next_step = "show_video";
   } else if (running) {
     message = "Still rendering. Wait poll_after_seconds, then call get_job with the same job_id. Do not start a new job.";
@@ -180,6 +253,30 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     message = "Job is not finished. Call get_job again or fix scene code if render failed.";
     next_step = "poll_get_job";
   }
+  const rawScenes = sceneSummaries(
+    plan,
+    Array.isArray(job.scenes) ? (job.scenes as Array<Record<string, unknown>>) : [],
+  );
+  const scenes = await Promise.all(
+    rawScenes.map(async (scene) => ({
+      ...scene,
+      preview_url: scene.preview_path
+        ? await signedMediaUrl(origin, scene.preview_path)
+        : "",
+      clip_url: scene.clip_path ? await signedMediaUrl(origin, scene.clip_path) : "",
+      preview_path: undefined,
+      clip_path: undefined,
+    })),
+  );
+  const result = (job.result || {}) as Record<string, unknown>;
+  const resultScenes = Array.isArray(result.scenes)
+    ? (result.scenes as Array<Record<string, unknown>>).map((item) => ({
+        id: String(item.id || item.scene_id || ""),
+        title: String(item.title || ""),
+        approved: item.vlm_approved ?? item.approved ?? null,
+        frame_url: typeof item.frame_url === "string" ? item.frame_url : null,
+      }))
+    : [];
   return {
     job_id: String(job.job_id || ""),
     title: String(plan.title || meta.title || "Untitled"),
@@ -194,11 +291,53 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     next_step,
     message,
     prompt: typeof meta.prompt === "string" ? meta.prompt : null,
-    scenes: sceneSummaries(plan),
+    concept_summary: typeof plan.concept_summary === "string" ? plan.concept_summary : null,
+    options: {
+      tts_voice: typeof settings.tts_voice === "string" ? settings.tts_voice : null,
+      language: typeof settings.language === "string" ? settings.language : "en",
+      include_audio: settings.include_audio !== false,
+      include_subtitles: settings.include_subtitles !== false,
+    },
+    scenes,
+    results: resultScenes,
     video_url: video_url || null,
     library_url: `${origin}/library`,
     has_final_video: Boolean(runtime.has_final_video || video_url),
+    editable: true,
+    edit_tools: [
+      "update_scene",
+      "edit_storyboard",
+      "revise_plan",
+      "update_video_options",
+      "get_scene",
+      "submit_scene_code",
+      "retouch_scene",
+    ],
   };
+}
+
+async function jobResult(origin: string, job: Record<string, unknown>, extraText?: string) {
+  const payload = await jobPayload(origin, job);
+  const images = await embedImages(
+    origin,
+    payload.scenes.map((scene) => {
+      const match = (job.scenes as Array<Record<string, unknown>> | undefined)?.find(
+        (art) => String(art.scene_id) === scene.id,
+      );
+      const reviews = Array.isArray(match?.vlm_reviews)
+        ? (match?.vlm_reviews as Array<Record<string, unknown>>)
+        : [];
+      const last = reviews.length ? reviews[reviews.length - 1] : null;
+      return typeof last?.frame_url === "string" ? last.frame_url : null;
+    }),
+  );
+  const widget = payload.has_final_video ? UI.videoPlayer : UI.jobProgress;
+  const text =
+    extraText ||
+    (payload.has_final_video
+      ? "Video is ready. Show video_url and the preview images."
+      : payload.message);
+  return ok(payload, widget, text, images);
 }
 
 async function documentPayload(
@@ -217,7 +356,7 @@ async function documentPayload(
       }>;
       blocks?: Record<
         string,
-        { id: string; slide_id: string; type?: string; text?: string }
+        { id: string; slide_id: string; type?: string; text?: string; image_url?: string | null }
       >;
     };
   },
@@ -232,11 +371,24 @@ async function documentPayload(
       html_url: slide.html_url
         ? await signedMediaUrl(origin, slide.html_url)
         : "",
-      blocks: (slide.block_ids || []).map((id) => ({
-        id,
-        type: blocks[id]?.type || "other",
-        text: (blocks[id]?.text || "").slice(0, 400),
-      })),
+      blocks: await Promise.all(
+        (slide.block_ids || []).map(async (id) => {
+          const block = blocks[id];
+          const imagePath =
+            typeof (block as { image_url?: string } | undefined)?.image_url === "string"
+              ? (block as { image_url: string }).image_url
+              : "";
+          return {
+            id,
+            type: block?.type || "other",
+            text: (block?.text || "").slice(0, 400),
+            image_path: imagePath.includes("/file/") ? imagePath : "",
+            image_url: imagePath.includes("/file/")
+              ? await signedMediaUrl(origin, imagePath)
+              : imagePath || "",
+          };
+        }),
+      ),
     })),
   );
   return {
@@ -248,6 +400,27 @@ async function documentPayload(
     current_slide_id: currentSlideId || slides[0]?.id || null,
     understand_url: `${origin}/understand`,
   };
+}
+
+async function documentResult(
+  origin: string,
+  detail: Parameters<typeof documentPayload>[1],
+  currentSlideId?: string,
+  extra?: Record<string, unknown>,
+  textExtra?: string,
+) {
+  const doc = await documentPayload(origin, detail, currentSlideId);
+  const slide =
+    doc.slides.find((item) => item.id === currentSlideId) ||
+    doc.slides.find((item) => item.id === doc.current_slide_id) ||
+    doc.slides[0];
+  const blocks = slide?.blocks || [];
+  const wantedId = typeof extra?.block_id === "string" ? extra.block_id : "";
+  const wanted = wantedId ? blocks.filter((block) => block.id === wantedId && block.image_path) : [];
+  const figures = blocks.filter((block) => block.image_path);
+  const paths = (wanted.length ? wanted : figures).map((block) => block.image_path);
+  const images = await embedImages(origin, paths);
+  return ok({ ...doc, ...extra }, UI.slidesTutor, textExtra, images);
 }
 
 export function registerNowIGetIt(server: McpServer, origin: string) {
@@ -328,10 +501,13 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         length_preset: z.enum(["short", "standard", "deep"]).optional(),
         audience: z.enum(["hs", "undergrad", "general"]).optional(),
         language: z.string().min(2).max(16).optional(),
+        tts_voice: z.string().min(1).max(64).optional(),
+        include_audio: z.boolean().optional(),
+        include_subtitles: z.boolean().optional(),
       }),
       _meta: widgetMeta(UI.jobProgress),
     },
-    async ({ prompt, plan, length_preset, audience, language }) => {
+    async ({ prompt, plan, length_preset, audience, language, tts_voice, include_audio, include_subtitles }) => {
       try {
         const started = await startSse(
           origin,
@@ -344,9 +520,9 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
             scene_pacing: "balanced",
             audience: audience ?? "general",
             language: language ?? "en",
-            tts_voice: "alloy",
-            include_audio: true,
-            include_subtitles: true,
+            tts_voice: tts_voice || "Kore",
+            include_audio: include_audio ?? true,
+            include_subtitles: include_subtitles ?? true,
             plan_only: true,
             scene_plan: plan,
           }),
@@ -460,7 +636,10 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
       { untilType: ["status", "error", "complete"], timeoutMs: 25_000 },
     );
     const waited = await pollJobUntilSettled(origin, job_id);
-    const widget = waited.payload.has_final_video ? UI.videoPlayer : UI.jobProgress;
+    const job = await apiJson<Record<string, unknown>>(
+      origin,
+      `/api/jobs/${encodeURIComponent(job_id)}`,
+    );
     if (waited.payload.error || waited.payload.status === "error") {
       return fail(
         new Error(
@@ -472,23 +651,28 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
       );
     }
     if (waited.payload.has_final_video) {
-      return ok(waited.payload, widget, "Video is ready. Play video_url for the user.");
+      return jobResult(
+        origin,
+        job,
+        "Video is ready. Play the video and show the scene preview images.",
+      );
     }
     if (waited.payload.poll_again) {
+      const payload = await jobPayload(origin, job);
       return ok(
-        { ...waited.payload, poll_again: true, poll_after_seconds: 8 },
-        widget,
+        { ...payload, poll_again: true, poll_after_seconds: 8 },
+        UI.jobProgress,
         "Still rendering. Wait 8 seconds, then call get_job with this same job_id. Do not start a new job.",
       );
     }
     if (waited.payload.status === "awaiting_render") {
-      return ok(
-        waited.payload,
-        widget,
+      return jobResult(
+        origin,
+        job,
         "Code is saved but render has not started. Call render_video with user_confirmed true.",
       );
     }
-    return ok(waited.payload, widget);
+    return jobResult(origin, job);
   }
 
   server.registerTool(
@@ -578,10 +762,250 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           origin,
           `/api/jobs/${encodeURIComponent(job_id)}`,
         );
+        const payload = storyboardStop(await jobPayload(origin, job));
+        return ok(
+          payload,
+          UI.jobProgress,
+          "STOP. Show the updated storyboard to the user and wait for approval. They can still change any scene. Do not render yet.",
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "edit_storyboard",
+    {
+      title: "Edit storyboard from instructions",
+      description:
+        "Apply the user's requested storyboard changes in plain English (add/remove/rewrite scenes, change narration). Then STOP and show the new storyboard.",
+      inputSchema: z.object({
+        job_id: z.string().min(4),
+        instructions: z
+          .string()
+          .min(2)
+          .max(2000)
+          .describe("What the user wants changed, in their own words."),
+      }),
+      _meta: widgetMeta(UI.jobProgress),
+    },
+    async ({ job_id, instructions }) => {
+      try {
+        await apiJson(origin, `/api/jobs/${encodeURIComponent(job_id)}/plan/revise`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ instructions }),
+        });
+        const job = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}`,
+        );
         return ok(
           storyboardStop(await jobPayload(origin, job)),
           UI.jobProgress,
-          "STOP. Show the updated storyboard to the user and wait for approval. Do not render yet.",
+          "STOP. Show the revised storyboard and wait for approval. Do not render yet.",
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_scene",
+    {
+      title: "Edit one scene",
+      description:
+        "Change one scene's title, narration, visuals, or beats without rewriting the whole plan. Use this when the user wants to tweak a specific scene.",
+      inputSchema: z.object({
+        job_id: z.string().min(4),
+        scene_id: z.string().min(1),
+        title: z.string().min(1).max(200).optional(),
+        narration: z.string().min(1).max(8000).optional(),
+        visual_description: z.string().max(4000).optional(),
+        duration_seconds: z.number().min(2).max(120).optional(),
+        visual_device: z.string().max(200).optional(),
+        camera_notes: z.string().max(2000).optional(),
+        beats: z
+          .array(
+            z.object({
+              visual_action: z.string().min(1),
+              narration: z.string().min(1),
+            }),
+          )
+          .optional(),
+      }),
+      _meta: widgetMeta(UI.jobProgress),
+    },
+    async ({ job_id, scene_id, ...patch }) => {
+      try {
+        const body = Object.fromEntries(
+          Object.entries(patch).filter(([, value]) => value !== undefined),
+        );
+        if (Object.keys(body).length === 0) {
+          return fail(new Error("Provide at least one field to change on this scene."));
+        }
+        await apiJson(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}/scenes/${encodeURIComponent(scene_id)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        );
+        const job = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}`,
+        );
+        return ok(
+          storyboardStop(await jobPayload(origin, job)),
+          UI.jobProgress,
+          `Updated ${scene_id}. Show the new storyboard and wait — do not render until they approve.`,
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_video_options",
+    {
+      title: "Change voice, language, audio",
+      description:
+        "Change narrator voice, language, whether to include spoken audio, or burned-in subtitles. Call this before render_video.",
+      inputSchema: z.object({
+        job_id: z.string().min(4),
+        tts_voice: z.string().min(1).max(64).optional(),
+        language: z.string().min(2).max(16).optional(),
+        include_audio: z.boolean().optional(),
+        include_subtitles: z.boolean().optional(),
+      }),
+      _meta: widgetMeta(UI.jobProgress),
+    },
+    async ({ job_id, tts_voice, language, include_audio, include_subtitles }) => {
+      try {
+        const saved = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}/settings`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tts_voice,
+              language,
+              include_audio,
+              include_subtitles,
+            }),
+          },
+        );
+        const job = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}`,
+        );
+        const payload = await jobPayload(origin, job);
+        return ok(
+          { ...payload, options: saved },
+          UI.jobProgress,
+          "Options saved. Confirm the storyboard still looks right, then continue.",
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_scene",
+    {
+      title: "Get scene details",
+      description:
+        "Load one scene: narration, Manim code, preview image, clip URL, and VLM notes so you can show it or edit it.",
+      inputSchema: z.object({
+        job_id: z.string().min(4),
+        scene_id: z.string().min(1),
+      }),
+      _meta: widgetMeta(UI.jobProgress),
+    },
+    async ({ job_id, scene_id }) => {
+      try {
+        const job = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}`,
+        );
+        const payload = await jobPayload(origin, job);
+        const scene = payload.scenes.find((item) => item.id === scene_id);
+        if (!scene) return fail(new Error(`Scene ${scene_id} not found.`));
+        const art = (
+          Array.isArray(job.scenes) ? (job.scenes as Array<Record<string, unknown>>) : []
+        ).find((item) => String(item.scene_id) === scene_id);
+        const code = typeof art?.code_final === "string" ? art.code_final : "";
+        const reviews = Array.isArray(art?.vlm_reviews)
+          ? (art.vlm_reviews as Array<Record<string, unknown>>)
+          : [];
+        const last = reviews.length ? reviews[reviews.length - 1] : null;
+        const framePath = typeof last?.frame_url === "string" ? last.frame_url : null;
+        const images = await embedImages(origin, [framePath]);
+        return ok(
+          {
+            job_id,
+            ...scene,
+            code: code || null,
+            vlm_reviews: reviews.map((review) => ({
+              approved: review.approved,
+              issues: review.issues,
+              clarity_score: review.clarity_score,
+              frame_url: review.frame_url,
+            })),
+          },
+          UI.jobProgress,
+          code
+            ? "Scene details plus Manim. The user can change narration with update_scene or the code with submit_scene_code / retouch_scene."
+            : "Scene details. No Manim yet — wait for storyboard approval before writing code.",
+          images,
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "retouch_scene",
+    {
+      title: "Retouch a rendered scene",
+      description:
+        "After a scene has code (and usually a clip), apply the user's change request: rewrite Manim and re-render that scene. Use this instead of starting a new job.",
+      inputSchema: z.object({
+        job_id: z.string().min(4),
+        scene_id: z.string().min(1),
+        comment: z
+          .string()
+          .min(2)
+          .max(2000)
+          .describe("What the user wants changed in this scene."),
+      }),
+      _meta: widgetMeta(UI.jobProgress),
+    },
+    async ({ job_id, scene_id, comment }) => {
+      try {
+        await startSse(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}/scenes/${encodeURIComponent(scene_id)}/retouch/stream`,
+          JSON.stringify({ comment }),
+          { "Content-Type": "application/json" },
+          { untilType: ["complete", "error"], timeoutMs: 90_000 },
+        );
+        const job = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}`,
+        );
+        return jobResult(
+          origin,
+          job,
+          `Retouched ${scene_id}. Show the new preview image and ask if they want more changes.`,
         );
       } catch (err) {
         return fail(err);
@@ -606,21 +1030,17 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         );
         const payload = await jobPayload(origin, job);
         const note = payload.has_final_video
-          ? "Video is ready. Play video_url."
+          ? "Video is ready. Show video_url and the preview images."
           : payload.error || payload.status === "error"
             ? `Render failed: ${payload.error || "unknown error"}. Fix scene code if needed, then call render_video once. Do not retry unchanged.`
             : payload.awaiting_user
-              ? "STOP. Show the storyboard to the user and wait. Do not render."
+              ? "STOP. Show the storyboard to the user and wait. They can change scenes with update_scene or edit_storyboard."
               : payload.awaiting_render
                 ? "All scene code is saved. Call render_video with user_confirmed true."
                 : payload.poll_again
                   ? `Still rendering. Wait ${payload.poll_after_seconds} seconds, then call get_job again with job_id ${payload.job_id}.`
                   : payload.message;
-        return ok(
-          payload,
-          payload.has_final_video ? UI.videoPlayer : UI.jobProgress,
-          note,
-        );
+        return jobResult(origin, job, note);
       } catch (err) {
         return fail(err);
       }
@@ -706,12 +1126,13 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           doc_id: string;
           manifest: Parameters<typeof documentPayload>[1]["manifest"];
         }>(origin, `/api/documents/${encodeURIComponent(docId)}`);
-        const payload = await documentPayload(origin, detail);
-        return ok(
-          payload,
-          UI.slidesTutor,
-          payload.status === "ready"
-            ? "Document is ready. Use ask_document to explain, quiz, or deepen a slide/block."
+        return documentResult(
+          origin,
+          detail,
+          undefined,
+          undefined,
+          (detail.manifest.status || "ready") === "ready"
+            ? "Document is ready. Use ask_document to explain, quiz, or deepen a slide/block. Show any figure images."
             : "Conversion is still running. Poll get_document until status is ready.",
         );
       } catch (err) {
@@ -769,7 +1190,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           doc_id: string;
           manifest: Parameters<typeof documentPayload>[1]["manifest"];
         }>(origin, `/api/documents/${encodeURIComponent(doc_id)}`);
-        return ok(await documentPayload(origin, detail, slide_id), UI.slidesTutor);
+        return documentResult(origin, detail, slide_id);
       } catch (err) {
         return fail(err);
       }
@@ -834,16 +1255,17 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           doc_id: string;
           manifest: Parameters<typeof documentPayload>[1]["manifest"];
         }>(origin, `/api/documents/${encodeURIComponent(doc_id)}`);
-        const doc = await documentPayload(origin, detail, slide_id);
-        return ok(
+        return documentResult(
+          origin,
+          detail,
+          slide_id,
           {
-            ...doc,
             action: result.action,
             reply: result.reply,
             video_prompt: result.video_prompt || null,
             block_id: result.block_id || block_id || null,
           },
-          UI.slidesTutor,
+          typeof result.reply === "string" ? String(result.reply) : undefined,
         );
       } catch (err) {
         return fail(err);

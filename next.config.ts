@@ -43,6 +43,14 @@ const nextConfig: NextConfig = {
         source: "/api/jobs/:jobId/plan",
         destination: `${LOCAL_API}/api/jobs/:jobId/plan`,
       },
+      {
+        source: "/api/jobs/:jobId/plan/:path*",
+        destination: `${LOCAL_API}/api/jobs/:jobId/plan/:path*`,
+      },
+      {
+        source: "/api/jobs/:jobId/settings",
+        destination: `${LOCAL_API}/api/jobs/:jobId/settings`,
+      },
       { source: "/api/me", destination: `${LOCAL_API}/api/me` },
       { source: "/api/me/:path*", destination: `${LOCAL_API}/api/me/:path*` },
       { source: "/api/documents", destination: `${LOCAL_API}/api/documents` },

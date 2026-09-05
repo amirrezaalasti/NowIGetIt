@@ -508,6 +508,70 @@ def update_scene_section(
     return plan
 
 
+def patch_scene_section(
+    job_id: str,
+    scene_id: str,
+    *,
+    title: Optional[str] = None,
+    narration: Optional[str] = None,
+    visual_description: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+    visual_device: Optional[str] = None,
+    camera_notes: Optional[str] = None,
+    beats: Optional[list[dict[str, Any]]] = None,
+) -> ScenePlan:
+    """Apply a partial edit to one scene; every other scene stays as-is."""
+    plan = _load_plan(job_id)
+    existing = next((s for s in plan.scenes if s.id == scene_id), None)
+    if existing is None:
+        raise ValueError(f"Scene {scene_id} not found")
+    data = existing.model_dump()
+    if title is not None:
+        data["title"] = title
+    if visual_description is not None:
+        data["visual_description"] = visual_description
+    if duration_seconds is not None:
+        data["duration_seconds"] = duration_seconds
+    if visual_device is not None:
+        data["visual_device"] = visual_device
+    if camera_notes is not None:
+        data["camera_notes"] = camera_notes
+    if beats is not None:
+        data["beats"] = beats
+    elif narration is not None:
+        data["narration"] = narration
+        data["animation_beats"] = existing.animation_beats
+        data.pop("beats", None)
+    section = SceneSection.model_validate(data)
+    return update_scene_section(job_id, scene_id, section)
+
+
+def update_job_settings(
+    job_id: str,
+    *,
+    tts_voice: Optional[str] = None,
+    language: Optional[str] = None,
+    include_audio: Optional[bool] = None,
+    include_subtitles: Optional[bool] = None,
+) -> dict[str, Any]:
+    """Persist narrator / language / mux flags on the job before render."""
+    if tts_voice is not None:
+        _persist_job_tts_voice(job_id, tts_voice)
+    if language is not None:
+        _persist_job_language(job_id, language)
+    if include_audio is not None:
+        _persist_job_include_audio(job_id, include_audio)
+    if include_subtitles is not None:
+        _persist_job_include_subtitles(job_id, include_subtitles)
+    return {
+        "job_id": job_id,
+        "tts_voice": _job_tts_voice(job_id),
+        "language": _job_language(job_id),
+        "include_audio": _job_include_audio(job_id),
+        "include_subtitles": _job_include_subtitles(job_id),
+    }
+
+
 def job_codegen_spec(job_id: str, scene_id: str) -> dict[str, Any]:
     """Prompt pack so a host LLM can write Manim for one scene (no OpenRouter)."""
     plan = _load_plan(job_id)

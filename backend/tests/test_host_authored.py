@@ -136,6 +136,45 @@ def test_job_status_persisted_error_is_error(tmp_path, monkeypatch) -> None:
     assert "Manim render failed" in (status["error"] or "")
 
 
+def test_patch_scene_and_settings(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend.pipeline import orchestrator as orch
+    from backend.pipeline.orchestrator import patch_scene_section, update_job_settings
+
+    _stub_db(monkeypatch)
+    spec = planning_spec_payload()
+    req = GenerateRequest.model_validate(
+        {
+            "prompt": "Explain backpropagation",
+            "plan_only": True,
+            "scene_plan": {
+                "title": "Backpropagation",
+                "concept_summary": "Gradients from the loss.",
+                "scenes": [spec["example_scene"]],
+            },
+        }
+    )
+    result = orch.run_pipeline(req, user_id="mcp-connector")
+    plan = patch_scene_section(
+        result.job_id,
+        "scene_1",
+        title="Error flows backward",
+        narration="The loss sends a message back through every layer.",
+    )
+    assert plan.scenes[0].title == "Error flows backward"
+    assert "message back" in plan.scenes[0].narration
+    settings = update_job_settings(
+        result.job_id,
+        tts_voice="alloy",
+        language="en",
+        include_audio=False,
+        include_subtitles=True,
+    )
+    assert settings["tts_voice"] == "alloy"
+    assert settings["include_audio"] is False
+    assert settings["include_subtitles"] is True
+
+
 def test_continue_host_authored_skips_openrouter_without_flags(
     tmp_path, monkeypatch
 ) -> None:
