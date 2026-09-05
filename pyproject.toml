@@ -16,19 +16,13 @@ dependencies = [
   "pymongo>=4.10.0",
   "supabase>=2.10.0",
   "matplotlib>=3.8.0",
-  "numpy>=1.24.0",
+  "numpy>=1.26.0",
   "setuptools>=70.0.0; python_version >= '3.12'",
-  "manim>=0.18.0",
-  "manimgl>=1.7.0",
-  "imageio>=2.31.0",
-  "imageio-ffmpeg>=0.4.9",
-  "scipy>=1.11.0",
-  "pycairo>=1.24.0",
-  "manimpango>=0.5.0",
-  "PyOpenGL>=3.1.0",
-  "moderngl>=5.8.0",
 ]
 
+# Manim/cairo stay optional. Vercel uv installs this package from pyproject.toml
+# and has no pangocairo; local/Railway worker use `pip install -e ".[manim]"`
+# or requirements-local.txt / requirements-render.txt.
 [project.optional-dependencies]
 manim = [
   "manim>=0.18.0",

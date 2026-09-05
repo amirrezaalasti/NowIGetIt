@@ -105,7 +105,7 @@ Default storage is **MongoDB Atlas + local files** when `MONGODB_URI` is set: us
 source .venv/bin/activate
 pip install -U pip setuptools==70.3.0 wheel
 pip install -r requirements-local.txt   # API + Manim (local)
-# Vercel uses requirements.txt (API only, no Manim)
+# Vercel/uv installs pyproject.toml core deps (API only). Manim is extra `.[manim]`.
 
 # macOS (if missing):
 # brew install ffmpeg cairo pango pkg-config glew
