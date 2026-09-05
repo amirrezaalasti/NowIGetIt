@@ -173,6 +173,50 @@ def test_patch_scene_and_settings(tmp_path, monkeypatch) -> None:
     assert settings["tts_voice"] == "alloy"
     assert settings["include_audio"] is False
     assert settings["include_subtitles"] is True
+    assert settings["production_options_confirmed"] is True
+
+
+def test_production_options_are_chosen_after_plan(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend import artifacts as store
+    from backend.pipeline import orchestrator as orch
+    from backend.pipeline.orchestrator import (
+        ProductionOptionsRequired,
+        job_codegen_spec,
+        update_job_settings,
+    )
+
+    _stub_db(monkeypatch)
+    spec = planning_spec_payload()
+    req = GenerateRequest.model_validate(
+        {
+            "prompt": "Explain backpropagation",
+            "plan_only": True,
+            "scene_plan": {
+                "title": "Backpropagation",
+                "concept_summary": "Gradients from the loss.",
+                "scenes": [spec["example_scene"]],
+            },
+        }
+    )
+    result = orch.run_pipeline(req, user_id="mcp-connector")
+    meta = store.load_job(result.job_id).get("meta") or {}
+    settings = meta.get("settings") or {}
+    assert settings.get("production_options_confirmed") is False
+    assert "include_audio" not in settings
+    assert "include_subtitles" not in settings
+    with pytest.raises(ProductionOptionsRequired):
+        job_codegen_spec(result.job_id, "scene_1")
+    with pytest.raises(ProductionOptionsRequired):
+        continue_pipeline(result.job_id, ContinueRequest(), user_id="mcp-connector")
+    update_job_settings(
+        result.job_id,
+        include_audio=True,
+        include_subtitles=False,
+        tts_voice="alloy",
+    )
+    spec_payload = job_codegen_spec(result.job_id, "scene_1")
+    assert spec_payload["scene_id"] == "scene_1"
 
 
 def test_continue_host_authored_skips_openrouter_without_flags(
@@ -195,6 +239,15 @@ def test_continue_host_authored_skips_openrouter_without_flags(
         }
     )
     result = run_pipeline(req, user_id="mcp-connector")
+
+    from backend.pipeline.orchestrator import update_job_settings
+
+    update_job_settings(
+        result.job_id,
+        include_audio=True,
+        include_subtitles=True,
+        tts_voice="Kore",
+    )
 
     def _boom(*_a, **_k):
         raise AssertionError(

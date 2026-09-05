@@ -152,11 +152,15 @@ function sceneSummaries(
   });
 }
 
-function storyboardStop(payload: Record<string, unknown>) {
+function storyboardStop(payload: Record<string, unknown>): Record<string, unknown> {
   const scenes = Array.isArray(payload.scenes) ? payload.scenes : [];
+  const options = (payload.options || {}) as Record<string, unknown>;
+  const optionsConfirmed = Boolean(options.production_options_confirmed);
   return {
     ...payload,
-    next_step: "present_storyboard_to_user",
+    next_step: optionsConfirmed
+      ? "present_storyboard_to_user"
+      : "ask_production_options",
     poll_again: false,
     awaiting_user: true,
     do_not_call: [
@@ -166,9 +170,19 @@ function storyboardStop(payload: Record<string, unknown>) {
       "submit_scene_code",
       "list_jobs",
     ],
+    ask_after_plan: optionsConfirmed
+      ? []
+      : [
+          { id: "include_audio", question: "Spoken narration on or off?" },
+          { id: "include_subtitles", question: "Burned-in subtitles on or off?" },
+          { id: "tts_voice", question: "Which narrator voice?" },
+        ],
     user_facing_storyboard: scenes,
   };
 }
+
+const PRODUCTION_OPTIONS_HINT =
+  "Ask the user: (1) spoken narration on or off? (2) burned-in subtitles on or off? (3) which narrator voice? Then call update_video_options with those answers. Do not write Manim or render until that tool returns production_options_confirmed true.";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -224,12 +238,21 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
   const running = Boolean(runtime.running) || status === "running";
   const done = status === "complete" || Boolean(video_url);
   const failed = Boolean(error) || status === "error";
+  const optionsConfirmed = Boolean(settings.production_options_confirmed);
+  const includeAudio =
+    typeof settings.include_audio === "boolean" ? settings.include_audio : null;
+  const includeSubtitles =
+    typeof settings.include_subtitles === "boolean" ? settings.include_subtitles : null;
   let message: string;
   let next_step: string;
   if (failed) {
     message =
       `Render failed: ${error || "unknown error"}. If this is a Manim error, fix that scene with submit_scene_code, then call render_video once. Do not retry the same call unchanged.`;
     next_step = "fix_and_rerender";
+  } else if (awaiting && !optionsConfirmed) {
+    message =
+      "STOP. Show the numbered storyboard (title + narration per scene). Then ask whether they want spoken audio, burned-in subtitles, and which voice. Call update_video_options with their answers. Do not write Manim or render until production_options_confirmed is true.";
+    next_step = "ask_production_options";
   } else if (awaiting) {
     message =
       "STOP. Show the numbered storyboard to the user (title + narration per scene) and wait for approval or edit requests. They can change any scene with update_scene, or you can rewrite the plan with revise_plan / edit_storyboard. Do not render or write Manim yet.";
@@ -295,9 +318,19 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     options: {
       tts_voice: typeof settings.tts_voice === "string" ? settings.tts_voice : null,
       language: typeof settings.language === "string" ? settings.language : "en",
-      include_audio: settings.include_audio !== false,
-      include_subtitles: settings.include_subtitles !== false,
+      include_audio: includeAudio,
+      include_subtitles: includeSubtitles,
+      production_options_confirmed: optionsConfirmed,
     },
+    ask_after_plan: optionsConfirmed
+      ? []
+      : awaiting
+        ? [
+            { id: "include_audio", question: "Spoken narration on or off?" },
+            { id: "include_subtitles", question: "Burned-in subtitles on or off?" },
+            { id: "tts_voice", question: "Which narrator voice?" },
+          ]
+        : [],
     scenes,
     results: resultScenes,
     video_url: video_url || null,
@@ -463,7 +496,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Submit video storyboard",
       description:
-        "Save YOUR ScenePlan. `plan` is a required JSON object argument (title, concept_summary, scenes[] with beats). Do not put JSON inside prompt. After this tool returns, STOP and show the storyboard to the user. Wait for them to approve or request edits. Do not call render_video yet.",
+        "Save YOUR ScenePlan. `plan` is a required JSON object argument (title, concept_summary, scenes[] with beats). Do not put JSON inside prompt. Do not choose voice, audio, or subtitles here. After this tool returns, STOP, show the storyboard, and ask the user those production options. Wait for approval. Do not call render_video yet.",
       inputSchema: z.object({
         prompt: z.string().min(3).max(8000).describe("Short user request, e.g. explain backpropagation"),
         plan: z
@@ -501,13 +534,10 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         length_preset: z.enum(["short", "standard", "deep"]).optional(),
         audience: z.enum(["hs", "undergrad", "general"]).optional(),
         language: z.string().min(2).max(16).optional(),
-        tts_voice: z.string().min(1).max(64).optional(),
-        include_audio: z.boolean().optional(),
-        include_subtitles: z.boolean().optional(),
       }),
       _meta: widgetMeta(UI.jobProgress),
     },
-    async ({ prompt, plan, length_preset, audience, language, tts_voice, include_audio, include_subtitles }) => {
+    async ({ prompt, plan, length_preset, audience, language }) => {
       try {
         const started = await startSse(
           origin,
@@ -520,9 +550,6 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
             scene_pacing: "balanced",
             audience: audience ?? "general",
             language: language ?? "en",
-            tts_voice: tts_voice || "Kore",
-            include_audio: include_audio ?? true,
-            include_subtitles: include_subtitles ?? true,
             plan_only: true,
             scene_plan: plan,
           }),
@@ -539,7 +566,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         return ok(
           payload,
           UI.jobProgress,
-          "STOP AND SHOW THE USER THIS STORYBOARD. Numbered scenes with titles and narration. Ask if they want changes. Do not render, do not write Manim, do not list_jobs until they reply.",
+          "STOP AND SHOW THE USER THIS STORYBOARD. Numbered scenes with titles and narration. Then ask whether they want spoken audio, burned-in subtitles, and which voice. Call update_video_options with their answers. Do not render, do not write Manim, do not list_jobs until they reply.",
         );
       } catch (err) {
         return fail(err);
@@ -552,7 +579,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Manim codegen spec",
       description:
-        "Only after the user approved the storyboard in chat. Returns Manim rules for one scene. You write Python, then submit_scene_code. Text() only — never MathTex.",
+        "Only after the user approved the storyboard AND you saved their audio/subtitle/voice choices with update_video_options. Returns Manim rules for one scene. You write Python, then submit_scene_code. Text() only — never MathTex.",
       inputSchema: z.object({
         job_id: z.string().min(4),
         scene_id: z.string().min(1).describe("e.g. scene_1"),
@@ -560,6 +587,14 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
     async ({ job_id, scene_id }) => {
       try {
+        const job = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}`,
+        );
+        const preview = await jobPayload(origin, job);
+        if (!preview.options.production_options_confirmed) {
+          return fail(new Error(PRODUCTION_OPTIONS_HINT));
+        }
         const spec = await apiJson<Record<string, unknown>>(
           origin,
           `/api/jobs/${encodeURIComponent(job_id)}/scenes/${encodeURIComponent(scene_id)}/codegen-spec`,
@@ -580,7 +615,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Submit scene Manim code",
       description:
-        "Save Manim for one scene after the user approved the storyboard. Repeat until every scene has code, then render_video with user_confirmed true.",
+        "Save Manim for one scene after the user approved the storyboard and you saved audio/subtitle/voice with update_video_options. Repeat until every scene has code, then render_video with user_confirmed true.",
       inputSchema: z.object({
         job_id: z.string().min(4),
         scene_id: z.string().min(1),
@@ -594,6 +629,14 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     },
     async ({ job_id, scene_id, code }) => {
       try {
+        const previewJob = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}`,
+        );
+        const preview = await jobPayload(origin, previewJob);
+        if (!preview.options.production_options_confirmed) {
+          return fail(new Error(PRODUCTION_OPTIONS_HINT));
+        }
         const saved = await apiJson<Record<string, unknown>>(
           origin,
           `/api/jobs/${encodeURIComponent(job_id)}/scenes/${encodeURIComponent(scene_id)}/code`,
@@ -680,7 +723,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Render video",
       description:
-        "Render ONLY after (1) the user approved the storyboard in chat and (2) every scene has submit_scene_code. You MUST pass user_confirmed=true. This waits on the worker; if poll_again, keep calling get_job.",
+        "Render ONLY after (1) the user approved the storyboard, (2) update_video_options saved audio/subtitles/voice, and (3) every scene has submit_scene_code. You MUST pass user_confirmed=true. This waits on the worker; if poll_again, keep calling get_job.",
       inputSchema: z.object({
         job_id: z.string().min(4),
         user_confirmed: z
@@ -694,9 +737,17 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         if (user_confirmed !== true) {
           return fail(
             new Error(
-              "user_confirmed must be true. First show the storyboard, wait for the user to approve, submit Manim for every scene, then call render_video again.",
+              "user_confirmed must be true. First show the storyboard, wait for the user to approve, save production options with update_video_options, submit Manim for every scene, then call render_video again.",
             ),
           );
+        }
+        const previewJob = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}`,
+        );
+        const preview = await jobPayload(origin, previewJob);
+        if (!preview.options.production_options_confirmed) {
+          return fail(new Error(PRODUCTION_OPTIONS_HINT));
         }
         return await startHostRender(job_id);
       } catch (err) {
@@ -722,9 +773,17 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         if (user_confirmed !== true) {
           return fail(
             new Error(
-              "The user has not confirmed. Show the storyboard and wait. Then submit_scene_code for every scene, then render_video with user_confirmed true.",
+              "The user has not confirmed. Show the storyboard, save audio/subtitles/voice with update_video_options, wait for approval, then submit_scene_code for every scene, then render_video with user_confirmed true.",
             ),
           );
+        }
+        const previewJob = await apiJson<Record<string, unknown>>(
+          origin,
+          `/api/jobs/${encodeURIComponent(job_id)}`,
+        );
+        const preview = await jobPayload(origin, previewJob);
+        if (!preview.options.production_options_confirmed) {
+          return fail(new Error(PRODUCTION_OPTIONS_HINT));
         }
         return await startHostRender(job_id);
       } catch (err) {
@@ -873,21 +932,25 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
   server.registerTool(
     "update_video_options",
     {
-      title: "Change voice, language, audio",
+      title: "Save audio, subtitles, voice",
       description:
-        "Change narrator voice, language, whether to include spoken audio, or burned-in subtitles. Call this before render_video.",
+        "Required after the storyboard. Record the user's choices: spoken audio on/off, burned-in subtitles on/off, and narrator voice. Call this before video_codegen_spec or render_video. Do not invent defaults — ask first.",
       inputSchema: z.object({
         job_id: z.string().min(4),
-        tts_voice: z.string().min(1).max(64).optional(),
+        include_audio: z
+          .boolean()
+          .describe("User's choice: spoken narration on or off."),
+        include_subtitles: z
+          .boolean()
+          .describe("User's choice: burned-in subtitles on or off."),
+        tts_voice: z.string().min(1).max(64).optional().describe("Narrator voice the user picked."),
         language: z.string().min(2).max(16).optional(),
-        include_audio: z.boolean().optional(),
-        include_subtitles: z.boolean().optional(),
       }),
       _meta: widgetMeta(UI.jobProgress),
     },
     async ({ job_id, tts_voice, language, include_audio, include_subtitles }) => {
       try {
-        const saved = await apiJson<Record<string, unknown>>(
+        await apiJson<Record<string, unknown>>(
           origin,
           `/api/jobs/${encodeURIComponent(job_id)}/settings`,
           {
@@ -905,11 +968,11 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           origin,
           `/api/jobs/${encodeURIComponent(job_id)}`,
         );
-        const payload = await jobPayload(origin, job);
+        const payload = storyboardStop(await jobPayload(origin, job));
         return ok(
-          { ...payload, options: saved },
+          payload,
           UI.jobProgress,
-          "Options saved. Confirm the storyboard still looks right, then continue.",
+          "Production options saved. Show the storyboard, wait for them to approve the plan, then write Manim. Do not invent a different voice or subtitle setting.",
         );
       } catch (err) {
         return fail(err);

@@ -79,6 +79,17 @@ class JobCancelledError(Exception):
     pass
 
 
+class ProductionOptionsRequired(ValueError):
+    """Spoken audio / subtitles / voice must be chosen after the storyboard."""
+
+
+PRODUCTION_OPTIONS_REQUIRED_MSG = (
+    "Spoken audio, burned-in subtitles, and narrator voice are chosen after the "
+    "storyboard. Ask the user, then save with update_video_options "
+    "(PUT /api/jobs/{id}/settings) before writing Manim or rendering."
+)
+
+
 def _check_cancel(job_id: str) -> None:
     if job_runner.is_cancelled(job_id):
         raise JobCancelledError("Generation cancelled by user")
@@ -341,6 +352,31 @@ def _persist_job_language(job_id: str, language: str) -> None:
         pass
 
 
+def _job_production_options_confirmed(job_id: str) -> bool:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        return bool(settings.get("production_options_confirmed"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _persist_production_options_confirmed(job_id: str, confirmed: bool) -> None:
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["production_options_confirmed"] = bool(confirmed)
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _mux_scene_vo(
     video_path: str,
     audio_path: Optional[str],
@@ -563,17 +599,45 @@ def update_job_settings(
         _persist_job_include_audio(job_id, include_audio)
     if include_subtitles is not None:
         _persist_job_include_subtitles(job_id, include_subtitles)
+    if include_audio is not None and include_subtitles is not None:
+        _persist_production_options_confirmed(job_id, True)
+    confirmed = _job_production_options_confirmed(job_id)
     return {
         "job_id": job_id,
         "tts_voice": _job_tts_voice(job_id),
         "language": _job_language(job_id),
         "include_audio": _job_include_audio(job_id),
         "include_subtitles": _job_include_subtitles(job_id),
+        "production_options_confirmed": confirmed,
     }
+
+
+def require_production_options(job_id: str) -> None:
+    if not _job_production_options_confirmed(job_id):
+        raise ProductionOptionsRequired(PRODUCTION_OPTIONS_REQUIRED_MSG)
+
+
+def prepare_production_options(
+    job_id: str, request: Optional[ContinueRequest] = None
+) -> None:
+    """Persist continue-body flags, then refuse if the user has not chosen yet."""
+    if request is not None:
+        if request.tts_voice:
+            _persist_job_tts_voice(job_id, request.tts_voice)
+        if request.language:
+            _persist_job_language(job_id, request.language)
+        if request.include_audio is not None:
+            _persist_job_include_audio(job_id, request.include_audio)
+        if request.include_subtitles is not None:
+            _persist_job_include_subtitles(job_id, request.include_subtitles)
+        if request.include_audio is not None and request.include_subtitles is not None:
+            _persist_production_options_confirmed(job_id, True)
+    require_production_options(job_id)
 
 
 def job_codegen_spec(job_id: str, scene_id: str) -> dict[str, Any]:
     """Prompt pack so a host LLM can write Manim for one scene (no OpenRouter)."""
+    require_production_options(job_id)
     plan = _load_plan(job_id)
     index = next((i for i, s in enumerate(plan.scenes) if s.id == scene_id), None)
     if index is None:
@@ -590,6 +654,7 @@ def job_codegen_spec(job_id: str, scene_id: str) -> dict[str, Any]:
 
 def submit_host_scene_code(job_id: str, scene_id: str, code: str) -> dict[str, Any]:
     """Validate and persist host-authored Manim for a scene."""
+    require_production_options(job_id)
     plan = _load_plan(job_id)
     scene = next((s for s in plan.scenes if s.id == scene_id), None)
     if scene is None:
@@ -1883,11 +1948,18 @@ def run_pipeline(
             "scene_pacing": request.scene_pacing,
             "audience": request.audience,
             "language": request.language,
-            "tts_voice": request.tts_voice,
-            "include_audio": request.include_audio,
-            "include_subtitles": request.include_subtitles,
             "plan_only": request.plan_only,
+            "production_options_confirmed": not request.plan_only,
             "host_authored": host_plan is not None,
+            **(
+                {
+                    "tts_voice": request.tts_voice,
+                    "include_audio": request.include_audio,
+                    "include_subtitles": request.include_subtitles,
+                }
+                if not request.plan_only
+                else {}
+            ),
         },
         user_id=user_id,
         user_email=user_email,
@@ -2032,10 +2104,12 @@ def run_pipeline(
         "scene_pacing": request.scene_pacing,
         "audience": request.audience,
         "language": request.language,
-        "tts_voice": request.tts_voice,
-        "include_audio": request.include_audio,
-        "include_subtitles": request.include_subtitles,
+        "production_options_confirmed": not request.plan_only,
     }
+    if not request.plan_only:
+        plan_payload["tts_voice"] = request.tts_voice
+        plan_payload["include_audio"] = request.include_audio
+        plan_payload["include_subtitles"] = request.include_subtitles
     _emit(
         on_event,
         PipelineEventType.plan,
@@ -2102,6 +2176,7 @@ def continue_pipeline(
     meta = job.get("meta") or {}
     snap = meta.get("settings") if isinstance(meta, dict) else {}
     host_authored = bool(isinstance(snap, dict) and snap.get("host_authored"))
+    prepare_production_options(job_id, request)
     # MCP host already wrote the Manim. Never construct OpenRouter on that path,
     # even if the continue body omitted skip_codegen (FastAPI default body).
     skip_codegen = bool(request.skip_codegen or host_authored)
@@ -2115,14 +2190,6 @@ def continue_pipeline(
     plan = _load_plan(job_id)
     resolution = request.resolution or _job_resolution(job_id)
     skip_render = request.skip_render
-    if request.tts_voice:
-        _persist_job_tts_voice(job_id, request.tts_voice)
-    if request.language:
-        _persist_job_language(job_id, request.language)
-    if request.include_audio is not None:
-        _persist_job_include_audio(job_id, request.include_audio)
-    if request.include_subtitles is not None:
-        _persist_job_include_subtitles(job_id, request.include_subtitles)
     tts_voice = _job_tts_voice(job_id, fallback=request.tts_voice)
 
     if user_id:

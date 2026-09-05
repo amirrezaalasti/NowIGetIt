@@ -1057,9 +1057,6 @@ export function Generator() {
           scene_pacing: scenePacing,
           audience,
           language,
-          tts_voice: ttsVoice,
-          include_audio: includeAudio,
-          include_subtitles: includeSubtitles,
           plan_only: true,
           skip_render: false,
         },
@@ -1366,61 +1363,6 @@ export function Generator() {
                   ))}
                 </select>
               </label>
-              <label className="flex min-w-[10rem] flex-col gap-1.5">
-                <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
-                  Narrator
-                </span>
-                <div className="flex items-center gap-2">
-                  <select
-                    value={ttsVoice}
-                    onChange={(e) => setTtsVoice(e.target.value)}
-                    disabled={running || !includeAudio}
-                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {ttsVoices.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.label}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    title="Test Voice"
-                    disabled={running || !includeAudio || isPlayingPreview}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      playVoicePreview(ttsVoice);
-                    }}
-                    className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
-                  >
-                    {isPlayingPreview ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
-                    ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    )}
-                  </button>
-                </div>
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink-muted)]">
-                <input
-                  type="checkbox"
-                  checked={includeAudio}
-                  onChange={(e) => setIncludeAudio(e.target.checked)}
-                  disabled={running}
-                  className="rounded border-[var(--line)]"
-                />
-                Audio
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink-muted)]">
-                <input
-                  type="checkbox"
-                  checked={includeSubtitles}
-                  onChange={(e) => setIncludeSubtitles(e.target.checked)}
-                  disabled={running}
-                  className="rounded border-[var(--line)]"
-                />
-                Subtitles
-              </label>
             </div>
 
             {showExamples && (
@@ -1453,6 +1395,9 @@ export function Generator() {
               >
                 Plan storyboard
               </button>
+              <p className="text-sm text-[var(--ink-muted)]">
+                Voice, spoken audio, and subtitles come after you review the plan.
+              </p>
             </div>
 
             <details className="mt-10 group">
@@ -1479,7 +1424,8 @@ export function Generator() {
                   Edit the plan
                 </h2>
                 <p className="mt-2 max-w-xl text-sm text-[var(--ink-muted)]">
-                  Tweak narration and visuals, then confirm to render.
+                  Tweak narration and visuals, then choose spoken audio, subtitles,
+                  and voice before you confirm.
                   {editingPlan.visual_identity
                     ? ` ${editingPlan.visual_identity}`
                     : ""}
@@ -1504,41 +1450,71 @@ export function Generator() {
               placeholder="Video title"
             />
 
-            <label className="mt-6 flex max-w-xs flex-col gap-1.5">
+            <div className="mt-6 rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-4">
               <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
-                Narrator voice
+                After the plan · audio &amp; subtitles
               </span>
-              <div className="flex items-center gap-2">
-                <select
-                  value={ttsVoice}
-                  onChange={(e) => setTtsVoice(e.target.value)}
-                  disabled={running}
-                  className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {ttsVoices.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  title="Test Voice"
-                  disabled={running || isPlayingPreview}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    playVoicePreview(ttsVoice);
-                  }}
-                  className="flex h-[34px] w-[34px] items-center justify-center rounded-lg border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
-                >
-                  {isPlayingPreview ? (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
-                  ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                  )}
-                </button>
+              <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                These are applied when you generate — not while planning scenes.
+              </p>
+              <div className="mt-3 flex flex-wrap items-end gap-4">
+                <label className="flex min-w-[12rem] flex-1 flex-col gap-1.5">
+                  <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+                    Narrator voice
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={ttsVoice}
+                      onChange={(e) => setTtsVoice(e.target.value)}
+                      disabled={running || !includeAudio}
+                      className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {ttsVoices.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      title="Test Voice"
+                      disabled={running || !includeAudio || isPlayingPreview}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        playVoicePreview(ttsVoice);
+                      }}
+                      className="flex h-[34px] w-[34px] items-center justify-center rounded-lg border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
+                    >
+                      {isPlayingPreview ? (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
+                      ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                      )}
+                    </button>
+                  </div>
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink)]">
+                  <input
+                    type="checkbox"
+                    checked={includeAudio}
+                    onChange={(e) => setIncludeAudio(e.target.checked)}
+                    disabled={running}
+                    className="rounded border-[var(--line)]"
+                  />
+                  Spoken audio
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink)]">
+                  <input
+                    type="checkbox"
+                    checked={includeSubtitles}
+                    onChange={(e) => setIncludeSubtitles(e.target.checked)}
+                    disabled={running}
+                    className="rounded border-[var(--line)]"
+                  />
+                  Subtitles
+                </label>
               </div>
-            </label>
+            </div>
 
             <div className="mt-6 rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-4">
               <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
@@ -2127,7 +2103,7 @@ export function Generator() {
             <p className="text-sm text-[var(--ink-muted)]">
               {revising
                 ? "Applying your storyboard changes…"
-                : `${editingPlan.scenes.length} scenes ready to render`}
+                : `${editingPlan.scenes.length} scenes · set audio & subtitles above`}
             </p>
             <div className="flex flex-wrap items-center gap-3">
               {running && (

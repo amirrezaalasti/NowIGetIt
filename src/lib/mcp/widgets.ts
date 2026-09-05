@@ -134,12 +134,13 @@ function render(){
   }).join("");
   var video=s.video_url?('<video controls playsinline src="'+esc(s.video_url)+'"></video>'):"";
   var opt=s.options||{};
-  var options='<div class="panel"><div class="muted">Voice, language, audio</div>'+
+  var confirmed=!!opt.production_options_confirmed;
+  var options='<div class="panel"><div class="muted">'+(confirmed?"Voice, language, audio":"Choose these before we build — spoken audio, subtitles, and voice")+'</div>'+
     '<input id="voice" placeholder="Voice (Kore, alloy, …)" value="'+esc(opt.tts_voice||"")+'"/>'+
     '<input id="lang" placeholder="Language" value="'+esc(opt.language||"en")+'"/>'+
-    '<label class="muted"><input type="checkbox" id="audio"'+(opt.include_audio===false?"":" checked")+'> Spoken audio</label>'+
-    '<label class="muted"><input type="checkbox" id="subs"'+(opt.include_subtitles===false?"":" checked")+'> Subtitles</label>'+
-    '<button class="chip" type="button" id="save-opts">Save options</button></div>';
+    '<label class="muted"><input type="checkbox" id="audio"'+(opt.include_audio===true?" checked":"")+'> Spoken audio</label>'+
+    '<label class="muted"><input type="checkbox" id="subs"'+(opt.include_subtitles===true?" checked":"")+'> Subtitles</label>'+
+    '<button class="chip" type="button" id="save-opts">'+(confirmed?"Update options":"Save audio & subtitles")+'</button></div>';
   var actions="";
   if(s.has_final_video||s.video_url){
     actions="";
@@ -150,7 +151,7 @@ function render(){
   } else if(status==="error"){
     actions='<p class="err">'+esc(s.error||s.message||"Render failed")+'</p>';
   } else if(status==="awaiting_plan"||s.awaiting_plan||s.awaiting_user){
-    actions='<p class="muted">Review this storyboard in chat. Say if you want changes before it renders.</p>';
+    actions='<p class="muted">'+(confirmed?"Review this storyboard in chat. Say if you want changes before it renders.":"Review the storyboard, then choose spoken audio, subtitles, and voice before we write Manim.")+'</p>';
   }
   var open=s.library_url?('<a class="btn ghost" href="'+esc(s.library_url)+'" target="_blank" rel="noreferrer">Open in Now I Get It</a>'):"";
   el.innerHTML='<h1>'+esc(s.title||"Video job")+'</h1>'+
@@ -176,13 +177,15 @@ function render(){
   if(saveOpts){
     saveOpts.onclick=function(){
       var err=document.getElementById("err"); if(err) err.textContent="";
-      callTool("update_video_options",{
+      var voice=(document.getElementById("voice")||{}).value;
+      var args={
         job_id:state.job_id,
-        tts_voice:(document.getElementById("voice")||{}).value,
         language:(document.getElementById("lang")||{}).value,
         include_audio:!!(document.getElementById("audio")||{}).checked,
         include_subtitles:!!(document.getElementById("subs")||{}).checked
-      }).then(function(r){ apply(structured(r)); }).catch(function(e){ if(err) err.textContent=e.message; });
+      };
+      if(voice) args.tts_voice=voice;
+      callTool("update_video_options",args).then(function(r){ apply(structured(r)); }).catch(function(e){ if(err) err.textContent=e.message; });
     };
   }
 }

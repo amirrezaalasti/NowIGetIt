@@ -35,6 +35,8 @@ from backend.pipeline.orchestrator import (
     job_codegen_spec,
     job_is_host_authored,
     patch_scene_section,
+    prepare_production_options,
+    ProductionOptionsRequired,
     revise_scene_plan,
     run_pipeline,
     submit_host_scene_code,
@@ -491,7 +493,7 @@ def patch_scene(
 def put_job_settings(
     job_id: str, body: JobSettingsRequest, user: CurrentUser
 ) -> dict:
-    """Change narrator voice, language, audio, or subtitles before render."""
+    """Change narrator voice, language, audio, or subtitles after the storyboard."""
     _require_job_owner(job_id, user.id)
     try:
         store.load_job(job_id, user_id=user.id)
@@ -521,6 +523,8 @@ def scene_codegen_spec(job_id: str, scene_id: str, user: CurrentUser) -> dict:
         return job_codegen_spec(job_id, scene_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProductionOptionsRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -535,6 +539,8 @@ def put_scene_code(
         return submit_host_scene_code(job_id, scene_id, body.code)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProductionOptionsRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -595,6 +601,10 @@ async def continue_stream(
 ) -> StreamingResponse:
     """SSE: continue a plan_only job after the user confirms the storyboard."""
     _require_job_owner(job_id, user.id)
+    try:
+        prepare_production_options(job_id, body)
+    except ProductionOptionsRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     skip_quota = body.skip_codegen or job_is_host_authored(job_id)
     if not skip_quota:
         try:

@@ -601,10 +601,14 @@ export async function streamGenerate(
         scene_pacing: opts.scene_pacing ?? "balanced",
         audience: opts.audience ?? "general",
         language: opts.language ?? "en",
-        tts_voice: opts.tts_voice ?? "Kore",
-        include_audio: opts.include_audio ?? true,
-        include_subtitles: opts.include_subtitles ?? true,
         plan_only: opts.plan_only ?? true,
+        ...(opts.plan_only ?? true
+          ? {}
+          : {
+              tts_voice: opts.tts_voice ?? "Kore",
+              include_audio: opts.include_audio ?? true,
+              include_subtitles: opts.include_subtitles ?? true,
+            }),
       }),
       signal,
       cache: "no-store",
