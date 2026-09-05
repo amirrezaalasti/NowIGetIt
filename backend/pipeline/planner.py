@@ -19,6 +19,7 @@ ProgressCallback = Callable[[str, dict[str, Any]], None]
 # its narration's real TTS duration), so planning is validated against it —
 # not just a vague word like "short"/"deep".
 LENGTH_TARGET_SECONDS: dict[str, tuple[float, float]] = {
+    "clip": (6.0, 16.0),
     "short": (45.0, 75.0),
     "standard": (75.0, 115.0),
     "deep": (150.0, 210.0),
@@ -29,6 +30,7 @@ MIN_SCENE_SECONDS = 7.0
 
 # Balanced pacing: (min_scenes, max_scenes) for each total-length preset.
 LENGTH_SCENE_COUNT: dict[str, tuple[int, int]] = {
+    "clip": (1, 2),
     "short": (4, 6),
     "standard": (6, 9),
     "deep": (9, 14),
@@ -41,6 +43,11 @@ SCENE_PACING_VALUES = frozenset({"short", "balanced", "long"})
 # Explicit (min, max) scene counts per (length_preset, scene_pacing).
 # Totals stay in LENGTH_TARGET_SECONDS; only the cut structure changes.
 SCENE_PACING_COUNT: dict[str, dict[str, tuple[int, int]]] = {
+    "clip": {
+        "short": (1, 2),
+        "balanced": LENGTH_SCENE_COUNT["clip"],
+        "long": (1, 2),
+    },
     "short": {
         "short": (5, 8),
         "balanced": LENGTH_SCENE_COUNT["short"],
@@ -74,6 +81,10 @@ SCENE_PACING_GUIDANCE = {
 }
 
 
+def is_clip_preset(length_preset: str) -> bool:
+    return length_preset == "clip"
+
+
 def scene_count_range(
     length_preset: str, scene_pacing: str = "balanced"
 ) -> tuple[int, int]:
@@ -90,6 +101,13 @@ def length_guidance(length_preset: str, scene_pacing: str = "balanced") -> str:
     )
     min_scenes, max_scenes = scene_count_range(length_preset, scene_pacing)
     pacing = scene_pacing if scene_pacing in SCENE_PACING_VALUES else "balanced"
+    if length_preset == "clip":
+        return (
+            "Looping GIF clip: 1–2 scenes, 8–15 seconds total. ONE visual idea, "
+            "ONE motion. First and last frames should match so it loops. Narration "
+            "is a few short on-screen labels or one sentence per beat — not a lecture. "
+            "The picture has to make the idea obvious without a long voiceover."
+        )
     base = (
         f"Target {min_target:.0f}-{max_target:.0f} seconds of TOTAL spoken narration "
         f"across {min_scenes}-{max_scenes} scenes."
@@ -158,6 +176,25 @@ def _validate_plan_length(
     total_est = _plan_total_narration_seconds(plan, language)
     scene_count = len(plan.scenes)
     pacing = scene_pacing if scene_pacing in SCENE_PACING_VALUES else "balanced"
+
+    if length_preset == "clip":
+        if scene_count < min_scenes or scene_count > max_scenes:
+            raise ValueError(
+                f"A GIF clip needs {min_scenes}-{max_scenes} scenes (got {scene_count}). "
+                "One motion, one idea — do not turn this into a lecture."
+            )
+        total_dur = sum(float(s.duration_seconds or 0) for s in plan.scenes)
+        if total_dur and (total_dur < 6.0 or total_dur > 22.0):
+            raise ValueError(
+                f"Clip duration is ~{total_dur:.0f}s; keep the GIF between 8 and 15 seconds "
+                f"({min_scenes}-{max_scenes} scenes)."
+            )
+        if total_est > max_target * 1.4:
+            raise ValueError(
+                f"Spoken narration is ~{total_est:.0f}s — too long for a looping GIF. "
+                "Cut it to a few short labels."
+            )
+        return
 
     if scene_count < min_scenes:
         raise ValueError(
@@ -415,6 +452,7 @@ Return ONLY a JSON object with this shape:
 # Full multi-scene plans (esp. non-English) routinely exceed 4k completion
 # tokens; truncating mid-JSON yields metadata-only objects missing `scenes`.
 PLANNER_MAX_TOKENS: dict[str, int] = {
+    "clip": 4096,
     "short": 8192,
     "standard": 12288,
     "deep": 16384,
@@ -480,14 +518,23 @@ step id(s) it delivers in its `covers_steps` field):
 
 {blueprint_block}Length preset ({length_preset}): {length}
 Scene pacing ({pacing}): {SCENE_PACING_GUIDANCE[pacing]}
-HARD REQUIREMENT (checked programmatically — the plan will be rejected and
+"""
+    if length_preset == "clip":
+        user += f"""HARD REQUIREMENT: {min_scenes}-{max_scenes} scenes, each with duration_seconds
+so the TOTAL is 8–15 seconds. This is a looping GIF, not a lecture. Put the
+idea in the MOTION. Narration is optional and short (labels / one line).
+The opening pose should match the closing pose so the loop is invisible.
+"""
+    else:
+        user += f"""HARD REQUIREMENT (checked programmatically — the plan will be rejected and
 retried if this is not met): the sum of every scene's spoken narration must
 land between {min_target:.0f} and {max_target:.0f} seconds total, across
 {min_scenes}-{max_scenes} scenes. Write full, complete narration sentences —
 not short filler lines — so the natural spoken duration reaches this target;
 padding with silence/wait time does not count, only actual narration length.
 Individual scenes may run longer when the idea needs it.
-Audience ({audience}): {aud}
+"""
+    user += f"""Audience ({audience}): {aud}
 Output language ({lang}): Write ALL learner-facing text in {lang_name}.
 CRITICAL: the JSON MUST include a top-level "scenes" array with
 {min_scenes}-{max_scenes} scene objects. Do not stop after title/summary/
