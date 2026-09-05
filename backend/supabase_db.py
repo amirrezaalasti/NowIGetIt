@@ -45,8 +45,10 @@ def _is_unreachable(exc: BaseException) -> bool:
 
 def _client():
     try:
-        from supabase import create_client
-        from supabase.lib.client_options import ClientOptions
+        # Import ClientOptions from the package root (SyncClientOptions). The
+        # supabase.lib.client_options.ClientOptions class has no `.storage` and
+        # crashes create_client on supabase-py 2.24+.
+        from supabase import ClientOptions, create_client
     except ImportError as exc:
         raise RuntimeError("supabase package is not installed") from exc
 

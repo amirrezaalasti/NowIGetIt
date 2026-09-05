@@ -369,6 +369,8 @@ def generate_stream(request: GenerateRequest, user: CurrentUser) -> StreamingRes
             )
     except db.QuotaExceededError as exc:
         raise _quota_http(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     def event_stream():
         try:
