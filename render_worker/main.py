@@ -32,6 +32,7 @@ class RenderRequest(BaseModel):
     resolution: str = Field(default="720p", pattern="^(480p|720p|1080p)$")
     scene_id: str = Field(default="scene", min_length=1, max_length=120)
     job_id: Optional[str] = None
+    save_last_frame: bool = False
 
 
 class RenderResponse(BaseModel):
@@ -92,15 +93,25 @@ def render(
             work_dir=work,
             resolution=body.resolution,
             scene_id=body.scene_id,
+            save_last_frame=body.save_last_frame,
         )
-        if not video_path:
-            return RenderResponse(ok=False, log=log, error=log[-2000:] if log else "Render failed")
-
-        video_b64 = base64.b64encode(Path(video_path).read_bytes()).decode("ascii")
         frame_b64 = None
         if frame_path and Path(frame_path).exists():
             frame_b64 = base64.b64encode(Path(frame_path).read_bytes()).decode("ascii")
 
+        if body.save_last_frame:
+            if not frame_b64:
+                return RenderResponse(
+                    ok=False,
+                    log=log,
+                    error=log[-2000:] if log else "No preview frame produced",
+                )
+            return RenderResponse(ok=True, frame_base64=frame_b64, log=log)
+
+        if not video_path:
+            return RenderResponse(ok=False, log=log, error=log[-2000:] if log else "Render failed")
+
+        video_b64 = base64.b64encode(Path(video_path).read_bytes()).decode("ascii")
         return RenderResponse(
             ok=True,
             video_base64=video_b64,

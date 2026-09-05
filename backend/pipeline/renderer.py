@@ -22,12 +22,16 @@ from backend.code_utils import (
 from backend.config import get_settings
 
 
+PREVIEW_TIMEOUT_SECONDS = 55
+
+
 def render_scene(
     code: str,
     *,
     work_dir: Path,
     resolution: str = "720p",
     scene_id: str = "scene",
+    save_last_frame: bool = False,
 ) -> tuple[Optional[str], Optional[str], str]:
     """
     Render a Manim Community scene.
@@ -35,7 +39,8 @@ def render_scene(
     Prefer RENDER_WORKER_URL (Railway) when set; otherwise local Manim when
     ENABLE_MANIM_RENDER=true.
 
-    Returns (video_path, frame_path, log).
+    Returns (video_path, frame_path, log). When save_last_frame is True, video
+    may be None — only the finished still is required.
     """
     settings = get_settings()
     # Avoid recursion inside the Railway worker container itself.
@@ -49,8 +54,9 @@ def render_scene(
             scene_id=scene_id,
             worker_url=settings.render_worker_url,
             worker_secret=settings.render_worker_secret,
+            save_last_frame=save_last_frame,
         )
-        if video:
+        if video or (save_last_frame and frame):
             return video, frame, remote_log
         # Wrong/stale worker URL (e.g. HTTP 404) or transient failure → try local.
         remote_log = (
@@ -80,10 +86,31 @@ def render_scene(
         work_dir=work_dir,
         resolution=resolution,
         scene_id=scene_id,
+        save_last_frame=save_last_frame,
     )
     if remote_log:
         local_log = f"{remote_log}\n--- local ---\n{local_log}"
     return video, frame, local_log
+
+
+def preview_scene_frame(
+    code: str,
+    *,
+    work_dir: Path,
+    scene_id: str = "scene",
+) -> tuple[Optional[str], str]:
+    """Cheap last-frame still so the host model can see the scene while writing.
+
+    Isolated work_dir — never writes scene.mp4 into the job's scene folder.
+    """
+    _video, frame, log = render_scene(
+        code,
+        work_dir=work_dir,
+        resolution="480p",
+        scene_id=scene_id,
+        save_last_frame=True,
+    )
+    return frame, log
 
 
 def _render_scene_remote(
@@ -94,6 +121,7 @@ def _render_scene_remote(
     scene_id: str,
     worker_url: str,
     worker_secret: str,
+    save_last_frame: bool = False,
 ) -> tuple[Optional[str], Optional[str], str]:
     # Ensure Text safety shim + other normalizations ship with the payload.
     code = clean_manim_code(code)
@@ -102,15 +130,21 @@ def _render_scene_remote(
     if worker_secret:
         headers["Authorization"] = f"Bearer {worker_secret}"
 
+    timeout = (
+        httpx.Timeout(float(PREVIEW_TIMEOUT_SECONDS) + 15.0, connect=30.0)
+        if save_last_frame
+        else httpx.Timeout(360.0, connect=30.0)
+    )
     try:
-        with httpx.Client(timeout=httpx.Timeout(360.0, connect=30.0)) as client:
+        with httpx.Client(timeout=timeout) as client:
             res = client.post(
                 f"{worker_url}/render",
                 headers=headers,
                 json={
                     "code": code,
-                    "resolution": resolution,
+                    "resolution": "480p" if save_last_frame else resolution,
                     "scene_id": scene_id,
+                    "save_last_frame": save_last_frame,
                 },
             )
     except Exception as exc:  # noqa: BLE001
@@ -135,14 +169,8 @@ def _render_scene_remote(
             return None, None, f"{reason}\n{detail}"
         return None, None, detail
 
-    video_b64 = payload.get("video_base64")
-    if not video_b64:
-        return None, None, f"{_no_video_reason(log)}\n{log[-2000:]}"
-
     out_dir = Path(work_dir).resolve() / scene_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    video_path = out_dir / f"{scene_id}.mp4"
-    video_path.write_bytes(base64.b64decode(video_b64))
 
     frame_path: Optional[str] = None
     frame_b64 = payload.get("frame_base64")
@@ -150,7 +178,19 @@ def _render_scene_remote(
         frame_file = out_dir / "preview.png"
         frame_file.write_bytes(base64.b64decode(frame_b64))
         frame_path = str(frame_file)
-    else:
+
+    video_b64 = payload.get("video_base64")
+    if save_last_frame:
+        if frame_path:
+            return None, frame_path, log[-2500:]
+        return None, None, log[-2000:] or "No preview frame produced."
+
+    if not video_b64:
+        return None, None, f"{_no_video_reason(log)}\n{log[-2000:]}"
+
+    video_path = out_dir / f"{scene_id}.mp4"
+    video_path.write_bytes(base64.b64decode(video_b64))
+    if not frame_path:
         frame_path = _extract_preview_frame(str(video_path), out_dir / "preview.png")
 
     return str(video_path), frame_path, log[-2500:]
@@ -179,12 +219,24 @@ def _no_video_reason(log: str) -> str:
     return "No mp4 produced."
 
 
+def _newest_still(root: Path) -> Optional[Path]:
+    stills = [
+        p
+        for p in root.rglob("*.png")
+        if "partial_movie_files" not in str(p) and p.stat().st_size > 0
+    ]
+    if not stills:
+        return None
+    return sorted(stills, key=lambda p: p.stat().st_mtime)[-1]
+
+
 def _render_scene_local(
     code: str,
     *,
     work_dir: Path,
     resolution: str,
     scene_id: str,
+    save_last_frame: bool = False,
 ) -> tuple[Optional[str], Optional[str], str]:
     code = clean_manim_code(code)
     assert_safe_text_shim(code)
@@ -198,6 +250,8 @@ def _render_scene_local(
         "720p": "-qm",
         "1080p": "-qh",
     }.get(resolution, "-qm")
+    if save_last_frame:
+        quality_flag = "-ql"
 
     scene_name = extract_scene_name(code)
     media_dir = (scene_dir / "media").resolve()
@@ -206,8 +260,9 @@ def _render_scene_local(
         "-m",
         "manim",
         quality_flag,
+        *(["-s"] if save_last_frame else []),
         "-o",
-        f"{scene_id}.mp4",
+        f"{scene_id}_last.png" if save_last_frame else f"{scene_id}.mp4",
         "--media_dir",
         str(media_dir),
         str(scene_file),
@@ -219,7 +274,7 @@ def _render_scene_local(
             cmd,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=PREVIEW_TIMEOUT_SECONDS if save_last_frame else 300,
             cwd=str(scene_dir),
         )
         log = (proc.stdout or "") + "\n" + (proc.stderr or "")
@@ -227,6 +282,15 @@ def _render_scene_local(
             return None, None, f"Render failed ({proc.returncode}):\n{log[-5000:]}"
     except Exception as exc:  # noqa: BLE001
         return None, None, f"Render exception: {exc}"
+
+    if save_last_frame:
+        still = _newest_still(scene_dir)
+        if not still:
+            return None, None, f"No preview frame produced.\n{log[-2500:]}"
+        dest = scene_dir / "preview.png"
+        if still.resolve() != dest.resolve():
+            shutil.copy2(still, dest)
+        return None, str(dest), log[-2500:]
 
     videos = [
         v

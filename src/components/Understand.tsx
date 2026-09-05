@@ -5,7 +5,9 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
+  type DragEvent,
   type ReactNode,
 } from "react";
 import { MarkdownView } from "@/components/MarkdownView";
@@ -88,6 +90,33 @@ const ACTION_LABEL: Record<string, string> = Object.fromEntries(
   ].map((a) => [a.id, a.label]),
 );
 
+const FILE_ACCEPT =
+  ".pdf,.pptx,.ppt,.docx,.doc,.xlsx,.xls,.html,.htm,.md,.markdown,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff,.gif,.bmp,.asciidoc,.adoc";
+
+const FORMAT_CHIPS = [
+  "PDF",
+  "PPTX",
+  "DOCX",
+  "XLSX",
+  "Images",
+  "Markdown",
+] as const;
+
+const CAPABILITIES = [
+  {
+    title: "A selection",
+    body: "Click a figure, formula, or paragraph and ask about just that block.",
+  },
+  {
+    title: "A slide",
+    body: "Explain, simplify, quiz, or pull takeaways from the page in view.",
+  },
+  {
+    title: "The whole deck",
+    body: "Summaries, outlines, and critiques across every slide.",
+  },
+] as const;
+
 export function Understand() {
   const [docs, setDocs] = useState<DocumentListItem[]>([]);
   const [detail, setDetail] = useState<DocumentDetail | null>(null);
@@ -113,6 +142,8 @@ export function Understand() {
   const [showComments, setShowComments] = useState(true);
   const [savingComment, setSavingComment] = useState(false);
   const [savedCommentId, setSavedCommentId] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const manifest: DocumentManifest | null = detail?.manifest ?? null;
   const slides = manifest?.slides ?? [];
@@ -369,7 +400,30 @@ export function Understand() {
       setConverting(false);
     } finally {
       setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
+  }
+
+  function onDragOver(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!uploading) setDragOver(true);
+  }
+
+  function onDragLeave(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setDragOver(false);
+    }
+  }
+
+  function onDrop(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragOver(false);
+    if (uploading) return;
+    const file = event.dataTransfer.files?.[0] ?? null;
+    void onUpload(file);
   }
 
   async function runAsk() {

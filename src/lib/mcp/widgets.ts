@@ -14,9 +14,17 @@ h1{font-size:16px;margin:0;font-weight:650}
 .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
 .btn:disabled{opacity:.5;cursor:wait}
 .panel{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:10px 12px}
-ol{margin:0;padding-left:18px}
+ol{margin:0;padding:0;display:grid;grid-template-columns:1fr;gap:10px;list-style:none}
+@media(min-width:540px){ol{grid-template-columns:1fr 1fr}}
+li.card{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:10px}
+li.card.now{border-color:var(--accent)}
+.bar{height:6px;background:var(--line);border-radius:99px;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--accent);width:0}
 video{width:100%;border-radius:12px;background:#000;max-height:360px}
 img.frame{width:100%;border-radius:12px;background:#000;max-height:220px;object-fit:contain;margin:6px 0}
+.ph{min-height:110px;border-radius:12px;background:#0003;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;padding:12px;text-align:center;margin:6px 0}
+.note{font-size:12px;color:var(--hot);margin:4px 0}
+.ok{color:var(--accent)}
 iframe.slide{width:100%;height:280px;border:1px solid var(--line);border-radius:12px;background:#fff}
 .err{color:var(--danger);font-size:13px}
 .reply{white-space:pre-wrap;font-size:13px}
@@ -108,33 +116,74 @@ var el=document.getElementById("app");
 var state={};
 var timer=null;
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return ({"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"})[c];}); }
+function followUp(text){
+  try{
+    var o=window.openai||{};
+    if(typeof o.sendFollowUpMessage==="function") return o.sendFollowUpMessage({prompt:text});
+    if(typeof o.sendFollowupMessage==="function") return o.sendFollowupMessage({prompt:text});
+  }catch(e){}
+}
+function sceneStatus(sc){
+  if(sc.clip_url) return "clip ready";
+  if(sc.preview_url){
+    if(sc.vlm && sc.vlm.approved===false) return "needs work";
+    return "preview";
+  }
+  if(sc.has_code) return "code saved";
+  return "planned";
+}
 function render(){
   var s=state||{};
   var status=s.status||"unknown";
-  var scenes=(s.scenes||[]).map(function(sc,i){
-    var nar=sc.narration||"";
-    var img=sc.preview_url?('<img class="frame" alt="" src="'+esc(sc.preview_url)+'"/>'):"";
+  var list=s.scenes||[];
+  var prog=s.codegen_progress||{};
+  var saved=Number(prog.saved);
+  if(!saved) saved=list.filter(function(x){return x.has_code||x.preview_url;}).length;
+  var total=Number(prog.total)||list.length||1;
+  var pct=Math.round(100*saved/Math.max(total,1));
+  var writing=s.next_step==="write_next_scene";
+  var confirmed=!!((s.options||{}).production_options_confirmed);
+  var current=s.current_scene_id||"";
+  var head="Video job";
+  if(s.has_final_video||s.video_url) head="Video is ready";
+  else if(status==="running"||s.running) head="Rendering clips…";
+  else if(writing) head="Writing Manim · "+saved+" of "+total;
+  else if(s.awaiting_render) head="Ready to render — confirm in chat";
+  else if(s.awaiting_user||s.awaiting_plan||status==="awaiting_plan") head=confirmed?"Review this storyboard":"Pick audio, subtitles, and voice";
+  else if(status==="error") head=s.error||"Render failed";
+  var scenes=list.map(function(sc,i){
+    var st=sceneStatus(sc);
+    var now=sc.id&&sc.id===current?" now":"";
+    var img=sc.preview_url?('<img class="frame" alt="'+esc(sc.title||"")+'" src="'+esc(sc.preview_url)+'"/>'):
+      ('<div class="ph">'+esc(sc.visual_description||sc.narration||("Scene "+(i+1)+" — waiting for preview"))+'</div>');
     var clip=sc.clip_url?('<video controls playsinline src="'+esc(sc.clip_url)+'"></video>'):"";
     var vlm="";
     if(sc.vlm){
-      vlm='<div class="muted">'+(sc.vlm.approved?"Review: looks good":"Review: needs work");
+      var ok=sc.vlm.approved!==false;
+      vlm='<div class="'+(ok?"ok":"note")+'">'+(ok?"Looks good":"Needs work");
       if(sc.vlm.issues&&sc.vlm.issues.length) vlm+=" — "+esc(sc.vlm.issues.join("; "));
       vlm+="</div>";
     }
-    return "<li data-id=\\""+esc(sc.id||"")+"\\">"+img+
-      "<label class=\\"muted\\">Title</label>"+
-      "<input class=\\"scene-title\\" value=\\""+esc(sc.title||("Scene "+(i+1)))+"\\"/>"+
-      (sc.duration_seconds?("<div class=\\"muted\\">"+sc.duration_seconds+"s</div>"):"")+
+    var ask=(sc.preview_url||sc.has_code)?
+      ('<div class="row">'+
+        '<button class="chip ask-fix" type="button">Fix this scene</button>'+
+        '<button class="chip ask-ok" type="button">Looks good</button>'+
+      '</div>'):"";
+    return '<li class="card'+now+'" data-id="'+esc(sc.id||"")+'" data-title="'+esc(sc.title||"")+'">'+
+      '<div class="muted">Scene '+(i+1)+' · '+esc(st)+'</div>'+
+      img+
+      '<label class="muted">Title</label>'+
+      '<input class="scene-title" value="'+esc(sc.title||("Scene "+(i+1)))+'"/>'+
+      (sc.duration_seconds?('<div class="muted">'+sc.duration_seconds+'s</div>'):'')+
       vlm+
-      "<label class=\\"muted\\">Narration</label>"+
-      "<textarea class=\\"scene-nar\\" rows=\\"3\\">"+esc(nar)+"</textarea>"+
-      "<button class=\\"chip save-scene\\" type=\\"button\\">Save scene</button>"+
-      clip+
-    "</li>";
+      '<label class="muted">Narration</label>'+
+      '<textarea class="scene-nar" rows="3">'+esc(sc.narration||"")+'</textarea>'+
+      '<button class="chip save-scene" type="button">Save scene</button>'+
+      ask+clip+
+    '</li>';
   }).join("");
   var video=s.video_url?('<video controls playsinline src="'+esc(s.video_url)+'"></video>'):"";
   var opt=s.options||{};
-  var confirmed=!!opt.production_options_confirmed;
   var options='<div class="panel"><div class="muted">'+(confirmed?"Voice, language, audio":"Choose these before we build — spoken audio, subtitles, and voice")+'</div>'+
     '<input id="voice" placeholder="Voice (Kore, alloy, …)" value="'+esc(opt.tts_voice||"")+'"/>'+
     '<input id="lang" placeholder="Language" value="'+esc(opt.language||"en")+'"/>'+
@@ -145,19 +194,23 @@ function render(){
   if(s.has_final_video||s.video_url){
     actions="";
   } else if(status==="running"||s.running){
-    actions='<p class="muted">Rendering… this can take a few minutes.</p>';
+    actions='<p class="muted">Rendering clips — previews appear here as each scene finishes.</p>';
+  } else if(writing){
+    actions='<p class="muted">Each scene still appears here as it is written. Tap Fix this scene if a frame looks wrong.</p>';
   } else if(status==="awaiting_render"||s.awaiting_render){
-    actions='<p class="muted">Storyboard and Manim are ready. Confirm in chat to start the render.</p>';
+    actions='<p class="muted">Storyboard and Manim are ready. Confirm in chat to start the full render.</p>';
   } else if(status==="error"){
     actions='<p class="err">'+esc(s.error||s.message||"Render failed")+'</p>';
   } else if(status==="awaiting_plan"||s.awaiting_plan||s.awaiting_user){
     actions='<p class="muted">'+(confirmed?"Review this storyboard in chat. Say if you want changes before it renders.":"Review the storyboard, then choose spoken audio, subtitles, and voice before we write Manim.")+'</p>';
   }
   var open=s.library_url?('<a class="btn ghost" href="'+esc(s.library_url)+'" target="_blank" rel="noreferrer">Open in Now I Get It</a>'):"";
+  var bar=(list.length && !s.has_final_video)?('<div class="bar" aria-hidden="true"><i style="width:'+pct+'%"></i></div><div class="muted">'+saved+' / '+total+' scenes</div>'):"";
   el.innerHTML='<h1>'+esc(s.title||"Video job")+'</h1>'+
-    '<div class="muted">'+esc(s.job_id||"")+' · '+esc(status)+(s.message?(" — "+s.message):"")+'</div>'+
+    '<div class="muted">'+esc(head)+'</div>'+
+    bar+
     video+
-    (scenes?'<div class="panel"><ol>'+scenes+'</ol></div>':'')+
+    (scenes?'<ol>'+scenes+'</ol>':'')+
     (s.job_id?options:"")+
     '<div class="row">'+actions+open+'</div>'+
     '<div class="err" id="err"></div>';
@@ -171,6 +224,19 @@ function render(){
         title:(li.querySelector(".scene-title")||{}).value,
         narration:(li.querySelector(".scene-nar")||{}).value
       }).then(function(r){ apply(structured(r)); }).catch(function(e){ if(err) err.textContent=e.message; });
+    };
+  });
+  el.querySelectorAll(".ask-fix").forEach(function(btn){
+    btn.onclick=function(){
+      var li=btn.closest("li"); if(!li) return;
+      var title=li.getAttribute("data-title")||"this scene";
+      followUp("The preview for "+title+" ("+li.getAttribute("data-id")+") looks wrong. Fix the layout and resubmit that scene before continuing.");
+    };
+  });
+  el.querySelectorAll(".ask-ok").forEach(function(btn){
+    btn.onclick=function(){
+      var li=btn.closest("li"); if(!li) return;
+      followUp("The preview for "+(li.getAttribute("data-title")||"this scene")+" looks good. Continue.");
     };
   });
   var saveOpts=document.getElementById("save-opts");
@@ -194,13 +260,15 @@ function apply(next){
   state=Object.assign({},state,next);
   render();
   var st=state.status||"";
-  var running=st==="running"||st==="unknown"||state.running;
-  if(running && state.job_id && !timer){
+  var running=st==="running"||state.running;
+  var writing=state.next_step==="write_next_scene";
+  if((running||writing) && state.job_id && !timer){
     timer=setInterval(function(){
       callTool("get_job",{job_id:state.job_id}).then(function(r){
         apply(structured(r));
         var n=state.status||"";
-        if(n==="complete"||n==="awaiting_plan"||n==="awaiting_render"||n==="error"||state.video_url){ clearInterval(timer); timer=null; }
+        if(n==="complete"||n==="awaiting_plan"||n==="error"||state.video_url){ clearInterval(timer); timer=null; }
+        if(n==="awaiting_render" && state.awaiting_render){ clearInterval(timer); timer=null; }
       }).catch(function(){});
     },4000);
   }

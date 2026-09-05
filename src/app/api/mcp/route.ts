@@ -50,8 +50,8 @@ function mcpFor(origin: string) {
         "2) After create_video, revise_plan, edit_storyboard, or update_scene, STOP. Show the numbered storyboard in chat. Then ask the user whether they want spoken audio, burned-in subtitles, and which voice. Call update_video_options with their answers. Do not render yet. Do not write Manim yet. " +
         "3) The user can change anything: update_scene (one scene), edit_storyboard (plain-English edits), revise_plan (full JSON), update_video_options (voice/audio/subtitles — required after the plan), get_scene (code + preview image), retouch_scene (after a clip exists). " +
         "4) Show preview images and VLM notes when get_job / get_scene / render_video return them — they are in the tool result as images. " +
-        "5) Only after they approve the storyboard AND update_video_options has production_options_confirmed: video_codegen_spec + submit_scene_code for every scene, then render_video with user_confirmed true. " +
-        "6) Render takes minutes. If get_job/render_video returns poll_again, wait poll_after_seconds and call get_job again with the same job_id. Do not start a new job. " +
+        "5) Only after they approve the storyboard AND update_video_options has production_options_confirmed: video_codegen_spec + submit_scene_code one scene at a time. Each submit returns a preview IMAGE — show it, write 1-2 sentences about what the frame shows (and any layout issues), then continue. Never dump a dozen submits with no commentary. " +
+        "6) After every scene has code, render_video with user_confirmed true. Render takes minutes. If get_job/render_video returns poll_again, wait poll_after_seconds and call get_job again with the same job_id. Show new preview images as they arrive. Do not start a new job. " +
         "Never MathTex — Text() only. Documents: upload_document, poll get_document, ask_document. Show figure images from those tools.",
     },
   );

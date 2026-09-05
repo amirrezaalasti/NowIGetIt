@@ -37,7 +37,7 @@ from backend.pipeline.planner import (
     revise_scene_plan as _revise_plan_llm,
     scene_count_range,
 )
-from backend.pipeline.renderer import extract_review_frames, render_scene
+from backend.pipeline.renderer import extract_review_frames, preview_scene_frame, render_scene
 from backend.pipeline.scene_generator import (
     codegen_spec_payload,
     generate_scene_code,
@@ -652,8 +652,51 @@ def job_codegen_spec(job_id: str, scene_id: str) -> dict[str, Any]:
     )
 
 
+def _preview_host_scene(job_id: str, scene_id: str, code: str) -> dict[str, Any]:
+    """Last-frame still + layout-guard notes. Never fails the code save."""
+    work = store.scene_dir(job_id, scene_id) / "_preview"
+    work.mkdir(parents=True, exist_ok=True)
+    frame_path: Optional[str] = None
+    log = ""
+    try:
+        frame_path, log = preview_scene_frame(
+            code, work_dir=work, scene_id=scene_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        log = str(exc)
+    layout_issues = parse_layout_report(log or "")
+    preview_path: Optional[str] = None
+    if frame_path and Path(frame_path).exists():
+        saved = store.save_vlm_review(
+            job_id,
+            scene_id,
+            revision=0,
+            review={
+                "approved": not layout_issues,
+                "issues": layout_issues[:8],
+                "clarity_score": None,
+                "notes": (
+                    "Last-frame preview for the host model. Describe this image "
+                    "to the user before writing the next scene."
+                ),
+                "review_mode": "host_preview",
+            },
+            frame_path=frame_path,
+            frame_source="host_preview",
+        )
+        preview_path = saved.get("frame_url")
+    shutil.rmtree(work, ignore_errors=True)
+    return {
+        "preview_path": preview_path,
+        "layout_issues": layout_issues,
+        "preview_error": None
+        if preview_path
+        else (log or "No preview frame")[-800:],
+    }
+
+
 def submit_host_scene_code(job_id: str, scene_id: str, code: str) -> dict[str, Any]:
-    """Validate and persist host-authored Manim for a scene."""
+    """Validate and persist host-authored Manim for a scene, then still-preview it."""
     require_production_options(job_id)
     plan = _load_plan(job_id)
     scene = next((s for s in plan.scenes if s.id == scene_id), None)
@@ -665,6 +708,7 @@ def submit_host_scene_code(job_id: str, scene_id: str, code: str) -> dict[str, A
         raise ValueError(err)
     store.save_code(job_id, scene_id, cleaned, revision=0)
     warnings = lint_scene_code(cleaned, target_duration=float(scene.duration_seconds))
+    preview = _preview_host_scene(job_id, scene_id, cleaned)
     with_code = [s.id for s in plan.scenes if store.load_code(job_id, s.id)]
     missing = [s.id for s in plan.scenes if s.id not in with_code]
     return {
@@ -675,6 +719,9 @@ def submit_host_scene_code(job_id: str, scene_id: str, code: str) -> dict[str, A
         "scenes_with_code": with_code,
         "scenes_missing_code": missing,
         "ready_to_render": not missing,
+        "saved_count": len(with_code),
+        "total_scenes": len(plan.scenes),
+        **preview,
     }
 
 
@@ -2377,6 +2424,7 @@ def retouch_scene(
     scene_id: str,
     human_instructions: str,
     timestamp: Optional[float] = None,
+    comment_id: Optional[str] = None,
     on_event: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Retouch/revise ONLY a specific scene based on human feedback.
@@ -2390,6 +2438,7 @@ def retouch_scene(
             scene_id,
             human_instructions,
             timestamp=timestamp,
+            comment_id=comment_id,
             on_event=on_event,
         )
 
@@ -2400,6 +2449,7 @@ def _retouch_scene_locked(
     human_instructions: str,
     *,
     timestamp: Optional[float] = None,
+    comment_id: Optional[str] = None,
     on_event: Optional[Any] = None,
 ) -> dict[str, Any]:
     settings = get_settings()
@@ -2435,11 +2485,17 @@ def _retouch_scene_locked(
     )
 
     current_code = match_scene.get("code_final", "")
+    marked_frame = store.load_comment_frame_bytes(job_id, scene_id, comment_id)
     rev_instructions = human_instructions
     if timestamp is not None:
         rev_instructions = (
             f"[At timestamp {timestamp:.1f}s in the scene]: {human_instructions}. "
             "Adjust the animation beat closest to that moment."
+        )
+    if marked_frame:
+        rev_instructions += (
+            " The learner marked the attached screenshot — that is the exact "
+            "frame they want changed."
         )
 
     emit(
@@ -2455,6 +2511,8 @@ def _retouch_scene_locked(
         target_duration = probe_duration(audio_file) or target_duration
 
     language = _job_language(job_id)
+    image_bytes = marked_frame[0] if marked_frame else None
+    image_mime = marked_frame[1] if marked_frame else "image/jpeg"
     new_code = revise_scene_code(
         client,
         code=current_code,
@@ -2462,6 +2520,8 @@ def _retouch_scene_locked(
         revision_instructions=rev_instructions,
         target_duration_seconds=target_duration,
         language=language,
+        image_bytes=image_bytes,
+        image_mime=image_mime,
     )
 
     ok, err = validate_manim_code(new_code)
@@ -2729,6 +2789,7 @@ def iter_retouch_scene(
     scene_id: str,
     human_instructions: str,
     timestamp: Optional[float] = None,
+    comment_id: Optional[str] = None,
 ) -> Iterator[str]:
     """SSE stream of retouch progress events for a single scene."""
 
@@ -2738,6 +2799,7 @@ def iter_retouch_scene(
             scene_id,
             human_instructions,
             timestamp=timestamp,
+            comment_id=comment_id,
             on_event=on_event,
         )
 

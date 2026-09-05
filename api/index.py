@@ -72,6 +72,7 @@ from backend.schemas import (
     StorageModeRequest,
     SubmitSceneCodeRequest,
     UpdatePlanRequest,
+    VideoMarkRequest,
 )
 
 
@@ -675,6 +676,44 @@ def get_scene_comments(job_id: str, scene_id: str, user: CurrentUser) -> dict:
     return {"comments": store.get_scene_comments(job_id, scene_id)}
 
 
+@app.get("/api/jobs/{job_id}/marks")
+def get_video_marks(job_id: str, user: CurrentUser) -> dict:
+    _require_job_owner(job_id, user.id)
+    try:
+        store.load_job(job_id, user_id=user.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+    timeline = store.job_timeline(job_id)
+    return {
+        "marks": store.list_job_marks(job_id, timeline=timeline),
+        "timeline": timeline,
+    }
+
+
+@app.post("/api/jobs/{job_id}/marks", response_model=SceneComment)
+def add_video_mark(
+    job_id: str, body: VideoMarkRequest, user: CurrentUser
+) -> SceneComment:
+    """Mark the current video frame, attach a comment, and map it onto a scene."""
+    _require_job_owner(job_id, user.id)
+    author = user.name or user.email or "User"
+    try:
+        comment_data = store.add_video_mark(
+            job_id,
+            comment=body.comment,
+            author=author,
+            scene_id=body.scene_id,
+            timestamp=body.timestamp,
+            global_timestamp=body.global_timestamp,
+            frame_base64=body.frame_base64,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SceneComment(**comment_data)
+
+
 @app.post("/api/jobs/{job_id}/scenes/{scene_id}/comments", response_model=SceneComment)
 def add_scene_comment(
     job_id: str, scene_id: str, body: SceneCommentRequest, user: CurrentUser
@@ -687,6 +726,8 @@ def add_scene_comment(
         scene_id,
         comment=body.comment,
         timestamp=body.timestamp,
+        global_timestamp=body.global_timestamp,
+        frame_base64=body.frame_base64,
         author=author,
     )
     return SceneComment(**comment_data)
@@ -711,6 +752,7 @@ def retouch_scene_stream(
                 scene_id,
                 human_instructions=body.comment,
                 timestamp=body.timestamp,
+                comment_id=body.comment_id,
             ):
                 yield chunk
         except db.QuotaExceededError as exc:

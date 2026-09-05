@@ -97,18 +97,21 @@ flowchart LR
   D --> E{Approve?}
   E -->|tweak| F[update_scene / edit_storyboard]
   F --> C
-  E -->|yes| G[submit_scene_code × N]
-  G --> H[render_video]
-  H --> I[poll get_job]
-  I --> J[🎬 video + previews]
+  E -->|yes| G[submit_scene_code]
+  G --> H[preview still + model review]
+  H -->|next scene| G
+  H -->|all scenes| I[render_video]
+  I --> J[poll get_job]
+  J --> K[🎬 video + previews]
 ```
 
 1. Model writes a `plan` object and calls `create_video` (never stuff JSON inside `prompt`).
 2. **Stop.** You see numbered scenes. Ask for changes if you want.
 3. Pick **spoken audio**, **burned-in subtitles**, and **voice** → `update_video_options`.
-4. After you approve: Manim for every scene (`video_codegen_spec` → `submit_scene_code`). `Text()` only — never `MathTex`.
-5. `render_video` with `user_confirmed: true`. If `poll_again`, keep calling `get_job` with the **same** `job_id`. Don’t start a new job.
-6. Preview images + VLM notes come back in the tool result. Use `retouch_scene` to fix one clip.
+4. After you approve: Manim **one scene at a time** (`video_codegen_spec` → `submit_scene_code`). Each submit returns a **last-frame preview image**. The model looks at it, tells you what it sees, then continues. `Text()` only — never `MathTex`.
+5. Tap **Fix this scene** / **Looks good** on the in-chat storyboard, or just say so in chat.
+6. `render_video` with `user_confirmed: true`. If `poll_again`, keep calling `get_job` with the **same** `job_id`. Don’t start a new job.
+7. New stills keep arriving while it renders. Use `retouch_scene` to fix one clip.
 
 In-chat widgets: **job progress / storyboard**, **video player**, **slides tutor**.
 
@@ -184,7 +187,7 @@ Optional shared key: `MCP_CONNECTOR_TOKEN` (Inspector only).
 | `update_scene` | Tweak one scene’s title, narration, beats, … |
 | `get_scene` | Narration, Manim, preview image, VLM notes |
 | `video_codegen_spec` | Manim rules for one scene (after approval + options) |
-| `submit_scene_code` | Save one complete Manim Community Scene file |
+| `submit_scene_code` | Save one complete Manim Community Scene file and return a last-frame preview |
 | `render_video` | Render after every scene has code (`user_confirmed: true`) |
 | `continue_video` | Alias of `render_video` — prefer `render_video` |
 | `retouch_scene` | Rewrite + re-render one scene after a clip exists |

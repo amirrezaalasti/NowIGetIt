@@ -68,5 +68,7 @@ export function widgetMeta(resourceUri: string): Record<string, unknown> {
   return {
     ui: { resourceUri },
     "openai/outputTemplate": resourceUri,
+    "openai/widgetAccessible": true,
+    "openai/resultCanProduceWidget": true,
   };
 }

@@ -279,7 +279,6 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
   const awaiting =
     status === "awaiting_plan" ||
     Boolean((job.result as Record<string, unknown> | undefined)?.awaiting_plan_confirm);
-  const awaitingRender = status === "awaiting_render";
   const running = Boolean(runtime.running) || status === "running";
   const done = status === "complete" || Boolean(video_url);
   const failed = Boolean(error) || status === "error";
@@ -288,8 +287,24 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     typeof settings.include_audio === "boolean" ? settings.include_audio : null;
   const includeSubtitles =
     typeof settings.include_subtitles === "boolean" ? settings.include_subtitles : null;
+  const rawScenes = sceneSummaries(
+    plan,
+    Array.isArray(job.scenes) ? (job.scenes as Array<Record<string, unknown>>) : [],
+  );
+  const codedCount = rawScenes.filter((scene) => scene.has_code).length;
+  const totalScenes = rawScenes.length;
+  const allCoded = totalScenes > 0 && codedCount === totalScenes;
+  const writingCode = codedCount > 0 && !allCoded && !running && !done && !failed && !awaiting;
+  const readyToRender =
+    (status === "awaiting_render" || allCoded) &&
+    allCoded &&
+    !running &&
+    !done &&
+    !failed &&
+    !awaiting;
   let message: string;
   let next_step: string;
+  const do_not_call: string[] = [];
   if (failed) {
     message =
       `Render failed: ${error || "unknown error"}. If this is a Manim error, fix that scene with submit_scene_code, then call render_video once. Do not retry the same call unchanged.`;
@@ -302,14 +317,22 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     message =
       "STOP. Show the numbered storyboard to the user (title + narration per scene) and wait for approval or edit requests. They can change any scene with update_scene, or you can rewrite the plan with revise_plan / edit_storyboard. Do not render or write Manim yet.";
     next_step = "present_storyboard_to_user";
-  } else if (awaitingRender) {
+  } else if (writingCode) {
     message =
-      "All scene code is saved. Call render_video with user_confirmed true, then poll get_job if poll_again is true.";
+      `Writing Manim: ${codedCount} of ${totalScenes} scenes have code. LOOK AT THE PREVIEW IMAGE for the scene you just saved. Write 1-2 sentences to the user about what the frame shows (and any layout issues). Then video_codegen_spec + submit_scene_code for the next missing scene. Do not call render_video yet. Never submit another scene without describing this preview.`;
+    next_step = "write_next_scene";
+    do_not_call.push("render_video", "continue_video");
+  } else if (readyToRender) {
+    message =
+      "All scene code is saved. Show the latest previews, then call render_video with user_confirmed true, then poll get_job if poll_again is true.";
     next_step = "call_render_video";
   } else if (done) {
+    const markCount = Array.isArray(job.video_marks) ? job.video_marks.length : 0;
     message =
-      "Video is ready. Show video_url and the scene preview images to the user. They can still retouch a scene or change narration.";
-    next_step = "show_video";
+      markCount > 0
+        ? `Video is ready. The learner marked ${markCount} frame(s) with comments. Call list_video_marks to see the screenshots and metadata, then retouch_scene with that comment, timestamp, and comment_id.`
+        : "Video is ready. Show video_url and the scene preview images to the user. They can still retouch a scene, mark a frame on the video, or change narration.";
+    next_step = markCount > 0 ? "apply_video_marks" : "show_video";
   } else if (running) {
     message = "Still rendering. Wait poll_after_seconds, then call get_job with the same job_id. Do not start a new job.";
     next_step = "poll_get_job";
@@ -321,10 +344,6 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     message = "Job is not finished. Call get_job again or fix scene code if render failed.";
     next_step = "poll_get_job";
   }
-  const rawScenes = sceneSummaries(
-    plan,
-    Array.isArray(job.scenes) ? (job.scenes as Array<Record<string, unknown>>) : [],
-  );
   const scenes = await Promise.all(
     rawScenes.map(async (scene) => ({
       ...scene,
@@ -353,11 +372,16 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     error,
     awaiting_plan: awaiting,
     awaiting_user: awaiting,
-    awaiting_render: awaitingRender,
+    awaiting_render: readyToRender,
     poll_again: running && !done && !failed,
     poll_after_seconds: running ? 8 : 0,
     next_step,
     message,
+    do_not_call: do_not_call.length ? do_not_call : undefined,
+    codegen_progress: {
+      saved: codedCount,
+      total: totalScenes,
+    },
     prompt: typeof meta.prompt === "string" ? meta.prompt : null,
     concept_summary: typeof plan.concept_summary === "string" ? plan.concept_summary : null,
     options: {
@@ -381,6 +405,18 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     video_url: video_url || null,
     library_url: `${origin}/library`,
     has_final_video: Boolean(runtime.has_final_video || video_url),
+    video_marks: Array.isArray(job.video_marks)
+      ? (job.video_marks as Array<Record<string, unknown>>).map((mark) => ({
+          id: String(mark.id || ""),
+          scene_id: String(mark.scene_id || ""),
+          scene_title: typeof mark.scene_title === "string" ? mark.scene_title : null,
+          comment: String(mark.comment || ""),
+          timestamp: typeof mark.timestamp === "number" ? mark.timestamp : null,
+          global_timestamp:
+            typeof mark.global_timestamp === "number" ? mark.global_timestamp : null,
+          frame_url: typeof mark.frame_url === "string" ? mark.frame_url : null,
+        }))
+      : [],
     editable: true,
     edit_tools: [
       "update_scene",
@@ -389,6 +425,7 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
       "update_video_options",
       "get_scene",
       "submit_scene_code",
+      "list_video_marks",
       "retouch_scene",
     ],
   };
@@ -405,6 +442,8 @@ function jobDigest(payload: Record<string, unknown>): Record<string, unknown> {
     : [];
   const polling = Boolean(payload.poll_again);
   const awaitingUser = Boolean(payload.awaiting_user);
+  const writing = payload.next_step === "write_next_scene";
+  const progress = (payload.codegen_progress || {}) as Record<string, unknown>;
   return {
     job_id: payload.job_id,
     title: payload.title,
@@ -422,6 +461,12 @@ function jobDigest(payload: Record<string, unknown>): Record<string, unknown> {
     video_url: payload.video_url ?? null,
     has_final_video: Boolean(payload.has_final_video),
     library_url: payload.library_url,
+    video_marks: Array.isArray(payload.video_marks) ? payload.video_marks : [],
+    current_scene_id: payload.current_scene_id,
+    codegen_progress: {
+      saved: Number(progress.saved) || 0,
+      total: Number(progress.total) || scenes.length,
+    },
     scenes: scenes.map((scene, i) => {
       const base = {
         id: String(scene.id || `scene_${i + 1}`),
@@ -429,7 +474,12 @@ function jobDigest(payload: Record<string, unknown>): Record<string, unknown> {
         has_code: Boolean(scene.has_code),
       };
       // Mid-render polls repeat every 8s and nothing per-scene has changed.
-      if (polling) return base;
+      if (polling && !writing) {
+        return {
+          ...base,
+          preview_url: scene.preview_url || "",
+        };
+      }
       // The storyboard turn is the one where narration has to be read out loud.
       if (awaitingUser) {
         return {
@@ -440,7 +490,8 @@ function jobDigest(payload: Record<string, unknown>): Record<string, unknown> {
       }
       return {
         ...base,
-        narration: String(scene.narration || ""),
+        visual_description: String(scene.visual_description || ""),
+        narration: writing ? "" : String(scene.narration || ""),
         preview_url: scene.preview_url || "",
         clip_url: scene.clip_url || "",
         vlm: scene.vlm ?? null,
@@ -449,25 +500,35 @@ function jobDigest(payload: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
+function sceneFramePaths(
+  job: Record<string, unknown>,
+  onlyIds?: string[],
+): Array<string | null> {
+  const wanted = onlyIds ? new Set(onlyIds) : null;
+  const arts = Array.isArray(job.scenes)
+    ? (job.scenes as Array<Record<string, unknown>>)
+    : [];
+  const paths: Array<string | null> = [];
+  for (const art of arts) {
+    const id = String(art.scene_id || "");
+    if (wanted && !wanted.has(id)) continue;
+    const reviews = Array.isArray(art.vlm_reviews)
+      ? (art.vlm_reviews as Array<Record<string, unknown>>)
+      : [];
+    const last = reviews.length ? reviews[reviews.length - 1] : null;
+    paths.push(typeof last?.frame_url === "string" ? last.frame_url : null);
+  }
+  return paths;
+}
+
 async function jobResult(origin: string, job: Record<string, unknown>, extraText?: string) {
   const payload = await jobPayload(origin, job);
-  // Each frame is ~500 KB of base64. A render poll returns the same frames it
-  // returned 8 seconds ago, so only pay for them once the job stops moving.
-  const images = payload.poll_again
-    ? []
-    : await embedImages(
-        origin,
-        payload.scenes.map((scene) => {
-          const match = (job.scenes as Array<Record<string, unknown>> | undefined)?.find(
-            (art) => String(art.scene_id) === scene.id,
-          );
-          const reviews = Array.isArray(match?.vlm_reviews)
-            ? (match?.vlm_reviews as Array<Record<string, unknown>>)
-            : [];
-          const last = reviews.length ? reviews[reviews.length - 1] : null;
-          return typeof last?.frame_url === "string" ? last.frame_url : null;
-        }),
-      );
+  const frames = sceneFramePaths(job);
+  // While polling, send the newest still so the user sees scenes appear.
+  const images = await embedImages(
+    origin,
+    payload.poll_again ? frames.filter(Boolean).slice(-1) : frames,
+  );
   const widget = payload.has_final_video ? UI.videoPlayer : UI.jobProgress;
   const text =
     extraText ||
@@ -715,7 +776,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Manim codegen spec",
       description:
-        "Only after the user approved the storyboard AND you saved their audio/subtitle/voice choices with update_video_options. Returns Manim rules for one scene. You write Python, then submit_scene_code. Text() only — never MathTex.",
+        "Only after the user approved the storyboard AND you saved their audio/subtitle/voice choices with update_video_options. Returns Manim rules for one scene. You write Python, then submit_scene_code. After submit, you will get a preview image — describe it to the user before the next scene. Text() only — never MathTex.",
       inputSchema: z.object({
         job_id: z.string().min(4),
         scene_id: z.string().min(1).describe("e.g. scene_1"),
@@ -739,7 +800,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         return ok(
           spec,
           undefined,
-          "Write one complete Manim Community Scene file, then call submit_scene_code with that code.",
+          "Write one complete Manim Community Scene file, then call submit_scene_code with that code. The result includes a preview image — show it and describe it before the next scene.",
         );
       } catch (err) {
         return fail(err);
@@ -752,7 +813,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Submit scene Manim code",
       description:
-        "Save Manim for one scene after the user approved the storyboard and you saved audio/subtitle/voice with update_video_options. Repeat until every scene has code, then render_video with user_confirmed true.",
+        "Save Manim for one scene. Returns a last-frame preview image — you MUST look at it, tell the user what the frame shows in 1-2 sentences, then continue. Repeat until every scene has code. Do not submit the next scene until you have described this preview. Then render_video with user_confirmed true.",
       inputSchema: z.object({
         job_id: z.string().min(4),
         scene_id: z.string().min(1),
@@ -791,14 +852,36 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         );
         const payload = await jobPayload(origin, job);
         const ready = Boolean(saved.ready_to_render);
-        const merged = { ...payload, ...saved };
+        const previewPath =
+          typeof saved.preview_path === "string" ? saved.preview_path : null;
+        const images = await embedImages(origin, [previewPath]);
+        const issues = [
+          ...(Array.isArray(saved.layout_issues) ? saved.layout_issues.map(String) : []),
+          ...(Array.isArray(saved.lint_warnings) ? saved.lint_warnings.map(String) : []),
+        ].slice(0, 6);
+        const issueText = issues.length ? ` Issues to mention: ${issues.join("; ")}.` : "";
+        const nextMissing = Array.isArray(saved.scenes_missing_code)
+          ? String(saved.scenes_missing_code[0] || "")
+          : "";
+        const savedCount = Number(saved.saved_count) || 0;
+        const total = Number(saved.total_scenes) || payload.scenes.length;
+        const merged = {
+          ...payload,
+          ...saved,
+          current_scene_id: scene_id,
+          awaiting_render: ready,
+        };
+        const hasPreview = images.length > 0;
+        const look = hasPreview
+          ? "LOOK AT THE PREVIEW IMAGE. Write 1-2 sentences to the user about what the frame shows."
+          : "No preview frame yet — tell the user the scene is saved and what it is supposed to show.";
         return ok(
           merged,
           UI.jobProgress,
           ready
-            ? "All scenes have code. Call render_video with user_confirmed true, then keep polling get_job if poll_again is true."
-            : `Saved ${scene_id}. Still missing: ${JSON.stringify(saved.scenes_missing_code)}.`,
-          undefined,
+            ? `Saved ${scene_id} (${savedCount}/${total}). ${look}${issueText} Then call render_video with user_confirmed true.`
+            : `Saved ${scene_id} (${savedCount}/${total}). ${look}${issueText} Then video_codegen_spec + submit_scene_code for ${nextMissing || "the next scene"}. Do not render yet. Do not submit another scene until you have said something about this scene to the user.`,
+          images,
           jobDigest(merged),
         );
       } catch (err) {
@@ -1178,11 +1261,26 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           : [];
         const last = reviews.length ? reviews[reviews.length - 1] : null;
         const framePath = typeof last?.frame_url === "string" ? last.frame_url : null;
-        const images = await embedImages(origin, [framePath]);
+        const comments = Array.isArray(art?.human_comments)
+          ? (art.human_comments as Array<Record<string, unknown>>)
+          : [];
+        const markFrames = comments
+          .map((item) => (typeof item.frame_url === "string" ? item.frame_url : null))
+          .filter((path): path is string => Boolean(path));
+        const images = await embedImages(origin, [...markFrames, framePath]);
         const detail = {
           job_id,
           ...scene,
           code: code || null,
+          human_comments: comments.map((item) => ({
+            id: item.id,
+            comment: item.comment,
+            timestamp: item.timestamp ?? null,
+            global_timestamp: item.global_timestamp ?? null,
+            frame_url: item.frame_url ?? null,
+            author: item.author,
+            created_at: item.created_at,
+          })),
           vlm_reviews: reviews.map((review) => ({
             approved: review.approved,
             issues: review.issues,
@@ -1190,15 +1288,79 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
             frame_url: review.frame_url,
           })),
         };
+        const markNote =
+          comments.length > 0
+            ? ` The learner left ${comments.length} marked-frame comment(s). Use those timestamps and screenshots when calling retouch_scene.`
+            : "";
         return ok(
           detail,
           UI.jobProgress,
           code
-            ? "Scene details plus Manim. The user can change narration with update_scene or the code with submit_scene_code / retouch_scene."
+            ? `Scene details plus Manim.${markNote} Change narration with update_scene or the code with submit_scene_code / retouch_scene.`
             : "Scene details. No Manim yet — wait for storyboard approval before writing code.",
           images,
-          // Only the newest review informs the next edit; earlier ones are history.
           { ...detail, vlm_reviews: detail.vlm_reviews.slice(-1) },
+        );
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_video_marks",
+    {
+      title: "List marked video frames",
+      description:
+        "Load frames the learner marked while watching the video, with comments, timestamps, scene ids, and screenshots. After they leave notes on a clip, call this, then retouch_scene with that comment, timestamp, and comment_id.",
+      inputSchema: z.object({
+        job_id: z.string().min(4),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ job_id }) => {
+      try {
+        const data = await apiJson<{
+          marks: Array<Record<string, unknown>>;
+          timeline: Array<Record<string, unknown>>;
+        }>(origin, `/api/jobs/${encodeURIComponent(job_id)}/marks`);
+        const marks = (data.marks || []).map((mark) => ({
+          id: String(mark.id || ""),
+          scene_id: String(mark.scene_id || ""),
+          scene_title: typeof mark.scene_title === "string" ? mark.scene_title : null,
+          comment: String(mark.comment || ""),
+          timestamp: typeof mark.timestamp === "number" ? mark.timestamp : null,
+          global_timestamp:
+            typeof mark.global_timestamp === "number" ? mark.global_timestamp : null,
+          frame_url: typeof mark.frame_url === "string" ? mark.frame_url : null,
+          author: typeof mark.author === "string" ? mark.author : null,
+          created_at: typeof mark.created_at === "string" ? mark.created_at : null,
+        }));
+        const images = await embedImages(
+          origin,
+          marks.map((mark) => mark.frame_url),
+        );
+        const text =
+          marks.length === 0
+            ? "No marked frames yet. The learner can pause the video, click Mark this moment, and leave a comment."
+            : `The learner marked ${marks.length} frame(s). Look at the screenshots, then call retouch_scene for each scene that needs a change. Pass comment_id so the marked frame is attached.`;
+        return ok(
+          { job_id, marks, timeline: data.timeline || [], count: marks.length },
+          UI.videoPlayer,
+          text,
+          images,
+          {
+            job_id,
+            count: marks.length,
+            marks: marks.map((mark) => ({
+              id: mark.id,
+              scene_id: mark.scene_id,
+              scene_title: mark.scene_title,
+              comment: mark.comment,
+              timestamp: mark.timestamp,
+              global_timestamp: mark.global_timestamp,
+            })),
+          },
         );
       } catch (err) {
         return fail(err);
@@ -1211,7 +1373,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Retouch a rendered scene",
       description:
-        "After a scene has code (and usually a clip), apply the user's change request: rewrite Manim and re-render that scene. Use this instead of starting a new job.",
+        "After a scene has code (and usually a clip), apply the user's change request: rewrite Manim and re-render that scene. If they marked a frame, pass timestamp and comment_id from list_video_marks so the screenshot is used. Use this instead of starting a new job.",
       inputSchema: z.object({
         job_id: z.string().min(4),
         scene_id: z.string().min(1),
@@ -1220,17 +1382,27 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           .min(2)
           .max(2000)
           .describe("What the user wants changed in this scene."),
+        timestamp: z
+          .number()
+          .min(0)
+          .optional()
+          .describe("Seconds into this scene for the marked frame."),
+        comment_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Id from list_video_marks so the marked screenshot is attached."),
       }),
       _meta: widgetMeta(UI.jobProgress),
       outputSchema: JOB_OUTPUT,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ job_id, scene_id, comment }) => {
+    async ({ job_id, scene_id, comment, timestamp, comment_id }) => {
       try {
         await startSse(
           origin,
           `/api/jobs/${encodeURIComponent(job_id)}/scenes/${encodeURIComponent(scene_id)}/retouch/stream`,
-          JSON.stringify({ comment }),
+          JSON.stringify({ comment, timestamp, comment_id }),
           { "Content-Type": "application/json" },
           { untilType: ["complete", "error"], timeoutMs: 90_000 },
         );

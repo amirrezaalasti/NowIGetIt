@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { AuthMedia } from "@/components/AuthMedia";
+import { MarkedVideoPlayer } from "@/components/MarkedVideoPlayer";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import {
   ensureApiToken,
@@ -170,6 +171,22 @@ function scenesFromPlan(plan: ScenePlanDraft): ScenePreview[] {
     duration: s.duration_seconds,
     status: "queued",
   }));
+}
+
+function timelineFromPreviews(scenes: ScenePreview[]) {
+  let t = 0;
+  return scenes.map((s) => {
+    const duration = Number(s.duration) || 8;
+    const entry = {
+      scene_id: s.id,
+      title: s.title,
+      start: t,
+      duration,
+      end: t + duration,
+    };
+    t += duration;
+    return entry;
+  });
 }
 
 function sceneStatusTone(status?: string, approved?: boolean) {
@@ -1855,11 +1872,25 @@ export function Generator() {
 
             {mode === "result" && finalVideoUrl && (
               <div className="mt-8">
-                <AuthMedia
-                  src={finalVideoUrl}
-                  cacheBust={finalVideoVersion}
-                  className="w-full overflow-hidden rounded-2xl border border-[var(--line)]"
-                />
+                {jobId ? (
+                  <>
+                    <p className="mb-2 text-sm text-[var(--ink-muted)]">
+                      Mark a frame while watching, add a comment, and the agent can retouch that scene from the screenshot.
+                    </p>
+                    <MarkedVideoPlayer
+                      jobId={jobId}
+                      src={finalVideoUrl}
+                      cacheBust={finalVideoVersion}
+                      timeline={timelineFromPreviews(scenes)}
+                    />
+                  </>
+                ) : (
+                  <AuthMedia
+                    src={finalVideoUrl}
+                    cacheBust={finalVideoVersion}
+                    className="w-full overflow-hidden rounded-2xl border border-[var(--line)]"
+                  />
+                )}
                 {jobId && (
                   <p className="mt-3 text-sm text-[var(--ink-muted)]">
                     Saved to your{" "}

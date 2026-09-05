@@ -20,8 +20,24 @@ export type HumanComment = {
   scene_id: string;
   comment: string;
   timestamp?: number | null;
+  global_timestamp?: number | null;
+  frame_url?: string | null;
+  scene_title?: string | null;
   author: string;
   created_at: string;
+};
+
+export type VideoTimelineEntry = {
+  scene_id: string;
+  title: string;
+  start: number;
+  duration: number;
+  end: number;
+};
+
+export type VideoMarksPayload = {
+  marks: HumanComment[];
+  timeline: VideoTimelineEntry[];
 };
 
 export type JobRuntimeStatus = {
@@ -60,6 +76,8 @@ export type JobDetail = {
   events?: Array<Record<string, unknown>>;
   urls?: Record<string, string>;
   runtime?: JobRuntimeStatus;
+  timeline?: VideoTimelineEntry[];
+  video_marks?: HumanComment[];
 };
 
 const ACTIVE_JOB_KEY = "nowigetit:activeJobId";
@@ -231,16 +249,61 @@ export async function addSceneComment(
   sceneId: string,
   comment: string,
   timestamp?: number,
+  extras?: {
+    globalTimestamp?: number;
+    frameBase64?: string;
+  },
 ): Promise<HumanComment> {
   const res = await fetch(
     `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/comments`,
     {
       method: "POST",
       headers: await authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ comment, timestamp }),
+      body: JSON.stringify({
+        comment,
+        timestamp,
+        global_timestamp: extras?.globalTimestamp,
+        frame_base64: extras?.frameBase64,
+      }),
     },
   );
   if (!res.ok) throw new Error("Failed to post comment");
+  return res.json();
+}
+
+export async function fetchVideoMarks(jobId: string): Promise<VideoMarksPayload> {
+  const res = await fetch(`${apiBase()}/api/jobs/${jobId}/marks`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to load video marks");
+  return res.json();
+}
+
+export async function addVideoMark(
+  jobId: string,
+  comment: string,
+  extras: {
+    globalTimestamp?: number;
+    timestamp?: number;
+    sceneId?: string;
+    frameBase64?: string;
+  },
+): Promise<HumanComment> {
+  const res = await fetch(`${apiBase()}/api/jobs/${jobId}/marks`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      comment,
+      global_timestamp: extras.globalTimestamp,
+      timestamp: extras.timestamp,
+      scene_id: extras.sceneId,
+      frame_base64: extras.frameBase64,
+    }),
+  });
+  if (!res.ok) {
+    throw await readError(res, "Failed to save video mark");
+  }
   return res.json();
 }
 
@@ -251,6 +314,7 @@ export async function streamRetouch(
   timestamp: number | undefined,
   onEvent: (event: PipelineEvent) => void,
   signal?: AbortSignal,
+  commentId?: string,
 ): Promise<void> {
   const res = await fetch(
     `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/retouch/stream`,
@@ -260,7 +324,7 @@ export async function streamRetouch(
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       }),
-      body: JSON.stringify({ comment, timestamp }),
+      body: JSON.stringify({ comment, timestamp, comment_id: commentId }),
       signal,
       cache: "no-store",
     },

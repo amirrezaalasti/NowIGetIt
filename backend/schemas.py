@@ -339,7 +339,23 @@ class VlmReview(BaseModel):
 class SceneCommentRequest(BaseModel):
     comment: str = Field(..., min_length=1, max_length=2000)
     timestamp: Optional[float] = Field(default=None, ge=0.0)
+    global_timestamp: Optional[float] = Field(default=None, ge=0.0)
+    frame_base64: Optional[str] = Field(default=None, max_length=2_000_000)
+    comment_id: Optional[str] = Field(
+        default=None,
+        description="When retouching, load the marked-frame screenshot saved with this comment.",
+    )
     author: str = "Human Reviewer"
+
+
+class VideoMarkRequest(BaseModel):
+    """Mark the current frame of the stitched video (or a single scene clip)."""
+
+    comment: str = Field(..., min_length=1, max_length=2000)
+    global_timestamp: Optional[float] = Field(default=None, ge=0.0)
+    timestamp: Optional[float] = Field(default=None, ge=0.0)
+    scene_id: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    frame_base64: Optional[str] = Field(default=None, max_length=2_000_000)
 
 
 class SceneComment(BaseModel):
@@ -348,6 +364,9 @@ class SceneComment(BaseModel):
     scene_id: str
     comment: str
     timestamp: Optional[float] = None
+    global_timestamp: Optional[float] = None
+    frame_url: Optional[str] = None
+    scene_title: Optional[str] = None
     author: str
     created_at: str
 

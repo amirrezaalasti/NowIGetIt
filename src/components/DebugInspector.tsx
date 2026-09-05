@@ -18,6 +18,7 @@ import {
   type JobSummary,
 } from "@/lib/api";
 import { SceneEditor } from "@/components/SceneEditor";
+import { captureVideoFrame, formatMarkTime, MarkedVideoPlayer } from "@/components/MarkedVideoPlayer";
 
 type JobFilter = "all" | "ready" | "in_progress";
 type StatusTone = "ready" | "live" | "warn" | "muted";
@@ -124,6 +125,8 @@ function SceneVideoPlayer({
   const [comments, setComments] = useState<HumanComment[]>(initialComments);
   const [newComment, setNewComment] = useState("");
   const [useTimestamp, setUseTimestamp] = useState(true);
+  const [capturedFrame, setCapturedFrame] = useState<string | null>(null);
+  const [capturedTime, setCapturedTime] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   // Map of commentId → AI reply data
@@ -177,13 +180,24 @@ function SceneVideoPlayer({
     upsertReply(commentId, { approvalState: "rejected" });
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleMarkFrame = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.pause();
+    const time = video.currentTime;
+    setCapturedTime(time);
+    setUseTimestamp(true);
+    setCapturedFrame(captureVideoFrame(video));
+  };
+
+  const handleSubmit = async (e: React.FormEvent, retouch = true) => {
     e.preventDefault();
     if (!newComment.trim() || submitting) return;
 
     const commentText = newComment.trim();
     const currentTime =
-      useTimestamp && videoRef.current ? videoRef.current.currentTime : undefined;
+      capturedTime ??
+      (useTimestamp && videoRef.current ? videoRef.current.currentTime : undefined);
 
     abortRef.current?.abort();
     const abort = new AbortController();
@@ -196,12 +210,25 @@ function SceneVideoPlayer({
     // Step 1: save comment immediately → get its ID
     let savedComment: HumanComment;
     try {
-      savedComment = await addSceneComment(jobId, sceneId, commentText, currentTime);
+      savedComment = await addSceneComment(
+        jobId,
+        sceneId,
+        commentText,
+        currentTime,
+        { frameBase64: capturedFrame || undefined },
+      );
       setComments((prev) => [...prev, savedComment]);
+      setCapturedFrame(null);
+      setCapturedTime(null);
     } catch (err) {
       setSubmitting(false);
       setNewComment(commentText);
       setSubmitError((err as Error).message || "Failed to save feedback");
+      return;
+    }
+
+    if (!retouch) {
+      setSubmitting(false);
       return;
     }
 
@@ -253,7 +280,8 @@ function SceneVideoPlayer({
             onRefresh?.();
           }
         },
-        abort.signal
+        abort.signal,
+        cid,
       );
     } catch (err: unknown) {
       if ((err as Error).name !== "AbortError") {
@@ -287,6 +315,16 @@ function SceneVideoPlayer({
           playsInline
           preload="metadata"
         />
+        <button
+          type="button"
+          onClick={handleMarkFrame}
+          className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-black/65 px-3 py-1.5 text-[11px] font-semibold text-white backdrop-blur-sm transition hover:bg-black/80"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M5 3v18l7-4 7 4V3z" />
+          </svg>
+          Mark this frame
+        </button>
         {latestFrameUrl && (
           <div className="mt-2 rounded-xl border border-[var(--line)] overflow-hidden">
             <p className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--ink-muted)] bg-[var(--surface-strong)]">
@@ -334,8 +372,16 @@ function SceneVideoPlayer({
                         onClick={() => seekTo(c.timestamp)}
                         className="mb-1 flex items-center gap-1 text-[10px] opacity-70 hover:opacity-100"
                       >
-                        At {c.timestamp.toFixed(1)}s
+                        At {formatMarkTime(c.timestamp)}
                       </button>
+                    )}
+                    {c.frame_url && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={assetUrl(c.frame_url)}
+                        alt=""
+                        className="mb-1.5 max-h-24 w-full rounded-lg object-cover"
+                      />
                     )}
                     <p className="leading-relaxed">{c.comment}</p>
                     <span className="mt-1 block text-[10px] opacity-60 text-right">
@@ -462,6 +508,26 @@ function SceneVideoPlayer({
           {submitError && (
             <p className="text-[11px] text-red-400">{submitError}</p>
           )}
+          {capturedFrame && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--surface-strong)] p-2">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={capturedFrame} alt="" className="h-12 w-20 rounded object-cover" />
+              <div className="min-w-0 flex-1 text-[11px] text-[var(--ink-muted)]">
+                Marked frame
+                {typeof capturedTime === "number" ? ` at ${formatMarkTime(capturedTime)}` : ""}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setCapturedFrame(null);
+                  setCapturedTime(null);
+                }}
+                className="text-[11px] text-[var(--ink-muted)] hover:text-[var(--ink)]"
+              >
+                Clear
+              </button>
+            </div>
+          )}
           <textarea
             value={newComment}
             onChange={(e) => {
@@ -471,10 +537,10 @@ function SceneVideoPlayer({
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
-                void handleSubmit(e as unknown as React.FormEvent);
+                void handleSubmit(e as unknown as React.FormEvent, true);
               }
             }}
-            placeholder="Describe what to change… (⌘↵ to send)"
+            placeholder="Describe what to change on the marked frame… (⌘↵ to retouch)"
             rows={2}
             disabled={submitting}
             className="w-full rounded-lg border border-[var(--line)] bg-[var(--surface-strong)] p-2 text-xs text-[var(--ink)] focus:outline-none focus:border-[var(--accent)] resize-none disabled:opacity-60"
@@ -490,17 +556,27 @@ function SceneVideoPlayer({
               />
               Pin video timestamp
             </label>
-            <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={!newComment.trim() || submitting}
-              className="shrink-0 flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-xs font-semibold text-[var(--on-accent)] transition hover:opacity-90 disabled:opacity-40"
-            >
-              {submitting && (
-                <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              )}
-              {submitting ? "Retouching…" : "Send"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={(e) => void handleSubmit(e, false)}
+                disabled={!newComment.trim() || submitting}
+                className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition hover:border-[var(--accent)] disabled:opacity-40"
+              >
+                Save mark
+              </button>
+              <button
+                type="button"
+                onClick={(e) => void handleSubmit(e, true)}
+                disabled={!newComment.trim() || submitting}
+                className="shrink-0 flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-xs font-semibold text-[var(--on-accent)] transition hover:opacity-90 disabled:opacity-40"
+              >
+                {submitting && (
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                )}
+                {submitting ? "Retouching…" : "Send"}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1044,13 +1120,15 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
               {(job.final_video_url || job.urls?.final_video) ? (
                 <div className="mb-10">
                   <p className="mb-2 text-sm text-[var(--ink)]">Final video</p>
-                  <video
-                    key={job.final_video_url || job.urls?.final_video}
-                    className="w-full rounded-2xl border border-[var(--line)] bg-[var(--surface-video)]"
-                    src={assetUrl(job.final_video_url || job.urls?.final_video)}
-                    controls
-                    playsInline
-                    preload="metadata"
+                  <p className="mb-3 text-xs text-[var(--ink-muted)]">
+                    Pause on a frame, mark it, and leave a comment. The agent uses that screenshot and timestamp to edit the scene.
+                  </p>
+                  <MarkedVideoPlayer
+                    jobId={job.job_id}
+                    src={job.final_video_url || job.urls?.final_video}
+                    timeline={job.timeline}
+                    initialMarks={job.video_marks}
+                    onMarksChange={() => bumpRefresh()}
                   />
                 </div>
               ) : (
