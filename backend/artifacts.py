@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -343,24 +344,70 @@ def save_result(job_id: str, data: dict[str, Any]) -> str:
     return write_json(job_dir(job_id) / "result.json", data)
 
 
-def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[str, Any]]:
+def job_kind(job_id: str, meta: Optional[dict[str, Any]] = None) -> str:
+    """video | document | source | podcast | quiz | interactive."""
+    if isinstance(meta, dict):
+        kind = str(meta.get("kind") or "").strip()
+        if kind:
+            return kind
+    if job_id.startswith("doc_"):
+        return "document"
+    if job_id.startswith("src_"):
+        return "source"
+    if job_id.startswith("pod_"):
+        return "podcast"
+    if job_id.startswith("quiz_"):
+        return "quiz"
+    if job_id.startswith("lab_"):
+        return "interactive"
+    return "video"
+
+
+def _summarize_job_row(row: dict[str, Any], *, user_id: Optional[str] = None) -> dict[str, Any]:
+    job_id = str(row.get("job_id") or row.get("id") or "")
+    meta = row.get("meta") if isinstance(row.get("meta"), dict) else None
+    kind = job_kind(job_id, meta)
+    return {
+        "job_id": job_id,
+        "title": row.get("title"),
+        "prompt": row.get("prompt"),
+        "created_at": row.get("created_at"),
+        "has_result": bool(row.get("has_result")),
+        "has_final_video": bool(row.get("has_final_video")),
+        "user_id": row.get("user_id") or user_id,
+        "status": row.get("status"),
+        "kind": kind,
+    }
+
+
+def _is_source_job(job_id: str, kind: str) -> bool:
+    return kind == "source" or job_id.startswith("src_")
+
+
+def list_jobs(
+    limit: int = 50,
+    *,
+    user_id: Optional[str] = None,
+    include_sources: bool = False,
+) -> list[dict[str, Any]]:
     if user_id:
-        rows = db.list_user_jobs(user_id, limit=limit)
+        fetch_limit = limit if include_sources else max(limit * 2, 40)
+        rows = db.list_user_jobs(user_id, limit=fetch_limit)
         if rows:
-            return [
-                {
-                    "job_id": row.get("job_id") or row.get("id"),
-                    "title": row.get("title"),
-                    "prompt": row.get("prompt"),
-                    "created_at": row.get("created_at"),
-                    "has_result": bool(row.get("has_result")),
-                    "has_final_video": bool(row.get("has_final_video")),
-                    "user_id": row.get("user_id") or user_id,
-                    "status": row.get("status"),
-                }
-                for row in rows
-                if row.get("job_id") or row.get("id")
-            ]
+            jobs: list[dict[str, Any]] = []
+            for row in rows:
+                if not (row.get("job_id") or row.get("id")):
+                    continue
+                summary = _summarize_job_row(row, user_id=user_id)
+                if not include_sources and _is_source_job(
+                    str(summary.get("job_id") or ""), str(summary.get("kind") or "")
+                ):
+                    continue
+                jobs.append(summary)
+                if len(jobs) >= limit:
+                    break
+            if jobs:
+                return jobs
 
     root = artifacts_root()
     if not root.exists():
@@ -379,14 +426,21 @@ def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[st
         if user_id is not None and meta.get("user_id") != user_id:
             continue
         plan_path = path / "scene_plan.json"
-        title = None
+        title = meta.get("title") if isinstance(meta.get("title"), str) else None
         if plan_path.exists():
             try:
-                title = json.loads(plan_path.read_text(encoding="utf-8")).get("title")
+                title = json.loads(plan_path.read_text(encoding="utf-8")).get("title") or title
             except json.JSONDecodeError:
                 pass
         has_result = (path / "result.json").exists()
-        has_final_video = (path / "final.mp4").exists()
+        has_final_video = (
+            (path / "final.mp4").exists()
+            or (path / "podcast.wav").exists()
+            or (path / "podcast.mp3").exists()
+        )
+        kind = job_kind(path.name, meta)
+        if not include_sources and _is_source_job(path.name, kind):
+            continue
         if has_result or has_final_video:
             status = "complete"
         elif str(meta.get("status") or "").strip():
@@ -405,6 +459,7 @@ def list_jobs(limit: int = 50, *, user_id: Optional[str] = None) -> list[dict[st
                 "has_final_video": has_final_video,
                 "user_id": meta.get("user_id"),
                 "status": status,
+                "kind": kind,
             }
         )
         if len(jobs) >= limit:
@@ -491,7 +546,11 @@ def load_job(job_id: str, *, user_id: Optional[str] = None) -> dict[str, Any]:
     }
     if (root / "final.mp4").exists():
         urls["final_video"] = f"/api/jobs/{job_id}/file/final.mp4"
+    if (root / "final.gif").exists():
+        urls["final_gif"] = f"/api/jobs/{job_id}/file/final.gif"
 
+    timeline = job_timeline(job_id, scenes)
+    marks = list_job_marks(job_id, scenes=scenes, timeline=timeline)
     return {
         "job_id": job_id,
         "meta": _read("meta.json"),
@@ -501,7 +560,159 @@ def load_job(job_id: str, *, user_id: Optional[str] = None) -> dict[str, Any]:
         "scenes": scenes,
         "events": events,
         "final_video_url": urls.get("final_video"),
+        "gif_url": urls.get("final_gif"),
         "urls": urls,
+        "timeline": timeline,
+        "video_marks": marks,
+    }
+
+
+_MAX_MARK_FRAME_BYTES = 1_500_000
+
+
+def _decode_mark_frame(frame_base64: str) -> Optional[tuple[bytes, str]]:
+    raw = (frame_base64 or "").strip()
+    if not raw:
+        return None
+    ext = ".jpg"
+    payload = raw
+    if raw.startswith("data:"):
+        header, _, payload = raw.partition(",")
+        if "png" in header.lower():
+            ext = ".png"
+        elif "webp" in header.lower():
+            ext = ".webp"
+    try:
+        data = base64.b64decode(payload, validate=False)
+    except Exception:
+        return None
+    if not data or len(data) > _MAX_MARK_FRAME_BYTES:
+        return None
+    return data, ext
+
+
+def _save_mark_frame(
+    job_id: str, scene_id: str, comment_id: str, frame_base64: Optional[str]
+) -> Optional[str]:
+    if not frame_base64:
+        return None
+    decoded = _decode_mark_frame(frame_base64)
+    if not decoded:
+        return None
+    data, ext = decoded
+    dest = scene_dir(job_id, scene_id) / "marks" / f"{comment_id}{ext}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return f"/api/jobs/{job_id}/file/scenes/{scene_id}/marks/{dest.name}"
+
+
+def _mark_frame_path(job_id: str, scene_id: str, comment: dict[str, Any]) -> Optional[Path]:
+    frame_url = comment.get("frame_url")
+    if not isinstance(frame_url, str) or "/file/" not in frame_url:
+        return None
+    rel = frame_url.split("/file/", 1)[-1]
+    try:
+        path = resolve_job_file(job_id, rel)
+    except (ValueError, FileNotFoundError):
+        return None
+    return path if path.is_file() else None
+
+
+def _scene_summaries_for_timeline(job_id: str) -> list[dict[str, Any]]:
+    scenes_root = job_dir(job_id) / "scenes"
+    if not scenes_root.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for sdir in sorted(scenes_root.iterdir()):
+        if not sdir.is_dir():
+            continue
+        section = _read_json_file(sdir / "section.json") or {}
+        out.append(
+            {
+                "scene_id": sdir.name,
+                "section": section if isinstance(section, dict) else {},
+            }
+        )
+    return out
+
+
+def job_timeline(
+    job_id: str, scenes: Optional[list[dict[str, Any]]] = None
+) -> list[dict[str, Any]]:
+    """Map stitched-video time → scene. Uses clip duration when present."""
+    if scenes is None:
+        scenes = _scene_summaries_for_timeline(job_id)
+
+    path = job_dir(job_id) / "timeline.json"
+    newest = 0.0
+    for scene in scenes:
+        sid = str(scene.get("scene_id") or "")
+        if not sid:
+            continue
+        mp4 = scene_dir(job_id, sid) / "scene.mp4"
+        if mp4.exists():
+            newest = max(newest, mp4.stat().st_mtime)
+    if path.exists() and (newest <= 0 or path.stat().st_mtime >= newest - 0.05):
+        cached = _read_json_file(path)
+        if isinstance(cached, list) and cached:
+            return cached
+
+    from backend.pipeline.compose import probe_duration
+
+    cursor = 0.0
+    entries: list[dict[str, Any]] = []
+    for scene in scenes:
+        sid = str(scene.get("scene_id") or "")
+        if not sid:
+            continue
+        section = scene.get("section") if isinstance(scene.get("section"), dict) else {}
+        title = str(section.get("title") or sid)
+        planned = float(section.get("duration_seconds") or 8.0)
+        mp4 = scene_dir(job_id, sid) / "scene.mp4"
+        measured = probe_duration(mp4) if mp4.exists() else 0.0
+        duration = measured if measured > 0.2 else planned
+        entries.append(
+            {
+                "scene_id": sid,
+                "title": title,
+                "start": round(cursor, 3),
+                "duration": round(duration, 3),
+                "end": round(cursor + duration, 3),
+            }
+        )
+        cursor += duration
+    write_json(path, entries)
+    return entries
+
+
+def resolve_timeline_time(
+    job_id: str,
+    global_timestamp: float,
+    *,
+    timeline: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
+    entries = timeline if timeline is not None else job_timeline(job_id)
+    if not entries:
+        return None
+    t = max(0.0, float(global_timestamp))
+    for entry in entries:
+        start = float(entry.get("start") or 0.0)
+        end = float(entry.get("end") or start)
+        if t < end or entry is entries[-1]:
+            local = max(0.0, t - start)
+            duration = float(entry.get("duration") or 0.0)
+            if duration > 0:
+                local = min(local, duration)
+            return {
+                **entry,
+                "local_timestamp": round(local, 3),
+                "global_timestamp": round(t, 3),
+            }
+    last = entries[-1]
+    return {
+        **last,
+        "local_timestamp": round(float(last.get("duration") or 0.0), 3),
+        "global_timestamp": round(t, 3),
     }
 
 
@@ -511,6 +722,8 @@ def add_scene_comment(
     *,
     comment: str,
     timestamp: Optional[float] = None,
+    global_timestamp: Optional[float] = None,
+    frame_base64: Optional[str] = None,
     author: str = "Human Reviewer",
 ) -> dict[str, Any]:
     sdir = scene_dir(job_id, scene_id)
@@ -522,12 +735,18 @@ def add_scene_comment(
         except Exception:
             comments = []
 
+    comment_id = f"comment_{len(comments) + 1}_{int(datetime.now(timezone.utc).timestamp())}"
+    frame_url = _save_mark_frame(job_id, scene_id, comment_id, frame_base64)
+    section = _read_json_file(sdir / "section.json") or {}
     comment_entry = {
-        "id": f"comment_{len(comments) + 1}_{int(datetime.now(timezone.utc).timestamp())}",
+        "id": comment_id,
         "job_id": job_id,
         "scene_id": scene_id,
+        "scene_title": str(section.get("title") or scene_id) if isinstance(section, dict) else scene_id,
         "comment": comment,
         "timestamp": timestamp,
+        "global_timestamp": global_timestamp,
+        "frame_url": frame_url,
         "author": author,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -542,9 +761,127 @@ def get_scene_comments(job_id: str, scene_id: str) -> list[dict[str, Any]]:
     if not comments_file.exists():
         return []
     try:
-        return json.loads(comments_file.read_text(encoding="utf-8"))
+        loaded = json.loads(comments_file.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, list) else []
     except Exception:
         return []
+
+
+def get_scene_comment(
+    job_id: str, scene_id: str, comment_id: str
+) -> Optional[dict[str, Any]]:
+    for item in get_scene_comments(job_id, scene_id):
+        if item.get("id") == comment_id:
+            return item
+    return None
+
+
+def list_job_marks(
+    job_id: str,
+    *,
+    scenes: Optional[list[dict[str, Any]]] = None,
+    timeline: Optional[list[dict[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    if scenes is None:
+        scenes_root = job_dir(job_id) / "scenes"
+        scene_ids = (
+            [p.name for p in sorted(scenes_root.iterdir()) if p.is_dir()]
+            if scenes_root.exists()
+            else []
+        )
+    else:
+        scene_ids = [str(s.get("scene_id") or "") for s in scenes if s.get("scene_id")]
+    start_by_id = {
+        str(entry.get("scene_id")): float(entry.get("start") or 0.0)
+        for entry in (timeline or [])
+    }
+    marks: list[dict[str, Any]] = []
+    for sid in scene_ids:
+        if not sid:
+            continue
+        for item in get_scene_comments(job_id, sid):
+            local = item.get("timestamp")
+            global_t = item.get("global_timestamp")
+            if global_t is None and isinstance(local, (int, float)) and sid in start_by_id:
+                global_t = round(start_by_id[sid] + float(local), 3)
+            marks.append({**item, "global_timestamp": global_t})
+    marks.sort(
+        key=lambda m: (
+            float(m.get("global_timestamp") if m.get("global_timestamp") is not None else 10**9),
+            str(m.get("created_at") or ""),
+        )
+    )
+    return marks
+
+
+def add_video_mark(
+    job_id: str,
+    *,
+    comment: str,
+    author: str = "Human Reviewer",
+    scene_id: Optional[str] = None,
+    timestamp: Optional[float] = None,
+    global_timestamp: Optional[float] = None,
+    frame_base64: Optional[str] = None,
+) -> dict[str, Any]:
+    """Save a learner mark. If scene_id is omitted, resolve it from the stitched timeline."""
+    timeline = job_timeline(job_id)
+    resolved_scene = scene_id
+    local_ts = timestamp
+    global_ts = global_timestamp
+    hit: Optional[dict[str, Any]] = None
+    if not resolved_scene:
+        if global_ts is None:
+            raise ValueError("Mark the current video time, or pick a scene.")
+        hit = resolve_timeline_time(job_id, float(global_ts), timeline=timeline)
+        if not hit:
+            raise ValueError("No scenes to mark on this video yet.")
+        resolved_scene = str(hit["scene_id"])
+        local_ts = float(hit["local_timestamp"])
+    elif global_ts is None and isinstance(local_ts, (int, float)):
+        hit = next((e for e in timeline if e.get("scene_id") == resolved_scene), None)
+        if hit:
+            global_ts = round(float(hit.get("start") or 0.0) + float(local_ts), 3)
+    if local_ts is None and global_ts is not None:
+        hit = resolve_timeline_time(job_id, float(global_ts), timeline=timeline)
+        if hit and hit.get("scene_id") == resolved_scene:
+            local_ts = float(hit["local_timestamp"])
+
+    sdir = scene_dir(job_id, str(resolved_scene))
+    if not (sdir / "section.json").exists() and not (sdir / "code_final.py").exists():
+        raise FileNotFoundError(f"Scene {resolved_scene} not found")
+
+    entry = add_scene_comment(
+        job_id,
+        str(resolved_scene),
+        comment=comment,
+        timestamp=None if local_ts is None else float(local_ts),
+        global_timestamp=None if global_ts is None else float(global_ts),
+        frame_base64=frame_base64,
+        author=author,
+    )
+    if hit:
+        entry["scene_title"] = str(hit.get("title") or entry.get("scene_title") or resolved_scene)
+    return entry
+
+
+def load_comment_frame_bytes(
+    job_id: str, scene_id: str, comment_id: Optional[str]
+) -> Optional[tuple[bytes, str]]:
+    if not comment_id:
+        comments = get_scene_comments(job_id, scene_id)
+        comment = next((c for c in reversed(comments) if c.get("frame_url")), None)
+    else:
+        comment = get_scene_comment(job_id, scene_id, comment_id)
+    if not comment:
+        return None
+    path = _mark_frame_path(job_id, scene_id, comment)
+    if not path:
+        return None
+    data = path.read_bytes()
+    suffix = path.suffix.lower()
+    mime = {".png": "image/png", ".webp": "image/webp"}.get(suffix, "image/jpeg")
+    return data, mime
 
 
 def resolve_job_file(job_id: str, relative: str) -> Path:

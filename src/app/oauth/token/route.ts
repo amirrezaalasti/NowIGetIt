@@ -1,5 +1,6 @@
 import {
   clientAllowsRedirect,
+  clientAuthFrom,
   consumeAuthorizationCode,
   issueTokenPair,
   loadClient,
@@ -7,6 +8,7 @@ import {
   oauthError,
   oauthJson,
   pkceMatches,
+  resourcesMatch,
   verifyRefreshToken,
 } from "@/lib/mcp/oauth";
 
@@ -29,8 +31,7 @@ async function readForm(req: Request): Promise<URLSearchParams> {
 export async function POST(req: Request) {
   const form = await readForm(req);
   const grant = form.get("grant_type") || "";
-  const clientId = form.get("client_id") || "";
-  const clientSecret = form.get("client_secret") || "";
+  const { clientId, clientSecret } = clientAuthFrom(req, form);
   const client = clientId ? await loadClient(clientId) : null;
   if (!client) {
     return oauthError("invalid_client", "Unknown client_id", 401);
@@ -48,6 +49,10 @@ export async function POST(req: Request) {
     const claims = await verifyRefreshToken(refresh);
     if (!claims || claims.client_id !== client.client_id) {
       return oauthError("invalid_grant", "Invalid refresh token");
+    }
+    const resource = form.get("resource");
+    if (resource && !resourcesMatch(resource, claims.resource)) {
+      return oauthError("invalid_target", "resource does not match");
     }
     return oauthJson(await issueTokenPair(claims));
   }
@@ -68,6 +73,10 @@ export async function POST(req: Request) {
   }
   if (!pkceMatches(verifier, parsed.code_challenge)) {
     return oauthError("invalid_grant", "PKCE verification failed");
+  }
+  const resource = form.get("resource");
+  if (resource && !resourcesMatch(resource, parsed.resource)) {
+    return oauthError("invalid_target", "resource does not match");
   }
 
   return oauthJson(

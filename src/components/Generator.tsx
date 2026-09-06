@@ -5,7 +5,13 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { AuthMedia } from "@/components/AuthMedia";
+import { MarkedVideoPlayer } from "@/components/MarkedVideoPlayer";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import {
+  SourceAttachments,
+  readySourceIds,
+  type AttachedSource,
+} from "@/components/SourceAttachments";
 import {
   ensureApiToken,
   assetUrl,
@@ -109,9 +115,11 @@ const EXAMPLES = [
   "Explain gradient descent on a simple parabola",
   "Show why the Pythagorean theorem works visually",
   "Animate how sine and cosine relate on the unit circle",
+  "A looping GIF of binary search splitting a sorted list in half",
 ];
 
 const LENGTH_OPTIONS: { id: LengthPreset; label: string; hint: string }[] = [
+  { id: "clip", label: "GIF", hint: "~12s loop" },
   { id: "short", label: "60s", hint: "Quick intuition" },
   { id: "standard", label: "90s", hint: "Balanced" },
   { id: "deep", label: "3 min", hint: "Deep dive" },
@@ -170,6 +178,22 @@ function scenesFromPlan(plan: ScenePlanDraft): ScenePreview[] {
     duration: s.duration_seconds,
     status: "queued",
   }));
+}
+
+function timelineFromPreviews(scenes: ScenePreview[]) {
+  let t = 0;
+  return scenes.map((s) => {
+    const duration = Number(s.duration) || 8;
+    const entry = {
+      scene_id: s.id,
+      title: s.title,
+      start: t,
+      duration,
+      end: t + duration,
+    };
+    t += duration;
+    return entry;
+  });
 }
 
 function sceneStatusTone(status?: string, approved?: boolean) {
@@ -250,6 +274,7 @@ export function Generator() {
   const { status: authStatus } = useSession();
   const searchParams = useSearchParams();
   const [prompt, setPrompt] = useState("");
+  const [attachments, setAttachments] = useState<AttachedSource[]>([]);
   const [lengthPreset, setLengthPreset] = useState<LengthPreset>("standard");
   const [scenePacing, setScenePacing] = useState<ScenePacing>("balanced");
   const [audience, setAudience] = useState<Audience>("general");
@@ -269,6 +294,7 @@ export function Generator() {
   const [scenes, setScenes] = useState<ScenePreview[]>([]);
   const [finalNotes, setFinalNotes] = useState<string | null>(null);
   const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(null);
+  const [finalGifUrl, setFinalGifUrl] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<string>("Checking API…");
@@ -335,6 +361,14 @@ export function Generator() {
     // Seed once from ?prompt= (e.g. Understand → Create handoff)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlPrompt]);
+
+  function onLengthPresetChange(next: LengthPreset) {
+    setLengthPreset(next);
+    if (next === "clip") {
+      setIncludeAudio(false);
+      setIncludeSubtitles(false);
+    }
+  }
 
   useEffect(() => {
     eventsLenRef.current = events.length;
@@ -646,6 +680,9 @@ export function Generator() {
         setFinalVideoUrl(event.data.final_video_url);
         setFinalVideoVersion((v) => v + 1);
       }
+      if (typeof event.data.gif_url === "string") {
+        setFinalGifUrl(event.data.gif_url);
+      }
       const completedScenes = event.data.scenes as
         | Array<Record<string, unknown>>
         | undefined;
@@ -712,6 +749,9 @@ export function Generator() {
           setFinalVideoUrl(event.data.final_video_url);
           setFinalVideoVersion((v) => v + 1);
         }
+        if (typeof event.data.gif_url === "string") {
+          setFinalGifUrl(event.data.gif_url);
+        }
       }
     }
   }
@@ -766,6 +806,7 @@ export function Generator() {
         language?: unknown;
         include_audio?: unknown;
         include_subtitles?: unknown;
+        length_preset?: unknown;
       };
       if (typeof s.tts_voice === "string") setTtsVoice(s.tts_voice);
       if (typeof s.language === "string") setLanguage(s.language);
@@ -773,8 +814,18 @@ export function Generator() {
       if (typeof s.include_subtitles === "boolean") {
         setIncludeSubtitles(s.include_subtitles);
       }
+      if (
+        s.length_preset === "clip" ||
+        s.length_preset === "short" ||
+        s.length_preset === "standard" ||
+        s.length_preset === "deep"
+      ) {
+        setLengthPreset(s.length_preset);
+      }
     }
     if (job.final_video_url) setFinalVideoUrl(job.final_video_url);
+    if (job.gif_url) setFinalGifUrl(job.gif_url);
+    else if (job.urls?.final_gif) setFinalGifUrl(job.urls.final_gif);
     if (job.final_debug && typeof job.final_debug.notes === "string") {
       setFinalNotes(job.final_debug.notes);
     }
@@ -969,6 +1020,7 @@ export function Generator() {
     setScenes([]);
     setFinalNotes(null);
     setFinalVideoUrl(null);
+    setFinalGifUrl(null);
     setJobId(null);
     setStoredActiveJobId(null);
     setError(null);
@@ -1021,7 +1073,9 @@ export function Generator() {
   }
 
   async function onGenerate() {
-    if (!prompt.trim() || running || restoring) return;
+    const sourceIds = readySourceIds(attachments);
+    if ((!prompt.trim() && sourceIds.length === 0) || running || restoring) return;
+    if (attachments.some((item) => item.status === "uploading")) return;
     if (!signedIn) {
       window.location.href = "/login";
       return;
@@ -1038,6 +1092,7 @@ export function Generator() {
     setScenes([]);
     setFinalNotes(null);
     setFinalVideoUrl(null);
+    setFinalGifUrl(null);
     setJobId(null);
     setLiveMessage("Planning storyboard…");
     setLatestCode(null);
@@ -1053,13 +1108,11 @@ export function Generator() {
       await streamGenerate(
         {
           prompt: prompt.trim(),
+          source_doc_ids: sourceIds,
           length_preset: lengthPreset,
           scene_pacing: scenePacing,
           audience,
           language,
-          tts_voice: ttsVoice,
-          include_audio: includeAudio,
-          include_subtitles: includeSubtitles,
           plan_only: true,
           skip_render: false,
         },
@@ -1322,8 +1375,13 @@ export function Generator() {
               onFocus={() => setPromptFocused(true)}
               onBlur={() => setPromptFocused(false)}
               rows={4}
-              placeholder="What should click? Describe the concept you want animated…"
+              placeholder="What should click? Describe the concept — or attach notes and leave this blank."
               className="mt-10 w-full resize-none rounded-2xl border border-[var(--line)] bg-[var(--surface)] px-5 py-4 text-lg leading-relaxed text-[var(--ink)] outline-none transition focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--glow)] placeholder:text-[var(--ink-muted)]"
+              disabled={running}
+            />
+            <SourceAttachments
+              items={attachments}
+              onChange={setAttachments}
               disabled={running}
             />
 
@@ -1332,16 +1390,18 @@ export function Generator() {
                 label="Length"
                 value={lengthPreset}
                 options={LENGTH_OPTIONS}
-                onChange={setLengthPreset}
+                onChange={onLengthPresetChange}
                 disabled={running}
               />
-              <SegmentedControl
-                label="Scenes"
-                value={scenePacing}
-                options={SCENE_PACING_OPTIONS}
-                onChange={setScenePacing}
-                disabled={running}
-              />
+              {lengthPreset !== "clip" && (
+                <SegmentedControl
+                  label="Scenes"
+                  value={scenePacing}
+                  options={SCENE_PACING_OPTIONS}
+                  onChange={setScenePacing}
+                  disabled={running}
+                />
+              )}
               <SegmentedControl
                 label="Audience"
                 value={audience}
@@ -1365,61 +1425,6 @@ export function Generator() {
                     </option>
                   ))}
                 </select>
-              </label>
-              <label className="flex min-w-[10rem] flex-col gap-1.5">
-                <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
-                  Narrator
-                </span>
-                <div className="flex items-center gap-2">
-                  <select
-                    value={ttsVoice}
-                    onChange={(e) => setTtsVoice(e.target.value)}
-                    disabled={running || !includeAudio}
-                    className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {ttsVoices.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.label}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    title="Test Voice"
-                    disabled={running || !includeAudio || isPlayingPreview}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      playVoicePreview(ttsVoice);
-                    }}
-                    className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
-                  >
-                    {isPlayingPreview ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
-                    ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    )}
-                  </button>
-                </div>
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink-muted)]">
-                <input
-                  type="checkbox"
-                  checked={includeAudio}
-                  onChange={(e) => setIncludeAudio(e.target.checked)}
-                  disabled={running}
-                  className="rounded border-[var(--line)]"
-                />
-                Audio
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink-muted)]">
-                <input
-                  type="checkbox"
-                  checked={includeSubtitles}
-                  onChange={(e) => setIncludeSubtitles(e.target.checked)}
-                  disabled={running}
-                  className="rounded border-[var(--line)]"
-                />
-                Subtitles
               </label>
             </div>
 
@@ -1447,12 +1452,21 @@ export function Generator() {
             <div className="mt-8 flex flex-wrap items-center gap-4">
               <button
                 type="button"
-                disabled={running || !prompt.trim()}
+                disabled={
+                  running ||
+                  attachments.some((item) => item.status === "uploading") ||
+                  (!prompt.trim() && readySourceIds(attachments).length === 0)
+                }
                 onClick={onGenerate}
                 className="rounded-full bg-[var(--accent)] px-8 py-3 text-base font-semibold text-[var(--on-accent)] transition enabled:hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Plan storyboard
               </button>
+              <p className="text-sm text-[var(--ink-muted)]">
+                {lengthPreset === "clip"
+                  ? "One idea, one motion, ~12 seconds. Exports as a looping GIF. Audio stays off unless you turn it on after the plan."
+                  : "Voice, spoken audio, and subtitles come after you review the plan."}
+              </p>
             </div>
 
             <details className="mt-10 group">
@@ -1479,7 +1493,9 @@ export function Generator() {
                   Edit the plan
                 </h2>
                 <p className="mt-2 max-w-xl text-sm text-[var(--ink-muted)]">
-                  Tweak narration and visuals, then confirm to render.
+                  {lengthPreset === "clip"
+                    ? "Keep this to one looping motion. Spoken audio is off by default — turn it on only if a short label needs a voice."
+                    : "Tweak narration and visuals, then choose spoken audio, subtitles, and voice before you confirm."}
                   {editingPlan.visual_identity
                     ? ` ${editingPlan.visual_identity}`
                     : ""}
@@ -1504,41 +1520,73 @@ export function Generator() {
               placeholder="Video title"
             />
 
-            <label className="mt-6 flex max-w-xs flex-col gap-1.5">
+            <div className="mt-6 rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-4">
               <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
-                Narrator voice
+                After the plan · audio &amp; subtitles
               </span>
-              <div className="flex items-center gap-2">
-                <select
-                  value={ttsVoice}
-                  onChange={(e) => setTtsVoice(e.target.value)}
-                  disabled={running}
-                  className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--surface-inset)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {ttsVoices.map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  title="Test Voice"
-                  disabled={running || isPlayingPreview}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    playVoicePreview(ttsVoice);
-                  }}
-                  className="flex h-[34px] w-[34px] items-center justify-center rounded-lg border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
-                >
-                  {isPlayingPreview ? (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
-                  ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                  )}
-                </button>
+              <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                {lengthPreset === "clip"
+                  ? "GIF clips usually stay silent so they loop cleanly. Turn audio on only if you want a short voiceover."
+                  : "These are applied when you generate — not while planning scenes."}
+              </p>
+              <div className="mt-3 flex flex-wrap items-end gap-4">
+                <label className="flex min-w-[12rem] flex-1 flex-col gap-1.5">
+                  <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
+                    Narrator voice
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={ttsVoice}
+                      onChange={(e) => setTtsVoice(e.target.value)}
+                      disabled={running || !includeAudio}
+                      className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none transition focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {ttsVoices.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.label}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      title="Test Voice"
+                      disabled={running || !includeAudio || isPlayingPreview}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        playVoicePreview(ttsVoice);
+                      }}
+                      className="flex h-[34px] w-[34px] items-center justify-center rounded-lg border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
+                    >
+                      {isPlayingPreview ? (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
+                      ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                      )}
+                    </button>
+                  </div>
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink)]">
+                  <input
+                    type="checkbox"
+                    checked={includeAudio}
+                    onChange={(e) => setIncludeAudio(e.target.checked)}
+                    disabled={running}
+                    className="rounded border-[var(--line)]"
+                  />
+                  Spoken audio
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm text-[var(--ink)]">
+                  <input
+                    type="checkbox"
+                    checked={includeSubtitles}
+                    onChange={(e) => setIncludeSubtitles(e.target.checked)}
+                    disabled={running}
+                    className="rounded border-[var(--line)]"
+                  />
+                  Subtitles
+                </label>
               </div>
-            </label>
+            </div>
 
             <div className="mt-6 rounded-xl border border-[var(--line)] bg-[var(--surface-inset)] p-4">
               <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
@@ -1877,13 +1925,53 @@ export function Generator() {
               </div>
             )}
 
-            {mode === "result" && finalVideoUrl && (
+            {mode === "result" && (finalVideoUrl || finalGifUrl) && (
               <div className="mt-8">
-                <AuthMedia
-                  src={finalVideoUrl}
-                  cacheBust={finalVideoVersion}
-                  className="w-full overflow-hidden rounded-2xl border border-[var(--line)]"
-                />
+                {finalVideoUrl &&
+                  (jobId ? (
+                    <>
+                      <p className="mb-2 text-sm text-[var(--ink-muted)]">
+                        {lengthPreset === "clip" || finalGifUrl
+                          ? "This clip loops. Mark a frame if you want the agent to retouch the motion."
+                          : "Mark a frame while watching, add a comment, and the agent can retouch that scene from the screenshot."}
+                      </p>
+                      <MarkedVideoPlayer
+                        jobId={jobId}
+                        src={finalVideoUrl}
+                        cacheBust={finalVideoVersion}
+                        timeline={timelineFromPreviews(scenes)}
+                        loop={lengthPreset === "clip" || Boolean(finalGifUrl)}
+                      />
+                    </>
+                  ) : (
+                    <AuthMedia
+                      src={finalVideoUrl}
+                      cacheBust={finalVideoVersion}
+                      loop={lengthPreset === "clip" || Boolean(finalGifUrl)}
+                      className="w-full overflow-hidden rounded-2xl border border-[var(--line)]"
+                    />
+                  ))}
+                {finalGifUrl && (
+                  <div className="mt-6">
+                    <p className="mb-2 text-sm text-[var(--ink-muted)]">
+                      Looping GIF · share this anywhere
+                    </p>
+                    <AuthMedia
+                      kind="image"
+                      src={finalGifUrl}
+                      alt="Looping GIF"
+                      cacheBust={finalVideoVersion}
+                      className="w-full max-w-md overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface-video)]"
+                    />
+                    <a
+                      href={assetUrl(finalGifUrl)}
+                      download
+                      className="mt-3 inline-block text-sm font-medium text-[var(--accent)] underline-offset-4 hover:underline"
+                    >
+                      Download GIF
+                    </a>
+                  </div>
+                )}
                 {jobId && (
                   <p className="mt-3 text-sm text-[var(--ink-muted)]">
                     Saved to your{" "}
@@ -2127,7 +2215,7 @@ export function Generator() {
             <p className="text-sm text-[var(--ink-muted)]">
               {revising
                 ? "Applying your storyboard changes…"
-                : `${editingPlan.scenes.length} scenes ready to render`}
+                : `${editingPlan.scenes.length} scenes · set audio & subtitles above`}
             </p>
             <div className="flex flex-wrap items-center gap-3">
               {running && (

@@ -12,6 +12,7 @@ export type JobSummary = {
   has_result?: boolean;
   has_final_video?: boolean;
   status?: string | null;
+  kind?: "video" | "document" | "podcast" | "quiz" | "interactive" | string;
 };
 
 export type HumanComment = {
@@ -20,8 +21,24 @@ export type HumanComment = {
   scene_id: string;
   comment: string;
   timestamp?: number | null;
+  global_timestamp?: number | null;
+  frame_url?: string | null;
+  scene_title?: string | null;
   author: string;
   created_at: string;
+};
+
+export type VideoTimelineEntry = {
+  scene_id: string;
+  title: string;
+  start: number;
+  duration: number;
+  end: number;
+};
+
+export type VideoMarksPayload = {
+  marks: HumanComment[];
+  timeline: VideoTimelineEntry[];
 };
 
 export type JobRuntimeStatus = {
@@ -48,6 +65,7 @@ export type JobDetail = {
   final_debug?: Record<string, unknown> | null;
   result?: Record<string, unknown> | null;
   final_video_url?: string | null;
+  gif_url?: string | null;
   scenes: Array<{
     scene_id: string;
     section?: Record<string, unknown>;
@@ -60,6 +78,8 @@ export type JobDetail = {
   events?: Array<Record<string, unknown>>;
   urls?: Record<string, string>;
   runtime?: JobRuntimeStatus;
+  timeline?: VideoTimelineEntry[];
+  video_marks?: HumanComment[];
 };
 
 const ACTIVE_JOB_KEY = "nowigetit:activeJobId";
@@ -231,16 +251,61 @@ export async function addSceneComment(
   sceneId: string,
   comment: string,
   timestamp?: number,
+  extras?: {
+    globalTimestamp?: number;
+    frameBase64?: string;
+  },
 ): Promise<HumanComment> {
   const res = await fetch(
     `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/comments`,
     {
       method: "POST",
       headers: await authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ comment, timestamp }),
+      body: JSON.stringify({
+        comment,
+        timestamp,
+        global_timestamp: extras?.globalTimestamp,
+        frame_base64: extras?.frameBase64,
+      }),
     },
   );
   if (!res.ok) throw new Error("Failed to post comment");
+  return res.json();
+}
+
+export async function fetchVideoMarks(jobId: string): Promise<VideoMarksPayload> {
+  const res = await fetch(`${apiBase()}/api/jobs/${jobId}/marks`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to load video marks");
+  return res.json();
+}
+
+export async function addVideoMark(
+  jobId: string,
+  comment: string,
+  extras: {
+    globalTimestamp?: number;
+    timestamp?: number;
+    sceneId?: string;
+    frameBase64?: string;
+  },
+): Promise<HumanComment> {
+  const res = await fetch(`${apiBase()}/api/jobs/${jobId}/marks`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      comment,
+      global_timestamp: extras.globalTimestamp,
+      timestamp: extras.timestamp,
+      scene_id: extras.sceneId,
+      frame_base64: extras.frameBase64,
+    }),
+  });
+  if (!res.ok) {
+    throw await readError(res, "Failed to save video mark");
+  }
   return res.json();
 }
 
@@ -251,6 +316,7 @@ export async function streamRetouch(
   timestamp: number | undefined,
   onEvent: (event: PipelineEvent) => void,
   signal?: AbortSignal,
+  commentId?: string,
 ): Promise<void> {
   const res = await fetch(
     `${apiBase()}/api/jobs/${jobId}/scenes/${sceneId}/retouch/stream`,
@@ -260,7 +326,7 @@ export async function streamRetouch(
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       }),
-      body: JSON.stringify({ comment, timestamp }),
+      body: JSON.stringify({ comment, timestamp, comment_id: commentId }),
       signal,
       cache: "no-store",
     },
@@ -326,7 +392,7 @@ export type LanguageOption = {
   native_label: string;
 };
 
-export type LengthPreset = "short" | "standard" | "deep";
+export type LengthPreset = "clip" | "short" | "standard" | "deep";
 /** Many short scenes vs fewer longer ones (total video length unchanged). */
 export type ScenePacing = "short" | "balanced" | "long";
 export type Audience = "hs" | "undergrad" | "general";
@@ -560,6 +626,7 @@ export type ScenePlanDraft = {
 
 export type GenerateOptions = {
   prompt: string;
+  source_doc_ids?: string[];
   resolution?: "480p" | "720p" | "1080p";
   skip_render?: boolean;
   length_preset?: LengthPreset;
@@ -641,16 +708,21 @@ export async function streamGenerate(
       }),
       body: JSON.stringify({
         prompt: opts.prompt,
+        source_doc_ids: opts.source_doc_ids ?? [],
         skip_render: opts.skip_render ?? false,
         resolution: opts.resolution ?? "720p",
         length_preset: opts.length_preset ?? "standard",
         scene_pacing: opts.scene_pacing ?? "balanced",
         audience: opts.audience ?? "general",
         language: opts.language ?? "en",
-        tts_voice: opts.tts_voice ?? "Kore",
-        include_audio: opts.include_audio ?? true,
-        include_subtitles: opts.include_subtitles ?? true,
         plan_only: opts.plan_only ?? true,
+        ...(opts.plan_only ?? true
+          ? {}
+          : {
+              tts_voice: opts.tts_voice ?? "Kore",
+              include_audio: opts.include_audio ?? true,
+              include_subtitles: opts.include_subtitles ?? true,
+            }),
       }),
       signal,
       cache: "no-store",
@@ -1155,5 +1227,302 @@ export async function applySceneEdits(
   if (!res.ok) {
     throw await readError(res, `Apply edits failed (${res.status})`);
   }
+  return res.json();
+}
+
+export type LearnKind = "podcast" | "quiz" | "interactive";
+
+export type LearnGenerateOptions = {
+  kind: LearnKind;
+  prompt: string;
+  source_doc_ids?: string[];
+  audience?: Audience;
+  language?: string;
+  length_preset?: LengthPreset;
+  tts_voice?: string;
+  partner_voice?: string;
+  style?: "dialogue" | "solo";
+  question_count?: number;
+  difficulty?: "easy" | "medium" | "hard" | "mixed";
+};
+
+export type PodcastLine = { speaker: "host" | "guide"; text: string };
+export type PodcastChapter = {
+  id: string;
+  title: string;
+  covers_step?: string;
+  summary?: string;
+  lines: PodcastLine[];
+  duration_seconds: number;
+  start_seconds: number;
+};
+export type PodcastScript = {
+  title: string;
+  tagline?: string;
+  style: "dialogue" | "solo";
+  host_name?: string;
+  guide_name?: string;
+  chapters: PodcastChapter[];
+  takeaways: string[];
+};
+export type QuizChoice = { id: string; text: string };
+export type QuizQuestion = {
+  id: string;
+  type: "multiple_choice" | "true_false" | "numeric" | "short_answer";
+  prompt: string;
+  choices: QuizChoice[];
+  correct: string;
+  numeric_tolerance?: number;
+  explanation: string;
+  hint: string;
+  covers_step?: string;
+  difficulty?: string;
+  why_it_matters?: string;
+};
+export type QuizPaper = {
+  title: string;
+  intro: string;
+  questions: QuizQuestion[];
+  pass_score: number;
+};
+export type LabParameter = {
+  id: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+  unit: string;
+  description: string;
+};
+export type LabReadout = {
+  id: string;
+  label: string;
+  expr: string;
+  unit: string;
+  precision: number;
+};
+export type LabVisual = {
+  kind:
+    | "function_plot"
+    | "projectile"
+    | "wave"
+    | "compound_growth"
+    | "unit_circle"
+    | "spring"
+    | "vector_2d"
+    | "slope_line"
+    | "geometry";
+  title?: string;
+  x_label?: string;
+  y_label?: string;
+  x_min: number;
+  x_max: number;
+  y_min?: number | null;
+  y_max?: number | null;
+  expr?: string;
+  animate?: boolean;
+  points?: Array<{ id: string; x: string; y: string; label?: string }>;
+  segments?: string[][];
+  fills?: string[][];
+  target_x?: number | null;
+  target_y?: number | null;
+  target_radius?: number;
+};
+export type LabGoal = {
+  type: "observe" | "change_param" | "quiz" | "target" | "acknowledge";
+  param?: string;
+  min_delta?: number;
+  readout?: string;
+  value?: number;
+  tolerance?: number;
+  quiz?: {
+    prompt: string;
+    choices: QuizChoice[];
+    correct: string;
+    explanation: string;
+  } | null;
+};
+export type LabPhase = {
+  id: string;
+  kind:
+    | "orient"
+    | "explore"
+    | "predict"
+    | "test"
+    | "challenge"
+    | "check"
+    | "reflect";
+  title: string;
+  coach: string;
+  locked_params: string[];
+  suggested_params?: Record<string, number>;
+  goal: LabGoal;
+  hint: string;
+  success: string;
+};
+export type InteractiveLesson = {
+  title: string;
+  tagline?: string;
+  core_question?: string;
+  payoff?: string;
+  running_example?: string;
+  visual: LabVisual;
+  parameters: LabParameter[];
+  readouts: LabReadout[];
+  phases: LabPhase[];
+  misconceptions?: string[];
+};
+
+export type LearnItemDetail = {
+  id: string;
+  kind: LearnKind | string;
+  title: string;
+  status: string;
+  payload: Record<string, unknown>;
+  progress?: Record<string, unknown>;
+  urls?: Record<string, string>;
+};
+
+export type ExtractedSource = {
+  id: string;
+  title: string;
+  filename: string;
+  char_count: number;
+  preview?: string;
+  kind: "source" | "document";
+};
+
+export type SourceLibraryItem = {
+  id: string;
+  title: string;
+  filename: string;
+  kind: "source" | "document";
+  created_at?: string | null;
+  status?: string;
+};
+
+export async function extractSourceFile(file: File): Promise<ExtractedSource> {
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    const res = await fetch(`${apiBase()}/api/source/extract`, {
+      method: "POST",
+      headers: await authHeaders(),
+      body: form,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw await readError(res, `Could not read ${file.name}`);
+    }
+    return res.json();
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Read file");
+  }
+}
+
+export async function listSourceLibrary(limit = 30): Promise<SourceLibraryItem[]> {
+  const res = await fetch(`${apiBase()}/api/source/library?limit=${limit}`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Failed to list attached files");
+  const data = (await res.json()) as { items: SourceLibraryItem[] };
+  return data.items || [];
+}
+
+export async function streamLearnGenerate(
+  options: LearnGenerateOptions,
+  onEvent: (event: PipelineEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    const res = await fetch(`${apiBase()}/api/learn/generate/stream`, {
+      method: "POST",
+      headers: await authHeaders({
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      }),
+      body: JSON.stringify(options),
+      signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `Learn generate failed (${res.status})`);
+    }
+    await readSseStream(res, onEvent);
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Learn generate");
+  }
+}
+
+export async function fetchLearnItem(itemId: string): Promise<LearnItemDetail> {
+  const res = await fetch(`${apiBase()}/api/learn/${encodeURIComponent(itemId)}`, {
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) throw await readError(res, `Learn item not found: ${itemId}`);
+  return res.json();
+}
+
+export async function gradeQuiz(
+  itemId: string,
+  answers: Array<{ question_id: string; answer: string | number | boolean | null }>,
+): Promise<{
+  id: string;
+  score: number;
+  correct_count: number;
+  total: number;
+  passed: boolean;
+  questions: Array<{
+    question_id: string;
+    correct: boolean;
+    expected: string;
+    explanation: string;
+    hint: string;
+  }>;
+}> {
+  const res = await fetch(
+    `${apiBase()}/api/learn/${encodeURIComponent(itemId)}/grade`,
+    {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ answers }),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) throw await readError(res, "Grade failed");
+  return res.json();
+}
+
+export async function submitLabProgress(
+  itemId: string,
+  body: {
+    phase_id: string;
+    params: Record<string, number>;
+    answers: Record<string, string>;
+    completed_phases: string[];
+  },
+): Promise<{
+  id: string;
+  phase_id: string;
+  goal_met: boolean;
+  message: string;
+  readouts: Record<string, number>;
+  completed_phases: string[];
+}> {
+  const res = await fetch(
+    `${apiBase()}/api/learn/${encodeURIComponent(itemId)}/progress`,
+    {
+      method: "POST",
+      headers: await authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) throw await readError(res, "Progress failed");
   return res.json();
 }

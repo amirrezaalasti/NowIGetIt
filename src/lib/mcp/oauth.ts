@@ -85,7 +85,8 @@ export function authorizationServerMetadata(origin: string) {
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
-    token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
+    token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"],
+    client_id_metadata_document_supported: true,
     scopes_supported: [MCP_OAUTH_SCOPE],
     authorization_response_iss_parameter_supported: true,
   };
@@ -131,12 +132,94 @@ export function isAllowedRedirectUri(uri: string): boolean {
     ]);
     if (exact.has(host)) return true;
     if (host.endsWith(".claude.ai")) return true;
+    if (host.endsWith(".claude.com")) return true;
     if (host.endsWith(".chatgpt.com")) return true;
     if (host.endsWith(".openai.com")) return true;
     if (host.endsWith(".cursor.sh")) return true;
+    if (host.endsWith(".anthropic.com")) return true;
     return false;
   }
   return ["cursor:", "vscode:", "vscode-insiders:"].includes(protocol);
+}
+
+export function resourcesMatch(a: string, b: string): boolean {
+  return a.replace(/\/$/, "") === b.replace(/\/$/, "");
+}
+
+/** HTTPS URL with a path — ChatGPT Apps send this as `client_id` (CIMD). */
+export function isCimdClientId(clientId: string): boolean {
+  try {
+    const url = new URL(clientId);
+    return url.protocol === "https:" && url.pathname.length > 1 && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+function isBlockedCimdHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host || host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host === "127.0.0.1" || host === "0.0.0.0" || host === "::1") return true;
+  if (host.endsWith(".local") || host.endsWith(".internal") || host === "metadata.google.internal") {
+    return true;
+  }
+  if (host.startsWith("169.254.")) return true;
+  if (/^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
+    return true;
+  }
+  return false;
+}
+
+function isAllowedCimdHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  const exact = new Set([
+    "chatgpt.com",
+    "openai.com",
+    "chat.openai.com",
+    "platform.openai.com",
+    "claude.ai",
+    "www.claude.ai",
+    "claude.com",
+    "vscode.dev",
+  ]);
+  if (exact.has(host)) return true;
+  return (
+    host.endsWith(".chatgpt.com") ||
+    host.endsWith(".openai.com") ||
+    host.endsWith(".claude.ai") ||
+    host.endsWith(".claude.com") ||
+    host.endsWith(".cursor.sh") ||
+    host.endsWith(".anthropic.com")
+  );
+}
+
+const CIMD_TIMEOUT_MS = 5000;
+const CIMD_MAX_BYTES = 64 * 1024;
+const cimdCache = new Map<string, { client: OauthClient; expires: number }>();
+
+export function clientAuthFrom(
+  req: Request,
+  form: URLSearchParams,
+): { clientId: string; clientSecret: string } {
+  const header = req.headers.get("authorization") || "";
+  if (header.toLowerCase().startsWith("basic ")) {
+    try {
+      const decoded = Buffer.from(header.slice(6).trim(), "base64").toString("utf8");
+      const colon = decoded.indexOf(":");
+      if (colon >= 0) {
+        return {
+          clientId: decodeURIComponent(decoded.slice(0, colon)),
+          clientSecret: decodeURIComponent(decoded.slice(colon + 1)),
+        };
+      }
+    } catch {
+      /* fall through to body */
+    }
+  }
+  return {
+    clientId: form.get("client_id") || "",
+    clientSecret: form.get("client_secret") || "",
+  };
 }
 
 export function s256(verifier: string): string {
@@ -201,7 +284,63 @@ export async function registerClient(input: {
   };
 }
 
+async function loadCimdClient(clientId: string): Promise<OauthClient | null> {
+  const cached = cimdCache.get(clientId);
+  if (cached && cached.expires > Date.now()) return cached.client;
+
+  let url: URL;
+  try {
+    url = new URL(clientId);
+  } catch {
+    return null;
+  }
+  if (isBlockedCimdHost(url.hostname) || !isAllowedCimdHost(url.hostname)) return null;
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), CIMD_TIMEOUT_MS);
+  try {
+    const res = await fetch(clientId, {
+      method: "GET",
+      redirect: "error",
+      headers: { Accept: "application/json" },
+      signal: ac.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const declaredLength = Number(res.headers.get("content-length") || "0");
+    if (declaredLength > CIMD_MAX_BYTES) return null;
+    const text = await res.text();
+    if (text.length > CIMD_MAX_BYTES) return null;
+    const meta = JSON.parse(text) as Record<string, unknown>;
+    if (meta.client_id !== clientId) return null;
+    const redirect_uris = Array.isArray(meta.redirect_uris)
+      ? meta.redirect_uris.filter(
+          (item): item is string => typeof item === "string" && isAllowedRedirectUri(item),
+        )
+      : [];
+    if (!redirect_uris.length) return null;
+    const method =
+      meta.token_endpoint_auth_method === "client_secret_post" ? "client_secret_post" : "none";
+    const client: OauthClient = {
+      client_id: clientId,
+      client_name:
+        typeof meta.client_name === "string" ? meta.client_name.slice(0, 80) : "MCP client",
+      redirect_uris,
+      token_endpoint_auth_method: method,
+    };
+    const maxAge = res.headers.get("cache-control")?.match(/max-age=(\d+)/);
+    const ttl = maxAge ? Math.min(Number(maxAge[1]) * 1000, 60 * 60 * 1000) : 5 * 60 * 1000;
+    cimdCache.set(clientId, { client, expires: Date.now() + Math.max(ttl, 30_000) });
+    return client;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function loadClient(clientId: string): Promise<OauthClient | null> {
+  if (isCimdClientId(clientId)) return loadCimdClient(clientId);
   try {
     const payload = await read(clientId);
     if (payload.typ !== CLIENT_TYP) return null;
@@ -319,7 +458,7 @@ export async function verifyAccessToken(
     const payload = await read(token);
     if (payload.typ !== ACCESS_TYP || typeof payload.sub !== "string") return null;
     const resource = typeof payload.resource === "string" ? payload.resource : "";
-    if (resource && resource !== expectedResource) return null;
+    if (resource && !resourcesMatch(resource, expectedResource)) return null;
     return {
       sub: payload.sub,
       email: typeof payload.email === "string" ? payload.email : null,

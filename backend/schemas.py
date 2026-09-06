@@ -18,12 +18,13 @@ from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
 
 
 class GenerateRequest(BaseModel):
-    prompt: str = Field(..., min_length=3, max_length=32000)
+    prompt: str = Field(default="", max_length=32000)
+    source_doc_ids: list[str] = Field(default_factory=list, max_length=6)
     resolution: str = Field(default="720p", pattern="^(480p|720p|1080p)$")
     skip_render: bool = False
-    # short ≈ 60s intuition · standard ≈ 90s · deep ≈ 3 min
+    # clip ≈ 12s looping GIF · short ≈ 60s · standard ≈ 90s · deep ≈ 3 min
     length_preset: str = Field(
-        default="standard", pattern="^(short|standard|deep)$"
+        default="standard", pattern="^(clip|short|standard|deep)$"
     )
     # short = many quick scenes · balanced = default · long = fewer deeper scenes
     scene_pacing: str = Field(
@@ -55,6 +56,27 @@ class GenerateRequest(BaseModel):
     @classmethod
     def _normalize_language(cls, value: str) -> str:
         return normalize_language(value)
+
+    @field_validator("source_doc_ids")
+    @classmethod
+    def _source_ids(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in value or []:
+            item_id = str(raw or "").strip()
+            if not item_id or item_id in seen:
+                continue
+            seen.add(item_id)
+            cleaned.append(item_id)
+            if len(cleaned) >= 6:
+                break
+        return cleaned
+
+    @model_validator(mode="after")
+    def _prompt_or_source(self) -> "GenerateRequest":
+        if not (self.prompt or "").strip() and not self.source_doc_ids:
+            raise ValueError("Provide a prompt or attach a file")
+        return self
 
 
 class ContinueRequest(BaseModel):
@@ -273,6 +295,37 @@ class UpdatePlanRequest(BaseModel):
     plan: ScenePlan
 
 
+class JobSettingsRequest(BaseModel):
+    tts_voice: Optional[str] = Field(default=None, max_length=64)
+    language: Optional[str] = Field(default=None, max_length=16)
+    include_audio: Optional[bool] = None
+    include_subtitles: Optional[bool] = None
+
+    @field_validator("tts_voice")
+    @classmethod
+    def _normalize_voice(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        return normalize_tts_voice(value)
+
+    @field_validator("language")
+    @classmethod
+    def _normalize_language(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not str(value).strip():
+            return None
+        return normalize_language(value)
+
+
+class PatchSceneRequest(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=200)
+    narration: Optional[str] = Field(default=None, max_length=8000)
+    visual_description: Optional[str] = Field(default=None, max_length=4000)
+    duration_seconds: Optional[float] = Field(default=None, ge=2.0, le=120.0)
+    visual_device: Optional[str] = Field(default=None, max_length=200)
+    camera_notes: Optional[str] = Field(default=None, max_length=2000)
+    beats: Optional[list[AnimationBeat]] = None
+
+
 class SubmitSceneCodeRequest(BaseModel):
     code: str = Field(..., min_length=40, max_length=120_000)
 
@@ -308,7 +361,23 @@ class VlmReview(BaseModel):
 class SceneCommentRequest(BaseModel):
     comment: str = Field(..., min_length=1, max_length=2000)
     timestamp: Optional[float] = Field(default=None, ge=0.0)
+    global_timestamp: Optional[float] = Field(default=None, ge=0.0)
+    frame_base64: Optional[str] = Field(default=None, max_length=2_000_000)
+    comment_id: Optional[str] = Field(
+        default=None,
+        description="When retouching, load the marked-frame screenshot saved with this comment.",
+    )
     author: str = "Human Reviewer"
+
+
+class VideoMarkRequest(BaseModel):
+    """Mark the current frame of the stitched video (or a single scene clip)."""
+
+    comment: str = Field(..., min_length=1, max_length=2000)
+    global_timestamp: Optional[float] = Field(default=None, ge=0.0)
+    timestamp: Optional[float] = Field(default=None, ge=0.0)
+    scene_id: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    frame_base64: Optional[str] = Field(default=None, max_length=2_000_000)
 
 
 class SceneComment(BaseModel):
@@ -317,6 +386,9 @@ class SceneComment(BaseModel):
     scene_id: str
     comment: str
     timestamp: Optional[float] = None
+    global_timestamp: Optional[float] = None
+    frame_url: Optional[str] = None
+    scene_title: Optional[str] = None
     author: str
     created_at: str
 
@@ -368,6 +440,7 @@ class GenerateResult(BaseModel):
     final_debug_notes: str = ""
     final_video_path: Optional[str] = None
     final_video_url: Optional[str] = None
+    gif_url: Optional[str] = None
     render_enabled: bool = False
     job_id: str = ""
     artifact_url: Optional[str] = None

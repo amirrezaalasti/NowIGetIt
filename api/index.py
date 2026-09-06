@@ -34,9 +34,13 @@ from backend.pipeline.orchestrator import (
     iter_retouch_scene,
     job_codegen_spec,
     job_is_host_authored,
+    patch_scene_section,
+    prepare_production_options,
+    ProductionOptionsRequired,
     revise_scene_plan,
     run_pipeline,
     submit_host_scene_code,
+    update_job_settings,
     update_scene_plan,
 )
 from backend.pipeline.planner import planning_spec_payload
@@ -55,11 +59,26 @@ from backend.documents.schemas import (
     DocumentAskResult,
     DocumentCommentRequest,
 )
+from backend.documents.source import extract_upload, list_library_sources
+from backend.learn.pipeline import (
+    check_lab_progress,
+    grade_quiz_item,
+    iter_learn_events,
+    load_item as load_learn_item,
+    run_learn,
+)
+from backend.learn.schemas import (
+    LabProgressRequest,
+    LearnGenerateRequest,
+    QuizGradeRequest,
+)
 from backend.schemas import (
     ContinueRequest,
     GenerateRequest,
     GenerateResult,
+    JobSettingsRequest,
     OpenRouterKeyRequest,
+    PatchSceneRequest,
     RegenerateSceneRequest,
     RevisePlanRequest,
     SceneComment,
@@ -67,6 +86,7 @@ from backend.schemas import (
     StorageModeRequest,
     SubmitSceneCodeRequest,
     UpdatePlanRequest,
+    VideoMarkRequest,
 )
 
 
@@ -492,6 +512,55 @@ def put_scene_plan(
     return {"ok": True, "job_id": job_id, "plan": plan.model_dump()}
 
 
+@app.patch("/api/jobs/{job_id}/scenes/{scene_id}")
+def patch_scene(
+    job_id: str, scene_id: str, body: PatchSceneRequest, user: CurrentUser
+) -> dict:
+    """Edit one scene's title, narration, beats, or visuals without rewriting the plan."""
+    _require_job_owner(job_id, user.id)
+    try:
+        plan = patch_scene_section(
+            job_id,
+            scene_id,
+            title=body.title,
+            narration=body.narration,
+            visual_description=body.visual_description,
+            duration_seconds=body.duration_seconds,
+            visual_device=body.visual_device,
+            camera_notes=body.camera_notes,
+            beats=(
+                [beat.model_dump() for beat in body.beats]
+                if body.beats is not None
+                else None
+            ),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "job_id": job_id, "plan": plan.model_dump()}
+
+
+@app.put("/api/jobs/{job_id}/settings")
+def put_job_settings(
+    job_id: str, body: JobSettingsRequest, user: CurrentUser
+) -> dict:
+    """Change narrator voice, language, audio, or subtitles after the storyboard."""
+    _require_job_owner(job_id, user.id)
+    try:
+        store.load_job(job_id, user_id=user.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+    settings = update_job_settings(
+        job_id,
+        tts_voice=body.tts_voice,
+        language=body.language,
+        include_audio=body.include_audio,
+        include_subtitles=body.include_subtitles,
+    )
+    return {"ok": True, **settings}
+
+
 @app.get("/api/video/planning-spec")
 def video_planning_spec(_user: CurrentUser) -> dict:
     """Constraints + ScenePlan schema for host-authored MCP storyboards."""
@@ -506,6 +575,8 @@ def scene_codegen_spec(job_id: str, scene_id: str, user: CurrentUser) -> dict:
         return job_codegen_spec(job_id, scene_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProductionOptionsRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -520,6 +591,8 @@ def put_scene_code(
         return submit_host_scene_code(job_id, scene_id, body.code)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProductionOptionsRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -580,6 +653,10 @@ async def continue_stream(
 ) -> StreamingResponse:
     """SSE: continue a plan_only job after the user confirms the storyboard."""
     _require_job_owner(job_id, user.id)
+    try:
+        prepare_production_options(job_id, body)
+    except ProductionOptionsRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     skip_quota = body.skip_codegen or job_is_host_authored(job_id)
     if not skip_quota:
         try:
@@ -650,6 +727,44 @@ def get_scene_comments(job_id: str, scene_id: str, user: CurrentUser) -> dict:
     return {"comments": store.get_scene_comments(job_id, scene_id)}
 
 
+@app.get("/api/jobs/{job_id}/marks")
+def get_video_marks(job_id: str, user: CurrentUser) -> dict:
+    _require_job_owner(job_id, user.id)
+    try:
+        store.load_job(job_id, user_id=user.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}") from exc
+    timeline = store.job_timeline(job_id)
+    return {
+        "marks": store.list_job_marks(job_id, timeline=timeline),
+        "timeline": timeline,
+    }
+
+
+@app.post("/api/jobs/{job_id}/marks", response_model=SceneComment)
+def add_video_mark(
+    job_id: str, body: VideoMarkRequest, user: CurrentUser
+) -> SceneComment:
+    """Mark the current video frame, attach a comment, and map it onto a scene."""
+    _require_job_owner(job_id, user.id)
+    author = user.name or user.email or "User"
+    try:
+        comment_data = store.add_video_mark(
+            job_id,
+            comment=body.comment,
+            author=author,
+            scene_id=body.scene_id,
+            timestamp=body.timestamp,
+            global_timestamp=body.global_timestamp,
+            frame_base64=body.frame_base64,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SceneComment(**comment_data)
+
+
 @app.post("/api/jobs/{job_id}/scenes/{scene_id}/comments", response_model=SceneComment)
 def add_scene_comment(
     job_id: str, scene_id: str, body: SceneCommentRequest, user: CurrentUser
@@ -662,6 +777,8 @@ def add_scene_comment(
         scene_id,
         comment=body.comment,
         timestamp=body.timestamp,
+        global_timestamp=body.global_timestamp,
+        frame_base64=body.frame_base64,
         author=author,
     )
     return SceneComment(**comment_data)
@@ -686,6 +803,7 @@ def retouch_scene_stream(
                 scene_id,
                 human_instructions=body.comment,
                 timestamp=body.timestamp,
+                comment_id=body.comment_id,
             ):
                 yield chunk
         except db.QuotaExceededError as exc:
@@ -1037,6 +1155,145 @@ async def upload_document_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/api/source/extract")
+async def extract_source_upload(
+    user: CurrentUser,
+    file: UploadFile = File(...),
+) -> dict:
+    """Extract plain text from an upload for video / Learn generation."""
+    filename = file.filename or "upload.bin"
+    try:
+        _prepare_user(user)
+        data = await file.read()
+        return await asyncio.to_thread(
+            extract_upload,
+            data,
+            filename=filename,
+            user_id=user.id,
+            user_email=user.email,
+            user_name=user.name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/source/library")
+def source_library(user: CurrentUser, limit: int = 30) -> dict:
+    _prepare_user(user)
+    return {"items": list_library_sources(user_id=user.id, limit=limit)}
+
+
+@app.post("/api/learn/generate")
+def learn_generate(request: LearnGenerateRequest, user: CurrentUser) -> dict:
+    settings = get_settings()
+    try:
+        _prepare_user(user)
+        db.reserve_generation(
+            user.id,
+            estimated_tokens=settings.default_llm_estimate_tokens,
+        )
+        return run_learn(
+            request,
+            user_id=user.id,
+            user_email=user.email,
+            user_name=user.name,
+        )
+    except db.QuotaExceededError as exc:
+        raise _quota_http(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/learn/generate/stream")
+def learn_generate_stream(
+    request: LearnGenerateRequest, user: CurrentUser
+) -> StreamingResponse:
+    settings = get_settings()
+    try:
+        _prepare_user(user)
+        db.reserve_generation(
+            user.id,
+            estimated_tokens=settings.default_llm_estimate_tokens,
+        )
+    except db.QuotaExceededError as exc:
+        raise _quota_http(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    def event_stream():
+        try:
+            for chunk in iter_learn_events(
+                request,
+                user_id=user.id,
+                user_email=user.email,
+                user_name=user.name,
+            ):
+                yield chunk
+        except db.QuotaExceededError as exc:
+            import json as _json
+
+            yield (
+                "data: "
+                + _json.dumps(
+                    {
+                        "type": "error",
+                        "message": exc.detail,
+                        "data": {"code": exc.code},
+                    }
+                )
+                + "\n\n"
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/learn/{item_id}")
+def get_learn_item(item_id: str, user: CurrentUser) -> dict:
+    _require_job_owner(item_id, user.id)
+    try:
+        return load_learn_item(item_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Not found: {item_id}") from exc
+
+
+@app.post("/api/learn/{item_id}/grade")
+def grade_learn_quiz(
+    item_id: str, body: QuizGradeRequest, user: CurrentUser
+) -> dict:
+    _require_job_owner(item_id, user.id)
+    try:
+        return grade_quiz_item(item_id, body).model_dump()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Not found: {item_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/learn/{item_id}/progress")
+def learn_lab_progress(
+    item_id: str, body: LabProgressRequest, user: CurrentUser
+) -> dict:
+    _require_job_owner(item_id, user.id)
+    try:
+        return check_lab_progress(item_id, body).model_dump()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Not found: {item_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post(

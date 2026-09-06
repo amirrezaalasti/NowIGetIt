@@ -24,9 +24,11 @@ from backend.code_utils import (
     validate_manim_code,
 )
 from backend.config import get_settings, settings_for_user
+from backend.documents.source import prepare_generation_prompt
 from backend.llm import OpenRouterClient
 from backend.pipeline.compose import (
     compose_final_video,
+    export_looping_gif,
     mux_scene_audio,
     probe_duration,
 )
@@ -34,10 +36,11 @@ from backend.pipeline.pedagogy import create_teaching_blueprint
 from backend.pipeline.planner import (
     AUDIENCE_GUIDANCE,
     create_scene_plan,
+    is_clip_preset,
     revise_scene_plan as _revise_plan_llm,
     scene_count_range,
 )
-from backend.pipeline.renderer import extract_review_frames, render_scene
+from backend.pipeline.renderer import extract_review_frames, preview_scene_frame, render_scene
 from backend.pipeline.scene_generator import (
     codegen_spec_payload,
     generate_scene_code,
@@ -77,6 +80,17 @@ EventCallback = Callable[[PipelineEvent], None]
 class JobCancelledError(Exception):
     """Raised when the user cancels an ongoing generation job."""
     pass
+
+
+class ProductionOptionsRequired(ValueError):
+    """Spoken audio / subtitles / voice must be chosen after the storyboard."""
+
+
+PRODUCTION_OPTIONS_REQUIRED_MSG = (
+    "Spoken audio, burned-in subtitles, and narrator voice are chosen after the "
+    "storyboard. Ask the user, then save with update_video_options "
+    "(PUT /api/jobs/{id}/settings) before writing Manim or rendering."
+)
 
 
 def _check_cancel(job_id: str) -> None:
@@ -341,6 +355,31 @@ def _persist_job_language(job_id: str, language: str) -> None:
         pass
 
 
+def _job_production_options_confirmed(job_id: str) -> bool:
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        settings = meta.get("settings") or {}
+        return bool(settings.get("production_options_confirmed"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _persist_production_options_confirmed(job_id: str, confirmed: bool) -> None:
+    try:
+        meta_path = store.job_dir(job_id) / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        settings = meta.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["production_options_confirmed"] = bool(confirmed)
+        meta["settings"] = settings
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _mux_scene_vo(
     video_path: str,
     audio_path: Optional[str],
@@ -382,11 +421,24 @@ def _job_length_preset(job_id: str, fallback: str = "standard") -> str:
         meta = store.load_job(job_id).get("meta") or {}
         settings = meta.get("settings") or {}
         preset = settings.get("length_preset")
-        if isinstance(preset, str) and preset in {"short", "standard", "deep"}:
+        if isinstance(preset, str) and preset in {"clip", "short", "standard", "deep"}:
             return preset
     except Exception:  # noqa: BLE001
         pass
     return fallback
+
+
+def _maybe_gif_url(job_id: str) -> Optional[str]:
+    if not is_clip_preset(_job_length_preset(job_id)):
+        return None
+    root = store.job_dir(job_id)
+    mp4 = root / "final.mp4"
+    if not mp4.exists():
+        return None
+    path = export_looping_gif(mp4, root / "final.gif")
+    if path:
+        return f"/api/jobs/{job_id}/file/final.gif"
+    return None
 
 
 def _job_scene_pacing(job_id: str, fallback: str = "balanced") -> str:
@@ -508,8 +560,100 @@ def update_scene_section(
     return plan
 
 
+def patch_scene_section(
+    job_id: str,
+    scene_id: str,
+    *,
+    title: Optional[str] = None,
+    narration: Optional[str] = None,
+    visual_description: Optional[str] = None,
+    duration_seconds: Optional[float] = None,
+    visual_device: Optional[str] = None,
+    camera_notes: Optional[str] = None,
+    beats: Optional[list[dict[str, Any]]] = None,
+) -> ScenePlan:
+    """Apply a partial edit to one scene; every other scene stays as-is."""
+    plan = _load_plan(job_id)
+    existing = next((s for s in plan.scenes if s.id == scene_id), None)
+    if existing is None:
+        raise ValueError(f"Scene {scene_id} not found")
+    data = existing.model_dump()
+    if title is not None:
+        data["title"] = title
+    if visual_description is not None:
+        data["visual_description"] = visual_description
+    if duration_seconds is not None:
+        data["duration_seconds"] = duration_seconds
+    if visual_device is not None:
+        data["visual_device"] = visual_device
+    if camera_notes is not None:
+        data["camera_notes"] = camera_notes
+    if beats is not None:
+        data["beats"] = beats
+    elif narration is not None:
+        data["narration"] = narration
+        data["animation_beats"] = existing.animation_beats
+        data.pop("beats", None)
+    section = SceneSection.model_validate(data)
+    return update_scene_section(job_id, scene_id, section)
+
+
+def update_job_settings(
+    job_id: str,
+    *,
+    tts_voice: Optional[str] = None,
+    language: Optional[str] = None,
+    include_audio: Optional[bool] = None,
+    include_subtitles: Optional[bool] = None,
+) -> dict[str, Any]:
+    """Persist narrator / language / mux flags on the job before render."""
+    if tts_voice is not None:
+        _persist_job_tts_voice(job_id, tts_voice)
+    if language is not None:
+        _persist_job_language(job_id, language)
+    if include_audio is not None:
+        _persist_job_include_audio(job_id, include_audio)
+    if include_subtitles is not None:
+        _persist_job_include_subtitles(job_id, include_subtitles)
+    if include_audio is not None and include_subtitles is not None:
+        _persist_production_options_confirmed(job_id, True)
+    confirmed = _job_production_options_confirmed(job_id)
+    return {
+        "job_id": job_id,
+        "tts_voice": _job_tts_voice(job_id),
+        "language": _job_language(job_id),
+        "include_audio": _job_include_audio(job_id),
+        "include_subtitles": _job_include_subtitles(job_id),
+        "production_options_confirmed": confirmed,
+    }
+
+
+def require_production_options(job_id: str) -> None:
+    if not _job_production_options_confirmed(job_id):
+        raise ProductionOptionsRequired(PRODUCTION_OPTIONS_REQUIRED_MSG)
+
+
+def prepare_production_options(
+    job_id: str, request: Optional[ContinueRequest] = None
+) -> None:
+    """Persist continue-body flags, then refuse if the user has not chosen yet."""
+    if request is not None:
+        if request.tts_voice:
+            _persist_job_tts_voice(job_id, request.tts_voice)
+        if request.language:
+            _persist_job_language(job_id, request.language)
+        if request.include_audio is not None:
+            _persist_job_include_audio(job_id, request.include_audio)
+        if request.include_subtitles is not None:
+            _persist_job_include_subtitles(job_id, request.include_subtitles)
+        if request.include_audio is not None and request.include_subtitles is not None:
+            _persist_production_options_confirmed(job_id, True)
+    require_production_options(job_id)
+
+
 def job_codegen_spec(job_id: str, scene_id: str) -> dict[str, Any]:
     """Prompt pack so a host LLM can write Manim for one scene (no OpenRouter)."""
+    require_production_options(job_id)
     plan = _load_plan(job_id)
     index = next((i for i, s in enumerate(plan.scenes) if s.id == scene_id), None)
     if index is None:
@@ -524,8 +668,52 @@ def job_codegen_spec(job_id: str, scene_id: str) -> dict[str, Any]:
     )
 
 
+def _preview_host_scene(job_id: str, scene_id: str, code: str) -> dict[str, Any]:
+    """Last-frame still + layout-guard notes. Never fails the code save."""
+    work = store.scene_dir(job_id, scene_id) / "_preview"
+    work.mkdir(parents=True, exist_ok=True)
+    frame_path: Optional[str] = None
+    log = ""
+    try:
+        frame_path, log = preview_scene_frame(
+            code, work_dir=work, scene_id=scene_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        log = str(exc)
+    layout_issues = parse_layout_report(log or "")
+    preview_path: Optional[str] = None
+    if frame_path and Path(frame_path).exists():
+        saved = store.save_vlm_review(
+            job_id,
+            scene_id,
+            revision=0,
+            review={
+                "approved": not layout_issues,
+                "issues": layout_issues[:8],
+                "clarity_score": None,
+                "notes": (
+                    "Last-frame preview for the host model. Describe this image "
+                    "to the user before writing the next scene."
+                ),
+                "review_mode": "host_preview",
+            },
+            frame_path=frame_path,
+            frame_source="host_preview",
+        )
+        preview_path = saved.get("frame_url")
+    shutil.rmtree(work, ignore_errors=True)
+    return {
+        "preview_path": preview_path,
+        "layout_issues": layout_issues,
+        "preview_error": None
+        if preview_path
+        else (log or "No preview frame")[-800:],
+    }
+
+
 def submit_host_scene_code(job_id: str, scene_id: str, code: str) -> dict[str, Any]:
-    """Validate and persist host-authored Manim for a scene."""
+    """Validate and persist host-authored Manim for a scene, then still-preview it."""
+    require_production_options(job_id)
     plan = _load_plan(job_id)
     scene = next((s for s in plan.scenes if s.id == scene_id), None)
     if scene is None:
@@ -536,6 +724,7 @@ def submit_host_scene_code(job_id: str, scene_id: str, code: str) -> dict[str, A
         raise ValueError(err)
     store.save_code(job_id, scene_id, cleaned, revision=0)
     warnings = lint_scene_code(cleaned, target_duration=float(scene.duration_seconds))
+    preview = _preview_host_scene(job_id, scene_id, cleaned)
     with_code = [s.id for s in plan.scenes if store.load_code(job_id, s.id)]
     missing = [s.id for s in plan.scenes if s.id not in with_code]
     return {
@@ -546,6 +735,9 @@ def submit_host_scene_code(job_id: str, scene_id: str, code: str) -> dict[str, A
         "scenes_with_code": with_code,
         "scenes_missing_code": missing,
         "ready_to_render": not missing,
+        "saved_count": len(with_code),
+        "total_scenes": len(plan.scenes),
+        **preview,
     }
 
 
@@ -1481,6 +1673,7 @@ def _compose_and_finish(
             store.job_dir(job_id) / "final.mp4",
         )
     final_url = f"/api/jobs/{job_id}/file/final.mp4" if final_path else None
+    gif_url = _maybe_gif_url(job_id) if final_path else None
 
     result = GenerateResult(
         title=plan.title,
@@ -1489,6 +1682,7 @@ def _compose_and_finish(
         final_debug_notes=notes,
         final_video_path=final_path,
         final_video_url=final_url,
+        gif_url=gif_url,
         render_enabled=settings.enable_manim_render and not skip_render,
         job_id=job_id,
         artifact_url=f"/api/jobs/{job_id}",
@@ -1532,6 +1726,7 @@ def _compose_and_finish(
             "job_id": job_id,
             "title": plan.title,
             "final_video_url": final_url,
+            "gif_url": gif_url,
             "artifact_url": result.artifact_url,
             "scene_count": len(artifacts),
             "scenes": [
@@ -1821,12 +2016,18 @@ def run_pipeline(
     """
     settings = settings_for_user(user_id)
     host_plan = request.scene_plan
+    teaching_prompt, display_prompt, source_names = prepare_generation_prompt(
+        request.prompt,
+        request.source_doc_ids,
+        user_id=user_id,
+    )
+    request = request.model_copy(update={"prompt": teaching_prompt})
     need_llm = host_plan is None or not request.plan_only
     client = OpenRouterClient(settings) if need_llm else None
     job_id = uuid.uuid4().hex[:12]
     work_dir = store.init_job(
         job_id,
-        prompt=request.prompt,
+        prompt=display_prompt,
         settings_snapshot={
             "model": settings.openrouter_model_manim,
             "vlm_model": settings.openrouter_vlm_model,
@@ -1840,11 +2041,20 @@ def run_pipeline(
             "scene_pacing": request.scene_pacing,
             "audience": request.audience,
             "language": request.language,
-            "tts_voice": request.tts_voice,
-            "include_audio": request.include_audio,
-            "include_subtitles": request.include_subtitles,
             "plan_only": request.plan_only,
+            "production_options_confirmed": not request.plan_only,
             "host_authored": host_plan is not None,
+            "source_doc_ids": list(request.source_doc_ids),
+            "source_filenames": source_names,
+            **(
+                {
+                    "tts_voice": request.tts_voice,
+                    "include_audio": request.include_audio,
+                    "include_subtitles": request.include_subtitles,
+                }
+                if not request.plan_only
+                else {}
+            ),
         },
         user_id=user_id,
         user_email=user_email,
@@ -1861,7 +2071,7 @@ def run_pipeline(
         db.upsert_job(
             job_id=job_id,
             user_id=user_id,
-            prompt=request.prompt,
+            prompt=display_prompt,
             status="running",
         )
 
@@ -1908,10 +2118,22 @@ def run_pipeline(
         min_scenes, max_scenes = scene_count_range(
             request.length_preset, request.scene_pacing
         )
+        if is_clip_preset(request.length_preset):
+            min_steps, max_steps = 2, max(2, max_scenes)
+            blueprint_prompt = (
+                request.prompt
+                + "\n\nFORMAT: this will be a looping ~12 second GIF clip "
+                "(1–2 scenes). Keep the teaching ladder to two short rungs. "
+                "One motion should make one idea obvious."
+            )
+        else:
+            min_steps = max(3, min_scenes)
+            max_steps = max(4, max_scenes)
+            blueprint_prompt = request.prompt
         try:
             blueprint = create_teaching_blueprint(
                 client,
-                request.prompt,
+                blueprint_prompt,
                 audience=request.audience,
                 audience_guidance=AUDIENCE_GUIDANCE.get(
                     request.audience, AUDIENCE_GUIDANCE["general"]
@@ -1920,8 +2142,8 @@ def run_pipeline(
                 # One step per scene is the target: the planner may merge two small
                 # steps or split a big one, but a blueprint far off the scene budget
                 # forces it into an awkward staging.
-                min_steps=max(3, min_scenes),
-                max_steps=max(4, max_scenes),
+                min_steps=min_steps,
+                max_steps=max_steps,
                 on_progress=_plan_progress,
             )
         except Exception as e:  # noqa: BLE001
@@ -1974,7 +2196,7 @@ def run_pipeline(
         db.upsert_job(
             job_id=job_id,
             user_id=user_id,
-            prompt=request.prompt,
+            prompt=display_prompt,
             title=plan.title,
             status="awaiting_plan" if request.plan_only else "running",
         )
@@ -1989,10 +2211,12 @@ def run_pipeline(
         "scene_pacing": request.scene_pacing,
         "audience": request.audience,
         "language": request.language,
-        "tts_voice": request.tts_voice,
-        "include_audio": request.include_audio,
-        "include_subtitles": request.include_subtitles,
+        "production_options_confirmed": not request.plan_only,
     }
+    if not request.plan_only:
+        plan_payload["tts_voice"] = request.tts_voice
+        plan_payload["include_audio"] = request.include_audio
+        plan_payload["include_subtitles"] = request.include_subtitles
     _emit(
         on_event,
         PipelineEventType.plan,
@@ -2058,6 +2282,7 @@ def continue_pipeline(
     meta = job.get("meta") or {}
     snap = meta.get("settings") if isinstance(meta, dict) else {}
     host_authored = bool(isinstance(snap, dict) and snap.get("host_authored"))
+    prepare_production_options(job_id, request)
     # MCP host already wrote the Manim. Never construct OpenRouter on that path,
     # even if the continue body omitted skip_codegen (FastAPI default body).
     skip_codegen = bool(request.skip_codegen or host_authored)
@@ -2074,14 +2299,6 @@ def continue_pipeline(
     plan = _load_plan(job_id)
     resolution = request.resolution or _job_resolution(job_id)
     skip_render = request.skip_render
-    if request.tts_voice:
-        _persist_job_tts_voice(job_id, request.tts_voice)
-    if request.language:
-        _persist_job_language(job_id, request.language)
-    if request.include_audio is not None:
-        _persist_job_include_audio(job_id, request.include_audio)
-    if request.include_subtitles is not None:
-        _persist_job_include_subtitles(job_id, request.include_subtitles)
     tts_voice = _job_tts_voice(job_id, fallback=request.tts_voice)
 
     if user_id:
@@ -2150,6 +2367,7 @@ def _recompose_final(
         if not muxed_clips:
             return None
         compose_final_video(muxed_clips, store.job_dir(job_id) / "final.mp4")
+    _maybe_gif_url(job_id)
     return f"/api/jobs/{job_id}/file/final.mp4"
 
 
@@ -2251,6 +2469,11 @@ def regenerate_scene(
         "video_url": video_url,
         "frame_url": artifact.vlm_frame_urls[-1] if artifact.vlm_frame_urls else None,
         "final_video_url": final_url,
+        "gif_url": (
+            f"/api/jobs/{job_id}/file/final.gif"
+            if (store.job_dir(job_id) / "final.gif").exists()
+            else None
+        ),
         "vlm_approved": artifact.vlm_approved,
         "title": scene.title,
     }
@@ -2269,6 +2492,7 @@ def retouch_scene(
     scene_id: str,
     human_instructions: str,
     timestamp: Optional[float] = None,
+    comment_id: Optional[str] = None,
     on_event: Optional[Any] = None,
 ) -> dict[str, Any]:
     """Retouch/revise ONLY a specific scene based on human feedback.
@@ -2282,6 +2506,7 @@ def retouch_scene(
             scene_id,
             human_instructions,
             timestamp=timestamp,
+            comment_id=comment_id,
             on_event=on_event,
         )
 
@@ -2292,6 +2517,7 @@ def _retouch_scene_locked(
     human_instructions: str,
     *,
     timestamp: Optional[float] = None,
+    comment_id: Optional[str] = None,
     on_event: Optional[Any] = None,
 ) -> dict[str, Any]:
     job_data = store.load_job(job_id)
@@ -2327,11 +2553,17 @@ def _retouch_scene_locked(
     )
 
     current_code = match_scene.get("code_final", "")
+    marked_frame = store.load_comment_frame_bytes(job_id, scene_id, comment_id)
     rev_instructions = human_instructions
     if timestamp is not None:
         rev_instructions = (
             f"[At timestamp {timestamp:.1f}s in the scene]: {human_instructions}. "
             "Adjust the animation beat closest to that moment."
+        )
+    if marked_frame:
+        rev_instructions += (
+            " The learner marked the attached screenshot — that is the exact "
+            "frame they want changed."
         )
 
     emit(
@@ -2347,6 +2579,8 @@ def _retouch_scene_locked(
         target_duration = probe_duration(audio_file) or target_duration
 
     language = _job_language(job_id)
+    image_bytes = marked_frame[0] if marked_frame else None
+    image_mime = marked_frame[1] if marked_frame else "image/jpeg"
     new_code = revise_scene_code(
         client,
         code=current_code,
@@ -2354,6 +2588,8 @@ def _retouch_scene_locked(
         revision_instructions=rev_instructions,
         target_duration_seconds=target_duration,
         language=language,
+        image_bytes=image_bytes,
+        image_mime=image_mime,
     )
 
     ok, err = validate_manim_code(new_code)
@@ -2621,6 +2857,7 @@ def iter_retouch_scene(
     scene_id: str,
     human_instructions: str,
     timestamp: Optional[float] = None,
+    comment_id: Optional[str] = None,
 ) -> Iterator[str]:
     """SSE stream of retouch progress events for a single scene."""
 
@@ -2630,6 +2867,7 @@ def iter_retouch_scene(
             scene_id,
             human_instructions,
             timestamp=timestamp,
+            comment_id=comment_id,
             on_event=on_event,
         )
 
@@ -2869,6 +3107,7 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
         )
 
     final_url = None
+    gif_url = None
     if job_runner.is_pipeline_running(job_id):
         # Generation is still producing later scenes — it composes the final
         # video itself when it finishes, and this scene's clip is already in.
@@ -2886,6 +3125,7 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
             if muxed_clips:
                 compose_final_video(muxed_clips, store.job_dir(job_id) / "final.mp4")
                 final_url = f"/api/jobs/{job_id}/file/final.mp4"
+                gif_url = _maybe_gif_url(job_id)
 
     scene_video_url = (
         f"/api/jobs/{job_id}/file/scenes/{scene_id}/scene_vo.mp4"
@@ -2899,5 +3139,6 @@ def approve_scene(job_id: str, scene_id: str) -> dict[str, Any]:
         "scene_id": scene_id,
         "approved": True,
         "final_video_url": final_url,
+        "gif_url": gif_url,
         "scene_video_url": scene_video_url,
     }

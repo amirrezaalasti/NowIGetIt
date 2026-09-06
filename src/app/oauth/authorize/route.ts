@@ -1,7 +1,11 @@
 import { auth } from "@/auth";
 import {
+  clientAllowsRedirect,
   googleAuthConfigured,
+  isAllowedRedirectUri,
+  issuerFrom,
   issuePendingAuthorize,
+  loadClient,
   parseAuthorizeQuery,
 } from "@/lib/mcp/oauth";
 import { NextRequest, NextResponse } from "next/server";
@@ -10,16 +14,19 @@ export const dynamic = "force-dynamic";
 
 const PENDING_COOKIE = "mcp_oauth_pending";
 
-function originOf(req: NextRequest): string {
-  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "localhost:3000";
-  const proto =
-    req.headers.get("x-forwarded-proto") ||
-    (host.includes("localhost") || host.startsWith("127.") ? "http" : "https");
-  return `${proto}://${host}`;
+function denyRedirect(redirectUri: string, state: string, error: string, description: string) {
+  if (!isAllowedRedirectUri(redirectUri)) {
+    return NextResponse.json({ error, error_description: description }, { status: 400 });
+  }
+  const next = new URL(redirectUri);
+  next.searchParams.set("error", error);
+  next.searchParams.set("error_description", description);
+  if (state) next.searchParams.set("state", state);
+  return NextResponse.redirect(next);
 }
 
 export async function GET(req: NextRequest) {
-  const origin = originOf(req);
+  const origin = issuerFrom(req);
   if (!googleAuthConfigured()) {
     return NextResponse.redirect(new URL("/connect", origin));
   }
@@ -28,6 +35,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(
       { error: parsed.error, error_description: parsed.description },
       { status: 400 },
+    );
+  }
+  const client = await loadClient(parsed.value.client_id);
+  if (!client || !clientAllowsRedirect(client, parsed.value.redirect_uri)) {
+    return denyRedirect(
+      parsed.value.redirect_uri,
+      parsed.value.state,
+      "invalid_client",
+      "Unknown or unregistered chat client",
     );
   }
   const pending = await issuePendingAuthorize(parsed.value);

@@ -5,7 +5,9 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
+  type DragEvent,
   type ReactNode,
 } from "react";
 import { MarkdownView } from "@/components/MarkdownView";
@@ -88,6 +90,33 @@ const ACTION_LABEL: Record<string, string> = Object.fromEntries(
   ].map((a) => [a.id, a.label]),
 );
 
+const FILE_ACCEPT =
+  ".pdf,.pptx,.ppt,.docx,.doc,.xlsx,.xls,.html,.htm,.md,.markdown,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff,.gif,.bmp,.asciidoc,.adoc";
+
+const FORMAT_CHIPS = [
+  "PDF",
+  "PPTX",
+  "DOCX",
+  "XLSX",
+  "Images",
+  "Markdown",
+] as const;
+
+const CAPABILITIES = [
+  {
+    title: "A selection",
+    body: "Click a figure, formula, or paragraph and ask about just that block.",
+  },
+  {
+    title: "A slide",
+    body: "Explain, simplify, quiz, or pull takeaways from the page in view.",
+  },
+  {
+    title: "The whole deck",
+    body: "Summaries, outlines, and critiques across every slide.",
+  },
+] as const;
+
 export function Understand() {
   const [docs, setDocs] = useState<DocumentListItem[]>([]);
   const [detail, setDetail] = useState<DocumentDetail | null>(null);
@@ -113,6 +142,8 @@ export function Understand() {
   const [showComments, setShowComments] = useState(true);
   const [savingComment, setSavingComment] = useState(false);
   const [savedCommentId, setSavedCommentId] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const manifest: DocumentManifest | null = detail?.manifest ?? null;
   const slides = manifest?.slides ?? [];
@@ -369,7 +400,31 @@ export function Understand() {
       setConverting(false);
     } finally {
       setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
+  }
+
+  function onDragOver(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    if (!uploading) setDragOver(true);
+  }
+
+  function onDragLeave(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setDragOver(false);
+    }
+  }
+
+  function onDrop(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDragOver(false);
+    if (uploading) return;
+    const file = event.dataTransfer.files?.[0] ?? null;
+    void onUpload(file);
   }
 
   async function runAsk() {
@@ -580,92 +635,221 @@ export function Understand() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-7 px-4 py-8 sm:px-6">
-      <header className="animate-rise space-y-3">
-        <p className="text-xs uppercase tracking-[0.18em] text-[var(--ink-muted)]">
-          Understand
-        </p>
-        <h1 className="font-[family-name:var(--font-display)] text-3xl tracking-tight text-[var(--ink)] sm:text-4xl">
-          Interrogate any deck
-        </h1>
-        <p className="max-w-2xl text-sm leading-relaxed text-[var(--ink-muted)]">
-          Upload a lecture PDF or slide deck. Ask about a selection, a slide, or
-          the whole document — summaries, explanations, outlines, quizzes, and
-          more.
-        </p>
-      </header>
+    <div
+      className={`mx-auto flex w-full max-w-6xl flex-1 flex-col px-4 sm:px-6 ${
+        studio ? "py-5 sm:py-6" : "py-8 pb-16 sm:py-10"
+      }`}
+    >
+      {studio ? (
+        <>
+          {error && (
+            <p className="mb-4 whitespace-pre-wrap rounded-xl border border-[var(--danger-line)] bg-[var(--danger-bg)] px-3 py-2 text-xs text-[var(--danger-ink)]">
+              {error}
+            </p>
+          )}
+          {studio}
+        </>
+      ) : (
+        <>
+          <header className="animate-rise max-w-2xl">
+            <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--ink-muted)]">
+              Understand
+            </p>
+            <h1 className="mt-1 font-[family-name:var(--font-display)] text-3xl tracking-tight text-[var(--ink)] sm:text-5xl">
+              Interrogate any deck
+            </h1>
+            <p className="mt-3 max-w-xl text-base leading-relaxed text-[var(--ink-muted)]">
+              Upload a lecture PDF or slide deck. Ask about a selection, a slide,
+              or the whole document — summaries, explanations, outlines, quizzes,
+              and more.
+            </p>
+          </header>
 
-      <section className="animate-rise rounded-2xl border border-[var(--line)] bg-[var(--surface)]/80 p-5 backdrop-blur-sm">
-        <label className="flex cursor-pointer flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-1">
-            <div className="text-sm font-medium text-[var(--ink)]">
-              Upload a document
-            </div>
-            <div className="text-xs text-[var(--ink-muted)]">
-              PDF · PPTX · DOCX · XLSX · images · Markdown
-            </div>
-          </div>
-          <input
-            type="file"
-            className="text-sm text-[var(--ink-muted)] file:mr-3 file:rounded-lg file:border-0 file:bg-[var(--accent)] file:px-3.5 file:py-2 file:text-sm file:font-medium file:text-[var(--on-accent)]"
-            accept=".pdf,.pptx,.ppt,.docx,.doc,.xlsx,.xls,.html,.htm,.md,.markdown,.txt,.png,.jpg,.jpeg,.webp,.tif,.tiff,.gif,.bmp,.asciidoc,.adoc"
-            disabled={uploading}
-            onChange={(e) => void onUpload(e.target.files?.[0] ?? null)}
-          />
-        </label>
-        {(status || uploading) && (
-          <p className="mt-4 text-xs text-[var(--ink-muted)]">
-            {uploading && !status ? "Converting…" : status}
-          </p>
-        )}
-        {error && (
-          <p className="mt-3 whitespace-pre-wrap rounded-lg border border-[var(--danger-line)] bg-[var(--danger-bg)] px-3 py-2 text-xs text-[var(--danger-ink)]">
-            {error}
-          </p>
-        )}
-      </section>
-
-      {docs.length > 0 && !manifest && (
-        <section className="animate-rise space-y-3">
-          <h2 className="text-sm font-medium text-[var(--ink)]">Your decks</h2>
-          <ul className="overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface)]/70">
-            {docs.map((d) => (
-              <li
-                key={d.doc_id}
-                className="flex items-stretch gap-1 border-b border-[var(--line)] last:border-b-0"
+          <section className="animate-rise-delay mt-8">
+            <div className="rounded-2xl has-[:focus-visible]:shadow-[0_0_0_3px_var(--glow)]">
+              <input
+                ref={fileInputRef}
+                id="understand-file"
+                type="file"
+                className="sr-only"
+                accept={FILE_ACCEPT}
+                disabled={uploading}
+                onChange={(e) => void onUpload(e.target.files?.[0] ?? null)}
+              />
+              <label
+                htmlFor="understand-file"
+                onDragOver={onDragOver}
+                onDragLeave={onDragLeave}
+                onDrop={onDrop}
+                aria-busy={uploading}
+                className={`group relative flex min-h-[16rem] cursor-pointer flex-col items-center justify-center overflow-hidden rounded-2xl border border-dashed px-6 py-10 text-center transition ${
+                  dragOver
+                    ? "border-[var(--accent)] bg-[var(--accent)]/8 shadow-[0_0_0_3px_var(--glow)]"
+                    : "border-[var(--line)] bg-[var(--surface)]/80 hover:border-[var(--accent)]/45 hover:bg-[var(--surface)] hover:shadow-[0_0_0_3px_var(--glow)]"
+                } ${uploading ? "pointer-events-none cursor-wait" : ""}`}
               >
-                <button
-                  type="button"
-                  onClick={() => void openDoc(d.doc_id)}
-                  className="flex min-w-0 flex-1 items-center justify-between gap-3 px-4 py-3.5 text-left transition hover:bg-[var(--surface-inset)]"
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate text-sm text-[var(--ink)]">
-                      {d.title || d.source_filename || d.doc_id}
-                    </span>
-                    <span className="text-xs text-[var(--ink-muted)]">
-                      {d.slide_count ?? 0} slides · {d.status || "ready"}
-                    </span>
+              <span
+                className={`flex h-12 w-12 items-center justify-center rounded-2xl border transition ${
+                  dragOver
+                    ? "border-[var(--accent)]/40 bg-[var(--accent)]/15 text-[var(--accent)]"
+                    : "border-[var(--line)] bg-[var(--surface-inset)] text-[var(--ink-muted)] group-hover:border-[var(--accent)]/35 group-hover:text-[var(--accent)]"
+                }`}
+                aria-hidden
+              >
+                {uploading ? (
+                  <span className="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                ) : (
+                  <svg
+                    width="22"
+                    height="22"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M12 17V3" />
+                    <path d="m7 8 5-5 5 5" />
+                    <path d="M5 21h14" />
+                  </svg>
+                )}
+              </span>
+              <span className="mt-4 font-[family-name:var(--font-display)] text-xl tracking-tight text-[var(--ink)] sm:text-2xl">
+                {uploading
+                  ? "Converting your deck"
+                  : dragOver
+                    ? "Drop to upload"
+                    : "Drop a lecture here"}
+              </span>
+              <span className="mt-1.5 max-w-sm text-sm leading-relaxed text-[var(--ink-muted)]">
+                {uploading
+                  ? status || "Uploading and converting page by page…"
+                  : "or browse a PDF, slide deck, document, or image"}
+              </span>
+              {!uploading && (
+                <span className="mt-6 inline-flex rounded-full bg-[var(--accent)] px-6 py-2.5 text-sm font-semibold text-[var(--on-accent)] transition group-hover:brightness-110">
+                  Browse files
+                </span>
+              )}
+              {uploading && (
+                <span className="mt-6 flex items-center gap-1.5 text-[var(--accent)]">
+                  <span
+                    className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)] animate-bounce"
+                    style={{ animationDelay: "0ms" }}
+                  />
+                  <span
+                    className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)] animate-bounce"
+                    style={{ animationDelay: "150ms" }}
+                  />
+                  <span
+                    className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)] animate-bounce"
+                    style={{ animationDelay: "300ms" }}
+                  />
+                </span>
+              )}
+              <span className="mt-6 flex flex-wrap items-center justify-center gap-1.5">
+                {FORMAT_CHIPS.map((chip) => (
+                  <span
+                    key={chip}
+                    className="rounded-full border border-[var(--line)] bg-[var(--surface-inset)] px-2.5 py-0.5 text-[11px] text-[var(--ink-muted)]"
+                  >
+                    {chip}
                   </span>
-                  <span className="text-xs font-medium text-[var(--accent)]">
-                    Open
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  disabled={deletingId === d.doc_id}
-                  onClick={() => void removeDoc(d.doc_id)}
-                  className="shrink-0 px-3 text-xs text-[var(--danger-ink)] transition hover:bg-[var(--danger-bg)] disabled:opacity-40"
-                >
-                  {deletingId === d.doc_id ? "…" : "Delete"}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+                ))}
+              </span>
+            </label>
+            </div>
+            {error && (
+              <p className="mt-3 whitespace-pre-wrap rounded-xl border border-[var(--danger-line)] bg-[var(--danger-bg)] px-3 py-2 text-xs text-[var(--danger-ink)]">
+                {error}
+              </p>
+            )}
+          </section>
 
-      {studio}
+          {docs.length > 0 ? (
+            <section className="animate-rise-delay-2 mt-10 space-y-4">
+              <div className="flex items-baseline justify-between gap-3">
+                <h2 className="font-[family-name:var(--font-display)] text-xl tracking-tight text-[var(--ink)]">
+                  Your decks
+                </h2>
+                <p className="text-xs text-[var(--ink-muted)]">
+                  {docs.length}
+                </p>
+              </div>
+              <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {docs.map((d) => {
+                  const convertingDoc = d.status === "converting";
+                  return (
+                    <li key={d.doc_id}>
+                      <article className="group flex h-full flex-col rounded-2xl border border-[var(--line)] bg-[var(--surface)]/80 p-4 transition hover:border-[var(--accent)]/40 hover:bg-[var(--surface)]">
+                        <button
+                          type="button"
+                          onClick={() => void openDoc(d.doc_id)}
+                          className="flex min-w-0 flex-1 flex-col text-left"
+                        >
+                          <span
+                            className={`inline-flex w-fit rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] ${
+                              convertingDoc
+                                ? "bg-[var(--accent-hot)]/15 text-[var(--accent-hot)]"
+                                : "bg-[var(--accent)]/12 text-[var(--accent)]"
+                            }`}
+                          >
+                            {d.status || "ready"}
+                          </span>
+                          <span className="mt-2 line-clamp-2 font-[family-name:var(--font-display)] text-lg leading-snug tracking-tight text-[var(--ink)]">
+                            {d.title || d.source_filename || d.doc_id}
+                          </span>
+                          <span className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                            {d.slide_count ?? 0}{" "}
+                            {(d.slide_count ?? 0) === 1 ? "slide" : "slides"}
+                          </span>
+                        </button>
+                        <div className="mt-4 flex items-center justify-between gap-2 border-t border-[var(--line)] pt-3">
+                          <button
+                            type="button"
+                            onClick={() => void openDoc(d.doc_id)}
+                            className="text-xs font-medium text-[var(--accent)] transition hover:brightness-110"
+                          >
+                            Open
+                          </button>
+                          <button
+                            type="button"
+                            disabled={deletingId === d.doc_id}
+                            onClick={() => void removeDoc(d.doc_id)}
+                            className="rounded-md px-2 py-1 text-xs text-[var(--danger-ink)] transition hover:bg-[var(--danger-bg)] disabled:opacity-40"
+                          >
+                            {deletingId === d.doc_id ? "…" : "Delete"}
+                          </button>
+                        </div>
+                      </article>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ) : (
+            <ul className="animate-rise-delay-2 mt-8 grid gap-3 sm:grid-cols-3">
+              {CAPABILITIES.map((item) => (
+                <li
+                  key={item.title}
+                  className="rounded-2xl border border-[var(--line)] bg-[var(--surface)]/60 px-4 py-4"
+                >
+                  <p className="text-[11px] uppercase tracking-[0.14em] text-[var(--accent)]">
+                    Ask about
+                  </p>
+                  <p className="mt-1.5 font-[family-name:var(--font-display)] text-lg tracking-tight text-[var(--ink)]">
+                    {item.title}
+                  </p>
+                  <p className="mt-1.5 text-sm leading-relaxed text-[var(--ink-muted)]">
+                    {item.body}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -772,7 +956,7 @@ function DocumentStudio(props: {
           : "flex flex-1 flex-col gap-4"
       }
     >
-      <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)]/70 px-4 py-3">
+      <header className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)]/80 px-4 py-3 backdrop-blur-sm">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="truncate font-[family-name:var(--font-display)] text-lg tracking-tight text-[var(--ink)] sm:text-xl">
@@ -870,11 +1054,7 @@ function DocumentStudio(props: {
           </div>
         </div>
 
-        <aside
-          className={`flex min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface-panel)] ${
-            focusMode ? "" : ""
-          }`}
-        >
+        <aside className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface-panel)] shadow-[0_12px_40px_rgba(0,0,0,0.08)]">
           <AssistantPanel
             selection={selection}
             action={action}

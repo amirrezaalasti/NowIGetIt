@@ -361,6 +361,8 @@ def revise_scene_code(
     target_duration_seconds: Optional[float] = None,
     surgical: bool = True,
     language: str = "en",
+    image_bytes: Optional[bytes] = None,
+    image_mime: str = "image/jpeg",
 ) -> str:
     duration = target_duration_seconds or scene.duration_seconds
     lang_name = language_display_name(language)
@@ -401,6 +403,11 @@ Current code (base your edits on this — keep what already works):
 {code}
 ```
 """
+    if image_bytes:
+        user += (
+            "\nThe attached screenshot is the exact frame the learner marked. "
+            "Change what is visible there; do not invent a different diagram."
+        )
     system = (
         MANIM_SYSTEM
         + "\nWhen revising, output the FULL Python file. Never output checklists or rule audits."
@@ -410,10 +417,22 @@ Current code (base your edits on this — keep what already works):
         + " (4) remove only decorative filler shapes."
         + " Keep the core diagram visible in the final hold."
     )
+    user_content: Any = user
+    if image_bytes:
+        import base64
+
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        user_content = [
+            {"type": "text", "text": user},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{image_mime};base64,{b64}"},
+            },
+        ]
     revised = clean_manim_code(
         client.chat(
             system=system,
-            user=user,
+            user=user_content,
             temperature=0.12,
             max_tokens=8192,
             model=client.manim_model,

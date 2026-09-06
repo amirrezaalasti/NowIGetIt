@@ -60,6 +60,16 @@ def test_generate_request_accepts_host_scene_plan() -> None:
     assert req.scene_plan.title == "Backpropagation"
 
 
+def test_generate_request_accepts_clip_preset() -> None:
+    req = GenerateRequest.model_validate(
+        {"prompt": "Looping binary search", "length_preset": "clip"}
+    )
+    assert req.length_preset == "clip"
+    spec = planning_spec_payload()
+    assert "clip" in spec["length_target_seconds"]
+    assert spec["length_target_seconds"]["clip"]["max"] <= 16
+
+
 def test_run_pipeline_host_plan_skips_openrouter(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
     from backend.pipeline import orchestrator as orch
@@ -136,6 +146,176 @@ def test_job_status_persisted_error_is_error(tmp_path, monkeypatch) -> None:
     assert "Manim render failed" in (status["error"] or "")
 
 
+def test_patch_scene_and_settings(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend.pipeline import orchestrator as orch
+    from backend.pipeline.orchestrator import patch_scene_section, update_job_settings
+
+    _stub_db(monkeypatch)
+    spec = planning_spec_payload()
+    req = GenerateRequest.model_validate(
+        {
+            "prompt": "Explain backpropagation",
+            "plan_only": True,
+            "scene_plan": {
+                "title": "Backpropagation",
+                "concept_summary": "Gradients from the loss.",
+                "scenes": [spec["example_scene"]],
+            },
+        }
+    )
+    result = orch.run_pipeline(req, user_id="mcp-connector")
+    plan = patch_scene_section(
+        result.job_id,
+        "scene_1",
+        title="Error flows backward",
+        narration="The loss sends a message back through every layer.",
+    )
+    assert plan.scenes[0].title == "Error flows backward"
+    assert "message back" in plan.scenes[0].narration
+    settings = update_job_settings(
+        result.job_id,
+        tts_voice="alloy",
+        language="en",
+        include_audio=False,
+        include_subtitles=True,
+    )
+    assert settings["tts_voice"] == "alloy"
+    assert settings["include_audio"] is False
+    assert settings["include_subtitles"] is True
+    assert settings["production_options_confirmed"] is True
+
+
+def test_production_options_are_chosen_after_plan(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend import artifacts as store
+    from backend.pipeline import orchestrator as orch
+    from backend.pipeline.orchestrator import (
+        ProductionOptionsRequired,
+        job_codegen_spec,
+        update_job_settings,
+    )
+
+    _stub_db(monkeypatch)
+    spec = planning_spec_payload()
+    req = GenerateRequest.model_validate(
+        {
+            "prompt": "Explain backpropagation",
+            "plan_only": True,
+            "scene_plan": {
+                "title": "Backpropagation",
+                "concept_summary": "Gradients from the loss.",
+                "scenes": [spec["example_scene"]],
+            },
+        }
+    )
+    result = orch.run_pipeline(req, user_id="mcp-connector")
+    meta = store.load_job(result.job_id).get("meta") or {}
+    settings = meta.get("settings") or {}
+    assert settings.get("production_options_confirmed") is False
+    assert "include_audio" not in settings
+    assert "include_subtitles" not in settings
+    with pytest.raises(ProductionOptionsRequired):
+        job_codegen_spec(result.job_id, "scene_1")
+    with pytest.raises(ProductionOptionsRequired):
+        continue_pipeline(result.job_id, ContinueRequest(), user_id="mcp-connector")
+    update_job_settings(
+        result.job_id,
+        include_audio=True,
+        include_subtitles=False,
+        tts_voice="alloy",
+    )
+    spec_payload = job_codegen_spec(result.job_id, "scene_1")
+    assert spec_payload["scene_id"] == "scene_1"
+
+
+HOST_SCENE = """
+from manim import *
+class S(Scene):
+    def construct(self):
+        t = Text("hi")
+        self.play(FadeIn(t))
+        self.wait(0.5)
+"""
+
+
+def test_submit_host_scene_code_returns_preview(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from pathlib import Path
+
+    from backend.pipeline import orchestrator as orch
+    from backend.pipeline.orchestrator import submit_host_scene_code, update_job_settings
+
+    _stub_db(monkeypatch)
+    spec = planning_spec_payload()
+    req = GenerateRequest.model_validate(
+        {
+            "prompt": "Explain backpropagation",
+            "plan_only": True,
+            "scene_plan": {
+                "title": "Backpropagation",
+                "concept_summary": "Gradients from the loss.",
+                "scenes": [spec["example_scene"]],
+            },
+        }
+    )
+    result = orch.run_pipeline(req, user_id="mcp-connector")
+    update_job_settings(
+        result.job_id,
+        include_audio=True,
+        include_subtitles=False,
+        tts_voice="alloy",
+    )
+
+    def _fake_preview(code, *, work_dir, scene_id):
+        dest = Path(work_dir) / scene_id / "preview.png"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+        return str(dest), '_NOWIGETIT_LAYOUT_REPORT ["Text A overlaps Text B"]\n'
+
+    monkeypatch.setattr(orch, "preview_scene_frame", _fake_preview)
+    saved = submit_host_scene_code(result.job_id, "scene_1", HOST_SCENE)
+    assert saved["ok"] is True
+    assert saved["ready_to_render"] is True
+    assert saved["preview_path"]
+    assert "overlaps" in " ".join(saved["layout_issues"])
+    assert saved["saved_count"] == 1
+
+
+def test_submit_host_scene_code_survives_missing_preview(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACTS_ROOT", str(tmp_path))
+    from backend.pipeline import orchestrator as orch
+    from backend.pipeline.orchestrator import submit_host_scene_code, update_job_settings
+
+    _stub_db(monkeypatch)
+    spec = planning_spec_payload()
+    req = GenerateRequest.model_validate(
+        {
+            "prompt": "Explain backpropagation",
+            "plan_only": True,
+            "scene_plan": {
+                "title": "Backpropagation",
+                "concept_summary": "Gradients from the loss.",
+                "scenes": [spec["example_scene"]],
+            },
+        }
+    )
+    result = orch.run_pipeline(req, user_id="mcp-connector")
+    update_job_settings(
+        result.job_id,
+        include_audio=True,
+        include_subtitles=False,
+        tts_voice="alloy",
+    )
+    monkeypatch.setattr(
+        orch, "preview_scene_frame", lambda *_a, **_k: (None, "Manim render disabled")
+    )
+    saved = submit_host_scene_code(result.job_id, "scene_1", HOST_SCENE)
+    assert saved["ok"] is True
+    assert saved["preview_path"] is None
+    assert saved["scenes_with_code"] == ["scene_1"]
+
+
 def test_continue_host_authored_skips_openrouter_without_flags(
     tmp_path, monkeypatch
 ) -> None:
@@ -156,6 +336,15 @@ def test_continue_host_authored_skips_openrouter_without_flags(
         }
     )
     result = run_pipeline(req, user_id="mcp-connector")
+
+    from backend.pipeline.orchestrator import update_job_settings
+
+    update_job_settings(
+        result.job_id,
+        include_audio=True,
+        include_subtitles=True,
+        tts_voice="Kore",
+    )
 
     def _boom(*_a, **_k):
         raise AssertionError(
