@@ -116,6 +116,44 @@ def get_user_usage(user_id: str) -> Optional[dict[str, Any]]:
         return None
 
 
+def get_user_openrouter_key(user_id: str) -> Optional[str]:
+    """Prefer local/mongo store; Supabase mode falls back to local for BYOK."""
+    from backend.local_db import get_user_openrouter_key as local_get
+
+    return local_get(user_id)
+
+
+def user_has_openrouter_key(user_id: str) -> bool:
+    from backend.local_db import user_has_openrouter_key as local_has
+
+    return bool(local_has(user_id))
+
+
+def set_user_openrouter_key(user_id: str, api_key: str) -> dict[str, Any]:
+    from backend.local_db import set_user_openrouter_key as local_set
+
+    return local_set(user_id, api_key)
+
+
+def clear_user_openrouter_key(user_id: str) -> dict[str, Any]:
+    from backend.local_db import clear_user_openrouter_key as local_clear
+
+    return local_clear(user_id)
+
+
+def openrouter_key_status(user_id: str) -> dict[str, Any]:
+    from backend.user_secrets import key_fingerprint, mask_api_key
+
+    plain = get_user_openrouter_key(user_id)
+    if not plain:
+        return {"configured": False, "masked_key": None, "fingerprint": None}
+    return {
+        "configured": True,
+        "masked_key": mask_api_key(plain),
+        "fingerprint": key_fingerprint(plain),
+    }
+
+
 def reserve_generation(user_id: str, *, estimated_tokens: int = 25_000) -> Optional[dict[str, Any]]:
     """Atomically check quotas and increment monthly generation count."""
     if not supabase_enabled():

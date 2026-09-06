@@ -379,4 +379,8 @@ class StorageModeRequest(BaseModel):
     mode: str = Field(..., pattern="^(local|mongo|supabase)$")
 
 
+class OpenRouterKeyRequest(BaseModel):
+    api_key: str = Field(..., min_length=10, max_length=512)
+
+
 GenerateRequest.model_rebuild()

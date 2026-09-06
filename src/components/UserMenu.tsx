@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { UsageMeter } from "@/components/UsageMeter";
+import { OpenRouterKeyPanel } from "@/components/OpenRouterKeyPanel";
 
 /** Account menu for signed-in users. Sign-in CTA lives in the generator / login. */
 export function UserMenu() {
@@ -76,7 +77,7 @@ export function UserMenu() {
       {open ? (
         <div
           role="menu"
-          className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-72 overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--bg-mid)] shadow-xl shadow-black/25"
+          className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-80 overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--bg-mid)] shadow-xl shadow-black/25"
         >
           <div className="border-b border-[var(--line)] px-4 py-3">
             <p className="truncate text-sm text-[var(--ink)]">{name}</p>
@@ -90,6 +91,8 @@ export function UserMenu() {
           <div className="px-3 py-3">
             <UsageMeter variant="menu" />
           </div>
+
+          <OpenRouterKeyPanel />
 
           <div className="border-t border-[var(--line)] p-2">
             <button

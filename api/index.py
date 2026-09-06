@@ -20,8 +20,8 @@ if str(ROOT) not in sys.path:
 
 from backend import artifacts as store
 from backend import supabase_db as db
+from backend.config import get_settings, settings_for_user
 from backend.auth import CurrentUser, MediaUser, auth_is_configured
-from backend.config import get_settings
 from backend import job_runner
 from backend.languages import languages_for_api
 from backend.tts_voices import voices_for_api
@@ -59,6 +59,7 @@ from backend.schemas import (
     ContinueRequest,
     GenerateRequest,
     GenerateResult,
+    OpenRouterKeyRequest,
     RegenerateSceneRequest,
     RevisePlanRequest,
     SceneComment,
@@ -259,6 +260,10 @@ async def me(user: CurrentUser) -> dict:
         usage = await asyncio.to_thread(db.get_user_usage, user.id)
     except Exception:  # noqa: BLE001
         usage = None
+    try:
+        openrouter_key = await asyncio.to_thread(db.openrouter_key_status, user.id)
+    except Exception:  # noqa: BLE001
+        openrouter_key = {"configured": False, "masked_key": None, "fingerprint": None}
     return {
         "user": {
             "id": user.id,
@@ -267,6 +272,7 @@ async def me(user: CurrentUser) -> dict:
             "image": user.image,
         },
         "usage": usage,
+        "openrouter_key": openrouter_key,
         "supabase_configured": db.supabase_enabled(),
         "storage_mode": _storage_mode(),
         "supabase_available": _supabase_available(),
@@ -295,6 +301,36 @@ async def set_my_storage(request: StorageModeRequest, user: CurrentUser) -> dict
     }
 
 
+@app.get("/api/me/openrouter-key")
+async def get_my_openrouter_key(user: CurrentUser) -> dict:
+    """Masked status for the user's saved OpenRouter API key (never the raw key)."""
+    await asyncio.to_thread(_prepare_user, user)
+    return await asyncio.to_thread(db.openrouter_key_status, user.id)
+
+
+@app.put("/api/me/openrouter-key")
+async def set_my_openrouter_key(request: OpenRouterKeyRequest, user: CurrentUser) -> dict:
+    """Save the signed-in user's OpenRouter API key for generation (BYOK)."""
+    await asyncio.to_thread(_prepare_user, user)
+    key = request.api_key.strip()
+    if not key.startswith("sk-"):
+        raise HTTPException(
+            status_code=400,
+            detail="OpenRouter keys usually start with sk-or-v1-… Paste a valid key.",
+        )
+    try:
+        return await asyncio.to_thread(db.set_user_openrouter_key, user.id, key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/me/openrouter-key")
+async def clear_my_openrouter_key(user: CurrentUser) -> dict:
+    """Remove the user's saved OpenRouter key (fall back to server key)."""
+    await asyncio.to_thread(_prepare_user, user)
+    return await asyncio.to_thread(db.clear_user_openrouter_key, user.id)
+
+
 @app.get("/api/tts/preview")
 def preview_tts(voice: str, user: MediaUser) -> FileResponse:
     """Generate or return a cached audio preview for a specific voice."""
@@ -315,10 +351,12 @@ def preview_tts(voice: str, user: MediaUser) -> FileResponse:
                 media_type, _ = mimetypes.guess_type(str(path))
                 return FileResponse(path, media_type=media_type or "application/octet-stream")
         
-        # Generate new preview
+        # Generate new preview — use the caller's BYOK key when saved
+        user_settings = settings_for_user(user.id)
         output_path, skipped = synthesize_narration(
             text=text,
             output_path=output_base.with_suffix(".wav"),
+            settings=user_settings,
             voice=voice,
         )
         

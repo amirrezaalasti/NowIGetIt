@@ -388,6 +388,11 @@ export async function fetchMe(signal?: AbortSignal): Promise<{
     image?: string | null;
   };
   usage: UsageSnapshot | null;
+  openrouter_key?: {
+    configured: boolean;
+    masked_key: string | null;
+    fingerprint: string | null;
+  };
   supabase_configured: boolean;
   storage_mode: "local" | "mongo" | "supabase";
   supabase_available: boolean;
@@ -405,6 +410,47 @@ export async function fetchMe(signal?: AbortSignal): Promise<{
     if ((err as Error).name === "AbortError") throw err;
     throw friendlyFetchError(err, "Account usage");
   }
+}
+
+export type OpenRouterKeyStatus = {
+  configured: boolean;
+  masked_key: string | null;
+  fingerprint: string | null;
+};
+
+export async function saveOpenRouterKey(apiKey: string): Promise<OpenRouterKeyStatus> {
+  const res = await fetch(`${apiBase()}/api/me/openrouter-key`, {
+    method: "PUT",
+    cache: "no-store",
+    headers: {
+      ...(await authHeaders()),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  if (!res.ok) {
+    let message = "Failed to save OpenRouter API key";
+    try {
+      const body = (await res.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") message = body.detail;
+    } catch {
+      /* keep default */
+    }
+    throw new Error(message);
+  }
+  return res.json();
+}
+
+export async function clearOpenRouterKey(): Promise<OpenRouterKeyStatus> {
+  const res = await fetch(`${apiBase()}/api/me/openrouter-key`, {
+    method: "DELETE",
+    cache: "no-store",
+    headers: await authHeaders(),
+  });
+  if (!res.ok) {
+    throw new Error("Failed to remove OpenRouter API key");
+  }
+  return res.json();
 }
 
 export async function setStorageMode(

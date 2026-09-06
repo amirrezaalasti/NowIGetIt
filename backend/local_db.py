@@ -94,9 +94,14 @@ def set_storage_mode(mode: StorageMode) -> StorageMode:
 
 def _impl():
     if storage_mode() == "mongo":
-        from backend import mongo_db
+        try:
+            import pymongo  # noqa: F401
+            from backend import mongo_db
 
-        return mongo_db
+            return mongo_db
+        except Exception:  # noqa: BLE001
+            # Prefer SQLite over a broken Mongo path so BYOK / usage keep working.
+            pass
     from backend import sqlite_db
 
     return sqlite_db
@@ -108,6 +113,22 @@ def ensure_user(**kwargs):
 
 def get_user_usage(user_id: str):
     return _impl().get_user_usage(user_id)
+
+
+def get_user_openrouter_key(user_id: str):
+    return _impl().get_user_openrouter_key(user_id)
+
+
+def user_has_openrouter_key(user_id: str) -> bool:
+    return bool(_impl().user_has_openrouter_key(user_id))
+
+
+def set_user_openrouter_key(user_id: str, api_key: str):
+    return _impl().set_user_openrouter_key(user_id, api_key)
+
+
+def clear_user_openrouter_key(user_id: str):
+    return _impl().clear_user_openrouter_key(user_id)
 
 
 def reserve_generation(user_id: str, *, estimated_tokens: int = 25_000):
