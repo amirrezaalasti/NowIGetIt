@@ -1,4 +1,4 @@
-"""Hard guarantees: Text uses Noto + kerning scale, never pad/hide glyphs."""
+"""Hard guarantees: Text uses house serif + kerning scale, never pad/hide glyphs."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ class Demo(Scene):
     assert _TEXT_LAYOUT_MARKER in code
     assert "_TEXT_KERNING_MIN" in code
     assert "_nig_make_text" in code
-    assert "Noto Sans" in code
+    assert "Georgia" in code
     assert "_TEXT_CLIP_PAD" not in code
 
 

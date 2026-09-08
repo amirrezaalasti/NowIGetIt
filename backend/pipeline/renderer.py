@@ -242,6 +242,11 @@ def _render_scene_local(
     assert_safe_text_shim(code)
     scene_dir = Path(work_dir).resolve() / scene_id
     scene_dir.mkdir(parents=True, exist_ok=True)
+    # House style helpers (manim_fonts / manim_visuals) sit next to scene.py
+    # so generated imports resolve without packaging tricks.
+    from backend.manim_house import stage_house_modules
+
+    stage_house_modules(scene_dir)
     scene_file = scene_dir / "scene.py"
     scene_file.write_text(code, encoding="utf-8")
 

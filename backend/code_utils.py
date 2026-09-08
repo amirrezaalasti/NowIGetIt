@@ -30,14 +30,21 @@ _TEXT_LAYOUT_LEGACY_MARKERS = (
     ("# _NOWIGETIT_TEXT_LAYOUT_FIX_V5", "# _NOWIGETIT_TEXT_LAYOUT_FIX_V5_END"),
     ("# _NOWIGETIT_TEXT_LAYOUT_FIX_V6", "# _NOWIGETIT_TEXT_LAYOUT_FIX_V6_END"),
 )
-# Prefer a modern proportional face; DejaVu is the Linux fallback already in the image.
-_TEXT_DEFAULT_FONT = "Noto Sans"
+# Prefer readable book serifs (house style / manim_fonts); Liberation/DejaVu cover Linux.
+_TEXT_DEFAULT_FONT = "Georgia"
 _TEXT_FONT_FALLBACKS = (
+    "Georgia",
+    "PT Serif",
+    "Times New Roman",
+    "Liberation Serif",
+    "DejaVu Serif",
+    "STIX Two Text",
+    "Nimbus Roman",
+    "FreeSerif",
+    "Palatino",
     "Noto Sans",
     "Liberation Sans",
     "DejaVu Sans",
-    "Arial",
-    "Helvetica",
 )
 _TEXT_KERNING_MIN = 48.0
 
@@ -106,7 +113,8 @@ def _nig_prepare_text_kwargs(kwargs):
     kwargs.pop("height", None)
     # Host owns the typeface — ignore LLM font= / disable_ligatures=.
     kwargs["font"] = _TEXT_RESOLVED_FONT
-    kwargs["disable_ligatures"] = False
+    # Ligatures off: serif faces collapse clusters (ss/ch/ämm) into uneven glyphs.
+    kwargs["disable_ligatures"] = True
     return kwargs
 
 def _nig_make_text(factory, text, args, kwargs):
@@ -161,7 +169,7 @@ Mobject.to_edge = _safe_to_edge
 # Runs AFTER any stale worker re-injects an older kerning shim.
 # Always calls raw _ManimText so a stale wrapper cannot win.
 _TEXT_LAYOUT_FIX = f"""{_TEXT_LAYOUT_MARKER}
-# Durable Text path: Noto Sans + Pango kerning scale (≥{_TEXT_KERNING_MIN:.0f}px then .scale).
+# Durable Text path: serif face + Pango kerning scale (≥{_TEXT_KERNING_MIN:.0f}px then .scale).
 {_TEXT_HELPERS}
 def _nig_text_factory():
     return globals().get("_ManimText") or Text
@@ -806,7 +814,26 @@ def lint_scene_code(code: str, *, target_duration: Optional[float] = None) -> li
             "introduces it and leave it; use the freed time for real content."
         )
 
-    label_count = len(re.findall(r"\bText\(", body))
+    if target_duration is not None:
+        # House template — only when linting generated scenes against a duration
+        # budget (codegen / revise). Handcrafted samples skip this gate.
+        if "apply_scene_style" not in body:
+            issues.append(
+                "Call apply_scene_style(self) as the first line of construct() "
+                "(import from manim_fonts) so background + body font match the house template."
+            )
+        if "scene_title" not in body and "play_scene_title" not in body:
+            issues.append(
+                "Use scene_title(...) + play_scene_title(self, title) for the top-center "
+                "heading instead of a raw Text(...).to_edge(UP)."
+            )
+        if "from manim_fonts import" not in code and "import manim_fonts" not in code:
+            issues.append(
+                "Import house helpers from manim_fonts / manim_visuals "
+                "(apply_scene_style, scene_title, type-scale constants, palette)."
+            )
+
+    label_count = len(re.findall(r"\bText\(|\bbody_text\(", body))
     if duration >= 20.0 and label_count < 3:
         issues.append(
             f"Only {label_count} on-screen Text label(s) for a {duration:.0f}s scene. "
