@@ -12,6 +12,24 @@ from openai import OpenAI
 from backend.config import Settings, get_settings
 
 
+def _openrouter_auth_hint(exc: BaseException) -> Optional[str]:
+    """Turn OpenRouter 401s into an actionable message (invalid/revoked key)."""
+    text = str(exc)
+    lowered = text.lower()
+    if "401" not in text and "unauthorized" not in lowered and "user not found" not in lowered:
+        return None
+    if "user not found" in lowered or "401" in text or "invalid api key" in lowered:
+        return (
+            "OpenRouter rejected the API key (401). "
+            "Python loads .env then overrides with non-empty values from .env.local — "
+            "check OPENROUTER_API_KEY in both files (they often diverge). "
+            "If you saved a key in the account menu (BYOK), that key is used instead "
+            "of the server key: clear or re-save it. "
+            "Create a fresh key at https://openrouter.ai/keys"
+        )
+    return None
+
+
 class OpenRouterClient:
     """Thin OpenAI-compatible wrapper pointed at OpenRouter."""
 
@@ -91,7 +109,13 @@ class OpenRouterClient:
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
-        response = self.client.chat.completions.create(**kwargs)
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            hint = _openrouter_auth_hint(exc)
+            if hint:
+                raise ValueError(hint) from exc
+            raise
         if resolved_model == self.vlm_model:
             kind = "vlm"
         elif resolved_model == self.manim_model:

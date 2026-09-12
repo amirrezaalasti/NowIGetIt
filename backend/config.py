@@ -29,6 +29,12 @@ def _load_env_files() -> None:
             os.environ[key] = str(value)
 
 
+def _clean_model_id(value: str, *, fallback: str = "") -> str:
+    """Strip whitespace and accidental leading '~' from OpenRouter model ids."""
+    cleaned = (value or "").strip().lstrip("~").strip()
+    return cleaned or fallback
+
+
 _load_env_files()
 
 
@@ -76,13 +82,18 @@ def get_platform_settings() -> Settings:
     _load_env_files()
     # Text LLM (planning / codegen). VLM must be multimodal — do not fall back
     # to OPENROUTER_MODEL when it may be text-only (e.g. DeepSeek).
-    vlm = (os.getenv("OPENROUTER_VLM_MODEL") or "").strip()
+    vlm = _clean_model_id(os.getenv("OPENROUTER_VLM_MODEL") or "")
     if not vlm or "deepseek" in vlm.lower():
         vlm = "google/gemini-2.5-flash-lite"
-    text_model = os.getenv("OPENROUTER_MODEL", "google/gemini-3.6-flash")
-    manim_model = (os.getenv("OPENROUTER_MODEL_MANIM") or "").strip() or text_model
+    text_model = _clean_model_id(
+        os.getenv("OPENROUTER_MODEL") or "",
+        fallback="google/gemini-3.6-flash",
+    )
+    manim_model = _clean_model_id(os.getenv("OPENROUTER_MODEL_MANIM") or "") or text_model
+    server_or_key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+    tts_key = (os.getenv("TTS_API_KEY") or "").strip() or server_or_key
     return Settings(
-        openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
+        openrouter_api_key=server_or_key,
         openrouter_model=text_model,
         openrouter_model_manim=manim_model,
         openrouter_vlm_model=vlm,
@@ -99,8 +110,7 @@ def get_platform_settings() -> Settings:
         openrouter_app_name=os.getenv("OPENROUTER_APP_NAME", "NowIGetIt"),
         # TTS defaults to OpenRouter (Gemini 3.1 Flash TTS Preview). Leave
         # TTS_API_KEY blank to reuse OPENROUTER_API_KEY.
-        tts_api_key=(os.getenv("TTS_API_KEY") or "").strip()
-        or os.getenv("OPENROUTER_API_KEY", ""),
+        tts_api_key=tts_key,
         tts_base_url=os.getenv(
             "TTS_BASE_URL", "https://openrouter.ai/api/v1"
         ),
@@ -135,3 +145,14 @@ def get_settings() -> Settings:
     if override is not None:
         return override
     return get_platform_settings()
+
+
+def settings_for_user(user_id: Optional[str] = None) -> Settings:
+    """Resolve BYOK overlay for a signed-in user.
+
+    Multi-provider keys (Settings) win; otherwise a saved OpenRouter DB key is
+    used for LLM + TTS. Lazy import avoids a config ↔ user_settings cycle.
+    """
+    from backend.user_settings import settings_for_user as _for_user
+
+    return _for_user(user_id)

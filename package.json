@@ -6,7 +6,7 @@
   "author": "Amirreza Alasti <amirrezaalasti@gmail.com>",
   "scripts": {
     "dev": "next dev",
-    "dev:api": ".venv/bin/uvicorn api.index:app --reload --host 127.0.0.1 --port 8000",
+    "dev:api": ".venv/bin/uvicorn api.index:app --reload --reload-dir backend --reload-dir api --host 127.0.0.1 --port 8000",
     "dev:all": "npx --yes concurrently -k -n api,web -c cyan,magenta \"npm run dev:api\" \"npm run dev\"",
     "build": "next build",
     "start": "next start",

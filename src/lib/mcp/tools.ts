@@ -909,7 +909,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Manim codegen spec",
       description:
-        "Only after the user approved the storyboard AND you saved their audio/subtitle/voice choices with update_video_options. For Manim scenes: returns Python rules. For movie scenes: returns a cinematic shot-list schema (JSON, not Manim). After submit_scene_code you may get a preview — describe it before the next scene.",
+        "Only after the user approved the storyboard AND you saved their audio/subtitle/voice choices with update_video_options. For Manim scenes: returns Python rules (system + hard_rules + beat timeline). Follow that house template: import manim_fonts/manim_visuals; apply_scene_style(self) first; scene_title + play_scene_title; formula_panel for equations; type-scale constants only; Text/body_text only — never MathTex; FadeIn for non-title text; no caption_bar/hold_for (host burns subtitles). For movie scenes: returns a cinematic shot-list schema (JSON, not Manim). Write the scene, then submit_scene_code. After submit, describe the preview image before the next scene.",
       inputSchema: z.object({
         job_id: z.string().min(4),
         scene_id: z.string().min(1).describe("e.g. scene_1"),
@@ -933,7 +933,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         return ok(
           spec,
           undefined,
-          "Write one complete Manim Community Scene file, then call submit_scene_code with that code. The result includes a preview image — show it and describe it before the next scene.",
+          "Follow the returned system/hard_rules house template (manim_fonts + manim_visuals). Write one complete Manim Community Scene file, then call submit_scene_code. Show and describe the preview image before the next scene.",
         );
       } catch (err) {
         return fail(err);
@@ -946,7 +946,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Submit scene Manim code",
       description:
-        "Save Manim for one scene. Returns a last-frame preview image — you MUST look at it, tell the user what the frame shows in 1-2 sentences, then continue. Repeat until every scene has code. Do not submit the next scene until you have described this preview. Then render_video with user_confirmed true.",
+        "Save Manim for one scene (must follow the house template from video_codegen_spec: manim_fonts/manim_visuals, apply_scene_style, scene_title, Text only). Returns a last-frame preview image — you MUST look at it, tell the user what the frame shows in 1-2 sentences, then continue. Repeat until every scene has code. Do not submit the next scene until you have described this preview. Then render_video with user_confirmed true.",
       inputSchema: z.object({
         job_id: z.string().min(4),
         scene_id: z.string().min(1),

@@ -477,6 +477,10 @@ class StorageModeRequest(BaseModel):
     mode: str = Field(..., pattern="^(local|mongo|supabase)$")
 
 
+class OpenRouterKeyRequest(BaseModel):
+    api_key: str = Field(..., min_length=10, max_length=512)
+
+
 class ProviderKeyRequest(BaseModel):
     provider: str = Field(..., min_length=2, max_length=32)
     api_key: str = Field(..., min_length=8, max_length=512)

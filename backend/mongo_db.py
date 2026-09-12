@@ -121,6 +121,62 @@ def ensure_user(
     }
 
 
+def get_user_openrouter_key(user_id: str) -> Optional[str]:
+    from backend.user_secrets import decrypt_secret
+
+    with _LOCK:
+        row = _db().users.find_one({"_id": user_id}, {"openrouter_api_key_enc": 1})
+    if not row:
+        return None
+    return decrypt_secret(row.get("openrouter_api_key_enc"))
+
+
+def user_has_openrouter_key(user_id: str) -> bool:
+    with _LOCK:
+        row = _db().users.find_one({"_id": user_id}, {"openrouter_api_key_enc": 1})
+    if not row:
+        return False
+    enc = row.get("openrouter_api_key_enc")
+    return bool(enc and str(enc).strip())
+
+
+def set_user_openrouter_key(user_id: str, api_key: str) -> dict[str, Any]:
+    from backend.user_secrets import encrypt_secret, key_fingerprint, mask_api_key
+
+    plain = (api_key or "").strip()
+    if not plain:
+        raise ValueError("API key is empty")
+    enc = encrypt_secret(plain)
+    now = _now()
+    with _LOCK:
+        _db().users.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    "openrouter_api_key_enc": enc,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {"created_at": now},
+            },
+            upsert=True,
+        )
+    return {
+        "configured": True,
+        "masked_key": mask_api_key(plain),
+        "fingerprint": key_fingerprint(plain),
+    }
+
+
+def clear_user_openrouter_key(user_id: str) -> dict[str, Any]:
+    now = _now()
+    with _LOCK:
+        _db().users.update_one(
+            {"_id": user_id},
+            {"$set": {"openrouter_api_key_enc": None, "updated_at": now}},
+        )
+    return {"configured": False, "masked_key": None, "fingerprint": None}
+
+
 def _empty_usage(user_id: str) -> dict[str, Any]:
     return {
         "user_id": user_id,

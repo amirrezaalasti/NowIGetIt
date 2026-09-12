@@ -23,7 +23,7 @@ from backend.code_utils import (
     scene_body,
     validate_manim_code,
 )
-from backend.config import get_settings
+from backend.config import get_settings, settings_for_user
 from backend.documents.source import prepare_generation_prompt
 from backend.llm import OpenRouterClient
 from backend.pipeline.compose import (
@@ -829,11 +829,11 @@ def revise_scene_plan(job_id: str, instructions: str) -> ScenePlan:
     from backend.user_settings import apply_settings_for_job
 
     apply_settings_for_job(job_id)
-    settings = get_settings()
-    client = OpenRouterClient(settings)
     job = store.load_job(job_id)
     meta = job.get("meta") or {}
     owner_id = meta.get("user_id") if isinstance(meta, dict) else None
+    settings = settings_for_user(owner_id if isinstance(owner_id, str) else None)
+    client = OpenRouterClient(settings)
     if isinstance(owner_id, str) and owner_id:
         from backend.user_settings import using_own_llm_key
 
@@ -872,6 +872,27 @@ def revise_scene_plan(job_id: str, instructions: str) -> ScenePlan:
 MAX_RENDER_FIX_ATTEMPTS = 10
 
 
+def _settings_for_job(
+    job_id: str,
+    client: Optional[OpenRouterClient] = None,
+) -> Any:
+    """Prefer the OpenRouter client's settings (already BYOK-aware).
+
+    Falls back to the job owner's saved key so TTS never spends the server
+    key when the user has BYOK, even on host-authored (no-LLM) paths.
+    """
+    if client is not None:
+        return client.settings
+    try:
+        meta = store.load_job(job_id).get("meta") or {}
+        owner = meta.get("user_id") if isinstance(meta, dict) else None
+        if isinstance(owner, str) and owner:
+            return settings_for_user(owner)
+    except Exception:  # noqa: BLE001
+        pass
+    return get_settings()
+
+
 def _process_one_scene(
     *,
     client: Optional[OpenRouterClient],
@@ -892,7 +913,7 @@ def _process_one_scene(
     provided_code: Optional[str] = None,
 ) -> SceneArtifact:
     """TTS-first → codegen (timed) → render → optional VLM for a single scene."""
-    settings = get_settings()
+    settings = _settings_for_job(job_id, client)
     voice = tts_voice or _job_tts_voice(job_id)
     language = _job_language(job_id)
     include_audio = _job_include_audio(job_id, fallback=True)
@@ -2071,7 +2092,7 @@ def _run_scenes_loop(
     skip_codegen: bool = False,
     skip_vlm: bool = False,
 ) -> GenerateResult:
-    settings = get_settings()
+    settings = _settings_for_job(job_id, client)
     voice = tts_voice or _job_tts_voice(job_id)
     work_dir = store.job_dir(job_id)
     total = len(plan.scenes)
@@ -2213,7 +2234,7 @@ def run_pipeline(
         from backend.user_settings import apply_user_settings
 
         apply_user_settings(user_id)
-    settings = get_settings()
+    settings = settings_for_user(user_id)
     host_plan = request.scene_plan
     teaching_prompt, display_prompt, source_names = prepare_generation_prompt(
         request.prompt,
@@ -2491,7 +2512,6 @@ def continue_pipeline(
         apply_user_settings(user_id)
     else:
         apply_settings_for_job(job_id)
-    settings = get_settings()
     job = store.load_job(job_id)
     meta = job.get("meta") or {}
     snap = meta.get("settings") if isinstance(meta, dict) else {}
@@ -2505,12 +2525,15 @@ def continue_pipeline(
     # unless cinematic movie scenes still need image generation.
     skip_codegen = bool(request.skip_codegen or host_authored)
     skip_vlm = bool(request.skip_vlm or host_authored or skip_codegen)
-    need_client = (not skip_codegen) or has_movie
-    client = OpenRouterClient(settings) if need_client else None
     prompt = str(meta.get("prompt") or "")
     owner = meta.get("user_id") if isinstance(meta, dict) else None
     if user_id and owner and owner != user_id:
         raise PermissionError("Not job owner")
+    settings = settings_for_user(
+        user_id or (owner if isinstance(owner, str) else None)
+    )
+    need_client = (not skip_codegen) or has_movie
+    client = OpenRouterClient(settings) if need_client else None
 
     resolution = request.resolution or _job_resolution(job_id)
     skip_render = request.skip_render
@@ -2598,11 +2621,11 @@ def regenerate_scene(
     Skips VLM review and clarity auto-revise — the human is the reviewer.
     """
     request = request or RegenerateSceneRequest()
-    settings = get_settings()
-    client = OpenRouterClient(settings=settings)
     job = store.load_job(job_id)
     meta = job.get("meta") or {}
     owner_id = meta.get("user_id") if isinstance(meta, dict) else None
+    settings = settings_for_user(owner_id if isinstance(owner_id, str) else None)
+    client = OpenRouterClient(settings=settings)
     if isinstance(owner_id, str) and owner_id:
         db.assert_within_quotas(owner_id, need_tokens=8_000)
 
@@ -2735,7 +2758,10 @@ def _retouch_scene_locked(
     comment_id: Optional[str] = None,
     on_event: Optional[Any] = None,
 ) -> dict[str, Any]:
-    settings = get_settings()
+    job_data = store.load_job(job_id)
+    meta = job_data.get("meta") or {}
+    owner_id = meta.get("user_id") if isinstance(meta, dict) else None
+    settings = settings_for_user(owner_id if isinstance(owner_id, str) else None)
     client = OpenRouterClient(settings=settings)
 
     def emit(msg: str, data: Optional[dict] = None) -> None:
@@ -2752,9 +2778,6 @@ def _retouch_scene_locked(
 
     emit(f"Loading scene data for '{scene_id}'…")
 
-    job_data = store.load_job(job_id)
-    meta = job_data.get("meta") or {}
-    owner_id = meta.get("user_id") if isinstance(meta, dict) else None
     if isinstance(owner_id, str) and owner_id:
         db.assert_within_quotas(owner_id, need_tokens=5_000)
     scenes = job_data.get("scenes") or []

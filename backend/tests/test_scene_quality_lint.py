@@ -21,12 +21,17 @@ from backend.schemas import ScenePlan, SceneSection
 
 MARKER = "# _NOWIGETIT_TEXT_LAYOUT_FIX_V7_END"
 
+HOUSE = """from manim_fonts import apply_scene_style, scene_title, play_scene_title, BODY_FONT_SIZE
+from manim_visuals import P_WHITE
+"""
+
 FILLER_SCENE = f'''{MARKER}
+{HOUSE}
 class Scene1(Scene):
     def construct(self):
-        title = Text("Einfuehrung: Die Gebaeudehuelle", font_size=40)
-        self.play(FadeIn(title, run_time=2.0))
-        self.play(title.animate.scale(0.8).move_to(UP * 3.5 + LEFT * 5), run_time=2.0)
+        apply_scene_style(self)
+        title = scene_title("Einfuehrung: Die Gebaeudehuelle")
+        play_scene_title(self, title)
         self.wait(0.78)  # total 6.78s
         glow = Circle(radius=1.0)
         self.play(glow.animate.set_fill_opacity(0.4), run_time=3.0)
@@ -44,15 +49,17 @@ class Scene1(Scene):
 '''
 
 TEACHING_SCENE = f'''{MARKER}
+{HOUSE}
 class Scene1(Scene):
     def construct(self):
-        title = Text("Gradient Descent", font_size=40).to_edge(UP, buff=0.3)
+        apply_scene_style(self)
+        title = scene_title("Gradient Descent")
+        play_scene_title(self, title)
         axes = Axes(x_range=[-3, 3, 1], y_range=[-1, 5, 1], x_length=7, y_length=4.5)
         curve = axes.plot(lambda x: x**2, x_range=[-2.2, 2.2])
         dot = Dot(color=YELLOW).move_to(axes.c2p(-2, 4))
-        slope_label = Text("steep slope", font_size=26).next_to(axes, RIGHT, buff=0.25)
-        min_label = Text("minimum", font_size=26).next_to(axes.c2p(0, 0), DOWN, buff=0.3)
-        self.play(FadeIn(title), run_time=1.2)
+        slope_label = Text("steep slope", font_size=BODY_FONT_SIZE).next_to(axes, RIGHT, buff=0.25)
+        min_label = Text("minimum", font_size=BODY_FONT_SIZE).next_to(axes.c2p(0, 0), DOWN, buff=0.3)
         self.play(Create(axes), run_time=1.6)
         self.play(Create(curve), run_time=1.8)
         self.play(FadeIn(dot), FadeIn(slope_label), run_time=1.4)
@@ -86,12 +93,14 @@ def test_teaching_scene_passes_lint() -> None:
 def test_updater_driven_wait_is_not_treated_as_dead_time() -> None:
     # With add_updater / always_redraw, self.wait() IS the animation.
     spinning = (
-        f"{MARKER}\nclass S(Scene):\n    def construct(self):\n"
-        '        label = Text("orbit", font_size=26)\n'
-        '        caption = Text("one period", font_size=24)\n'
+        f"{MARKER}\n{HOUSE}\nclass S(Scene):\n    def construct(self):\n"
+        "        apply_scene_style(self)\n"
+        "        title = scene_title('orbit')\n"
+        "        play_scene_title(self, title)\n"
+        '        caption = Text("one period", font_size=BODY_FONT_SIZE)\n'
         "        dot = Dot()\n"
         "        dot.add_updater(lambda m, dt: m.rotate(dt))\n"
-        "        self.play(FadeIn(label), FadeIn(caption), run_time=1.0)\n"
+        "        self.play(FadeIn(caption), run_time=1.0)\n"
         "        self.wait(8.0)\n"
     )
     assert lint_scene_code(spinning, target_duration=9.0) == []
@@ -107,7 +116,13 @@ def test_handcrafted_samples_stay_clean() -> None:
 
 
 def test_short_scene_is_not_required_to_carry_labels() -> None:
-    tiny = f'{MARKER}\nclass S(Scene):\n    def construct(self):\n        t = Text("Hi")\n        self.play(FadeIn(t), run_time=2.0)\n        self.wait(0.5)\n'
+    tiny = (
+        f"{MARKER}\n{HOUSE}\nclass S(Scene):\n    def construct(self):\n"
+        "        apply_scene_style(self)\n"
+        "        title = scene_title('Hi')\n"
+        "        play_scene_title(self, title)\n"
+        "        self.wait(0.5)\n"
+    )
     assert lint_scene_code(tiny, target_duration=3.0) == []
 
 

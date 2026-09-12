@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from contextvars import ContextVar
 from dataclasses import replace
@@ -10,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from backend.config import Settings, get_platform_settings, set_settings_override
+from backend.config import Settings, _clean_model_id, get_platform_settings, set_settings_override
 from backend.crypto_box import decrypt_text, encrypt_text, mask_secret
 
 _LOCK = threading.Lock()
@@ -351,6 +352,40 @@ def get_provider_secret(user_id: str, provider: str) -> Optional[tuple[str, Opti
     return secret, url_s
 
 
+def _db_openrouter_key(user_id: str) -> Optional[str]:
+    """OpenRouter key saved via /api/me/openrouter-key (account menu)."""
+    has_key = False
+    user_key: Optional[str] = None
+    load_error: Optional[BaseException] = None
+    try:
+        from backend import supabase_db as db
+
+        has_key = bool(db.user_has_openrouter_key(user_id))
+        user_key = db.get_user_openrouter_key(user_id) if has_key else None
+    except Exception as exc:  # noqa: BLE001
+        load_error = exc
+        try:
+            from backend import sqlite_db
+
+            has_key = bool(sqlite_db.user_has_openrouter_key(user_id))
+            user_key = sqlite_db.get_user_openrouter_key(user_id) if has_key else None
+            load_error = None
+        except Exception as exc2:  # noqa: BLE001
+            load_error = exc2
+
+    if load_error is not None and has_key:
+        raise ValueError(
+            "Your OpenRouter API key is saved but could not be loaded. "
+            "Re-save it from the account menu — the server key will not be used."
+        ) from load_error
+    if has_key and not user_key:
+        raise ValueError(
+            "Your OpenRouter API key is saved but could not be loaded. "
+            "Re-save it from the account menu — the server key will not be used."
+        )
+    return user_key
+
+
 def using_own_llm_key(user_id: Optional[str]) -> bool:
     if not user_id:
         return False
@@ -398,6 +433,43 @@ def settings_for_user(user_id: Optional[str]) -> Settings:
 
     llm_id = _pick_provider(store, llm_pref, need_tts=False)
     tts_id = _pick_provider(store, tts_pref, need_tts=True) or llm_id
+
+    if not llm_id:
+        db_key = _db_openrouter_key(user_id)
+        if db_key:
+            from backend.tts_voices import DEFAULT_TTS_VOICE, normalize_tts_voice
+
+            tts_voice = normalize_tts_voice(
+                platform.tts_voice, fallback=DEFAULT_TTS_VOICE
+            )
+            openai_voices = {
+                "alloy",
+                "echo",
+                "fable",
+                "onyx",
+                "nova",
+                "shimmer",
+                "coral",
+                "verse",
+                "ballad",
+                "ash",
+                "sage",
+                "marin",
+                "cedar",
+            }
+            if tts_voice.lower() in openai_voices:
+                tts_voice = DEFAULT_TTS_VOICE
+            return replace(
+                platform,
+                openrouter_api_key=db_key,
+                tts_api_key=db_key,
+                tts_base_url="https://openrouter.ai/api/v1",
+                tts_model=_clean_model_id(
+                    os.getenv("TTS_MODEL_BYOK") or "",
+                    fallback="google/gemini-3.1-flash-tts-preview",
+                ),
+                tts_voice=tts_voice,
+            )
 
     llm_key = platform.openrouter_api_key
     llm_base = platform.openrouter_base_url

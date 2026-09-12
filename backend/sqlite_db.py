@@ -152,6 +152,17 @@ def _migrate_json_users(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "openrouter_api_key_enc" not in cols:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN openrouter_api_key_enc TEXT"
+        )
+
+
 def _conn() -> sqlite3.Connection:
     path = str(_db_path())
     current = _state.get("conn")
@@ -165,7 +176,9 @@ def _conn() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.executescript(_SCHEMA)
+    _migrate_schema(conn)
     _migrate_json_users(conn)
+    conn.commit()
     _state["conn"] = conn
     _state["path"] = path
     return conn
@@ -196,6 +209,78 @@ def ensure_user(
         conn.commit()
         row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     return dict(row) if row else {"id": user_id, "email": email, "name": name}
+
+
+def get_user_openrouter_key(user_id: str) -> Optional[str]:
+    from backend.user_secrets import decrypt_secret
+
+    with _LOCK:
+        conn = _conn()
+        row = conn.execute(
+            "SELECT openrouter_api_key_enc FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return decrypt_secret(row["openrouter_api_key_enc"])
+
+
+def user_has_openrouter_key(user_id: str) -> bool:
+    """True when the user has a stored BYOK blob (even if decrypt later fails)."""
+    with _LOCK:
+        conn = _conn()
+        row = conn.execute(
+            "SELECT openrouter_api_key_enc FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return False
+    enc = row["openrouter_api_key_enc"]
+    return bool(enc and str(enc).strip())
+
+
+def set_user_openrouter_key(user_id: str, api_key: str) -> dict[str, Any]:
+    from backend.user_secrets import encrypt_secret, key_fingerprint, mask_api_key
+
+    plain = (api_key or "").strip()
+    if not plain:
+        raise ValueError("API key is empty")
+    enc = encrypt_secret(plain)
+    now = _now()
+    with _LOCK:
+        conn = _conn()
+        conn.execute(
+            """
+            INSERT INTO users (id, created_at, updated_at, openrouter_api_key_enc)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              openrouter_api_key_enc = excluded.openrouter_api_key_enc,
+              updated_at = excluded.updated_at
+            """,
+            (user_id, now, now, enc),
+        )
+        conn.commit()
+    return {
+        "configured": True,
+        "masked_key": mask_api_key(plain),
+        "fingerprint": key_fingerprint(plain),
+    }
+
+
+def clear_user_openrouter_key(user_id: str) -> dict[str, Any]:
+    now = _now()
+    with _LOCK:
+        conn = _conn()
+        conn.execute(
+            """
+            UPDATE users
+            SET openrouter_api_key_enc = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, user_id),
+        )
+        conn.commit()
+    return {"configured": False, "masked_key": None, "fingerprint": None}
 
 
 def _empty_usage(user_id: str) -> dict[str, Any]:
