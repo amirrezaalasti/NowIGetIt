@@ -33,7 +33,7 @@ COPY api ./api
 COPY backend ./backend
 COPY scripts/start-app.sh ./scripts/start-app.sh
 RUN chmod +x ./scripts/start-app.sh \
-    && npm run build \
+    && NEXT_PUBLIC_API_BASE_URL= npm run build \
     && npm prune --omit=dev
 
 ENV NODE_ENV=production

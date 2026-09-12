@@ -179,11 +179,13 @@ def init_job(
     user_name: Optional[str] = None,
 ) -> Path:
     root = job_dir(job_id)
+    kind = str(settings_snapshot.get("kind") or "video").strip() or "video"
     write_json(
         root / "meta.json",
         {
             "job_id": job_id,
             "prompt": prompt,
+            "kind": kind,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "settings": settings_snapshot,
             "user_id": user_id,
@@ -344,8 +346,20 @@ def save_result(job_id: str, data: dict[str, Any]) -> str:
     return write_json(job_dir(job_id) / "result.json", data)
 
 
+def patch_job_meta(job_id: str, **fields: Any) -> dict[str, Any]:
+    """Merge fields into meta.json and mirror to the job index."""
+    path = job_dir(job_id) / "meta.json"
+    meta = _read_json_file(path)
+    if not isinstance(meta, dict):
+        meta = {"job_id": job_id}
+    meta.update({k: v for k, v in fields.items() if v is not None})
+    write_json(path, meta)
+    sync_job_state(job_id)
+    return meta
+
+
 def job_kind(job_id: str, meta: Optional[dict[str, Any]] = None) -> str:
-    """video | document | source | podcast | quiz | interactive."""
+    """video | document | source | podcast | quiz | interactive | paper_pipeline."""
     if isinstance(meta, dict):
         kind = str(meta.get("kind") or "").strip()
         if kind:

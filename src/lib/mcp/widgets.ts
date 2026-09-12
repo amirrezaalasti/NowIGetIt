@@ -147,7 +147,7 @@ function render(){
   var head="Video job";
   if(s.has_final_video||s.video_url) head=s.gif_url?"GIF clip is ready":"Video is ready";
   else if(status==="running"||s.running) head="Rendering clips…";
-  else if(writing) head="Writing Manim · "+saved+" of "+total;
+  else if(writing) head="Writing scenes · "+saved+" of "+total;
   else if(s.awaiting_render) head="Ready to render — confirm in chat";
   else if(s.awaiting_user||s.awaiting_plan||status==="awaiting_plan") head=confirmed?"Review this storyboard":"Pick audio, subtitles, and voice";
   else if(status==="error") head=s.error||"Render failed";

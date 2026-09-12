@@ -92,6 +92,22 @@ export function UserMenu() {
           </div>
 
           <div className="border-t border-[var(--line)] p-2">
+            <Link
+              href="/settings"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className="block rounded-lg px-3 py-2 text-sm text-[var(--ink-muted)] transition hover:bg-[var(--surface)] hover:text-[var(--ink)]"
+            >
+              Settings
+            </Link>
+            <Link
+              href="/pipeline"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className="block rounded-lg px-3 py-2 text-sm text-[var(--ink-muted)] transition hover:bg-[var(--surface)] hover:text-[var(--ink)]"
+            >
+              Paper pipeline
+            </Link>
             <button
               type="button"
               role="menuitem"

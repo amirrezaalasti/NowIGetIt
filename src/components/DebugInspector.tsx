@@ -20,6 +20,7 @@ import {
 import { SceneEditor } from "@/components/SceneEditor";
 import { AuthMedia } from "@/components/AuthMedia";
 import { captureVideoFrame, formatMarkTime, MarkedVideoPlayer } from "@/components/MarkedVideoPlayer";
+import { YoutubePublishButton } from "@/components/YoutubePublishButton";
 
 type JobFilter = "all" | "ready" | "in_progress";
 type StatusTone = "ready" | "live" | "warn" | "muted";
@@ -101,6 +102,7 @@ function kindLabel(job: JobSummary): string | null {
             : "");
   if (!kind || kind === "video") return null;
   if (kind === "interactive") return "lab";
+  if (kind === "paper_pipeline") return "paper";
   return kind;
 }
 
@@ -1156,6 +1158,9 @@ export function DebugInspector({ activeJobId, live = false }: Props) {
                       >
                         Download
                       </a>
+                    )}
+                    {(job.final_video_url || job.urls?.final_video) && (
+                      <YoutubePublishButton jobId={job.job_id} />
                     )}
                     {(job.gif_url || job.urls?.final_gif) && (
                       <a

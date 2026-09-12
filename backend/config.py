@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from dotenv import dotenv_values, load_dotenv
 
@@ -36,6 +38,9 @@ class Settings:
     openrouter_model: str
     openrouter_model_manim: str
     openrouter_vlm_model: str
+    openrouter_image_model: str
+    openrouter_video_model: str
+    enable_movie_video_gen: bool
     openrouter_base_url: str
     openrouter_site_url: str
     openrouter_app_name: str
@@ -56,7 +61,18 @@ class Settings:
     docling_worker_secret: str
 
 
-def get_settings() -> Settings:
+_settings_override: ContextVar[Optional[Settings]] = ContextVar(
+    "settings_override", default=None
+)
+
+
+def set_settings_override(settings: Optional[Settings]) -> None:
+    """Per-request / per-job overlay (BYOK). None restores platform env."""
+    _settings_override.set(settings)
+
+
+def get_platform_settings() -> Settings:
+    """Server env only — ignores the per-user BYOK overlay."""
     _load_env_files()
     # Text LLM (planning / codegen). VLM must be multimodal — do not fall back
     # to OPENROUTER_MODEL when it may be text-only (e.g. DeepSeek).
@@ -70,6 +86,12 @@ def get_settings() -> Settings:
         openrouter_model=text_model,
         openrouter_model_manim=manim_model,
         openrouter_vlm_model=vlm,
+        openrouter_image_model=(
+            os.getenv("OPENROUTER_IMAGE_MODEL") or "google/gemini-2.5-flash-image"
+        ).strip(),
+        openrouter_video_model=(os.getenv("OPENROUTER_VIDEO_MODEL") or "").strip(),
+        enable_movie_video_gen=os.getenv("ENABLE_MOVIE_VIDEO_GEN", "false").lower()
+        in {"1", "true", "yes"},
         openrouter_base_url=os.getenv(
             "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
         ),
@@ -106,3 +128,10 @@ def get_settings() -> Settings:
         docling_worker_url=(os.getenv("DOCLING_WORKER_URL") or "").strip().rstrip("/"),
         docling_worker_secret=(os.getenv("DOCLING_WORKER_SECRET") or "").strip(),
     )
+
+
+def get_settings() -> Settings:
+    override = _settings_override.get()
+    if override is not None:
+        return override
+    return get_platform_settings()

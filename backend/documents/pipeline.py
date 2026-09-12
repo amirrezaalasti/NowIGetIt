@@ -366,6 +366,10 @@ def ask_document_block(
     if request.slide_id not in {s.id for s in manifest.slides}:
         raise ValueError(f"Slide not ready yet: {request.slide_id}")
 
+    if user_id:
+        from backend.user_settings import apply_user_settings
+
+        apply_user_settings(user_id)
     client = OpenRouterClient()
     result = ask_on_manifest(
         client,

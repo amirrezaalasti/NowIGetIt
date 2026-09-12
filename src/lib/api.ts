@@ -1,3 +1,5 @@
+import { isLoopbackHostname, resolveBrowserApiBase } from "./api-origin";
+
 export type PipelineEvent = {
   type: string;
   message: string;
@@ -108,7 +110,7 @@ type TokenCache = { token: string; expiresAt: number };
 let tokenCache: TokenCache | null = null;
 
 function apiBase(): string {
-  return process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") || "";
+  return resolveBrowserApiBase(process.env.NEXT_PUBLIC_API_BASE_URL);
 }
 
 /** Public alias for API origin (non-media calls). */
@@ -396,6 +398,7 @@ export type LengthPreset = "clip" | "short" | "standard" | "deep";
 /** Many short scenes vs fewer longer ones (total video length unchanged). */
 export type ScenePacing = "short" | "balanced" | "long";
 export type Audience = "hs" | "undergrad" | "general";
+export type VisualEngine = "auto" | "manim" | "movie";
 
 export async function fetchHealth(): Promise<{
   ok: boolean;
@@ -566,6 +569,7 @@ export type SceneSectionDraft = {
   duration_seconds: number;
   camera_notes?: string;
   visual_device?: string;
+  visual_engine?: "manim" | "movie" | "";
   style_tags?: string[];
 };
 
@@ -586,6 +590,7 @@ export type GenerateOptions = {
   length_preset?: LengthPreset;
   scene_pacing?: ScenePacing;
   audience?: Audience;
+  visual_engine?: VisualEngine;
   language?: string;
   tts_voice?: string;
   /** Generate spoken narration (default true). */
@@ -602,6 +607,13 @@ function friendlyFetchError(err: unknown, action: string): Error {
     msg.includes("NetworkError") ||
     msg.includes("Load failed")
   ) {
+    const hosted =
+      typeof window !== "undefined" && !isLoopbackHostname(window.location.hostname);
+    if (hosted) {
+      return new Error(
+        `${action}: cannot reach the API on this site. Refresh, or check that /api is up.`,
+      );
+    }
     const base = apiBase() || "(same-origin / Next rewrite)";
     return new Error(
       `${action}: cannot reach API at ${base}. Start it with npm run dev:api (or npm run dev:all).`,
@@ -668,6 +680,7 @@ export async function streamGenerate(
         length_preset: opts.length_preset ?? "standard",
         scene_pacing: opts.scene_pacing ?? "balanced",
         audience: opts.audience ?? "general",
+        visual_engine: opts.visual_engine ?? "auto",
         language: opts.language ?? "en",
         plan_only: opts.plan_only ?? true,
         ...(opts.plan_only ?? true
@@ -763,6 +776,10 @@ function planDraftFromRecord(data: Record<string, unknown>): ScenePlanDraft {
       duration_seconds: Number(s.duration_seconds) || 8,
       camera_notes: String(s.camera_notes || ""),
       visual_device: String(s.visual_device || ""),
+      visual_engine:
+        s.visual_engine === "movie" || s.visual_engine === "manim"
+          ? s.visual_engine
+          : "",
       style_tags: Array.isArray(s.style_tags) ? (s.style_tags as string[]) : [],
     })),
   };
@@ -1479,4 +1496,265 @@ export async function submitLabProgress(
   );
   if (!res.ok) throw await readError(res, "Progress failed");
   return res.json();
+}
+
+export type ProviderCatalogItem = {
+  id: string;
+  label: string;
+  kind: "llm" | "tts" | "both" | string;
+  base_url: string;
+  default_llm: string;
+  default_manim: string;
+  default_vlm: string;
+  default_tts: string;
+  docs_url: string;
+  placeholder: string;
+  notes: string;
+};
+
+export type SavedProviderKey = {
+  provider: string;
+  configured: boolean;
+  hint: string;
+  base_url?: string;
+  updated_at?: string | null;
+};
+
+export type ProviderPrefs = {
+  llm_provider: string;
+  tts_provider: string;
+  llm_model: string;
+  manim_model: string;
+  vlm_model: string;
+  tts_model: string;
+};
+
+export type KeysState = {
+  providers: ProviderCatalogItem[];
+  keys: SavedProviderKey[];
+  prefs: ProviderPrefs;
+  platform: { llm: boolean; tts: boolean };
+  active: {
+    llm_provider: string;
+    tts_provider: string;
+    llm_model: string;
+    manim_model: string;
+    vlm_model: string;
+    tts_model: string;
+    using_own_llm_key: boolean;
+    using_own_tts_key: boolean;
+    llm_ready: boolean;
+    tts_ready: boolean;
+  };
+};
+
+export async function fetchKeys(): Promise<KeysState> {
+  const res = await fetch(`${apiBase()}/api/me/keys`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw await readError(res, "Failed to load provider keys");
+  return res.json();
+}
+
+export async function saveProviderKey(
+  provider: string,
+  apiKey: string,
+  baseUrl?: string,
+): Promise<SavedProviderKey> {
+  const res = await fetch(`${apiBase()}/api/me/keys`, {
+    method: "PUT",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      provider,
+      api_key: apiKey,
+      base_url: baseUrl || undefined,
+    }),
+    cache: "no-store",
+  });
+  if (!res.ok) throw await readError(res, "Failed to save API key");
+  return res.json();
+}
+
+export async function deleteProviderKey(provider: string): Promise<KeysState> {
+  const res = await fetch(
+    `${apiBase()}/api/me/keys/${encodeURIComponent(provider)}`,
+    {
+      method: "DELETE",
+      headers: await authHeaders(),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) throw await readError(res, "Failed to delete API key");
+  return res.json();
+}
+
+export async function saveProviderPrefs(
+  prefs: Partial<ProviderPrefs>,
+): Promise<KeysState> {
+  const res = await fetch(`${apiBase()}/api/me/keys/prefs`, {
+    method: "PUT",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(prefs),
+    cache: "no-store",
+  });
+  if (!res.ok) throw await readError(res, "Failed to save provider preferences");
+  return res.json();
+}
+
+export async function validateProviderKey(
+  provider: string,
+  apiKey?: string,
+  baseUrl?: string,
+): Promise<{ ok: boolean; provider: string }> {
+  const res = await fetch(`${apiBase()}/api/me/keys/validate`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      provider,
+      api_key: apiKey || undefined,
+      base_url: baseUrl || undefined,
+    }),
+    cache: "no-store",
+  });
+  if (!res.ok) throw await readError(res, "Key check failed");
+  return res.json();
+}
+
+export type YoutubeStatus = {
+  configured: boolean;
+  connected: boolean;
+  channel_title?: string | null;
+  channel_id?: string | null;
+  updated_at?: string | null;
+  redirect_path?: string;
+  return_to?: string;
+};
+
+export async function fetchYoutubeStatus(): Promise<YoutubeStatus> {
+  const res = await fetch(`${apiBase()}/api/me/youtube`, {
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw await readError(res, "Failed to load YouTube status");
+  return res.json();
+}
+
+export async function youtubeConnectUrl(
+  origin: string,
+  returnTo = "/pipeline",
+): Promise<{ url: string; redirect_uri: string; configured: boolean }> {
+  const params = new URLSearchParams({ origin, return_to: returnTo });
+  const res = await fetch(
+    `${apiBase()}/api/me/youtube/connect?${params.toString()}`,
+    {
+      headers: await authHeaders(),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) throw await readError(res, "Failed to start YouTube connect");
+  return res.json();
+}
+
+export async function disconnectYoutube(): Promise<YoutubeStatus> {
+  const res = await fetch(`${apiBase()}/api/me/youtube`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw await readError(res, "Failed to disconnect YouTube");
+  return res.json();
+}
+
+export type YoutubePublishResult = {
+  video_id: string;
+  url: string;
+  title: string;
+  privacy: string;
+  channel_title?: string | null;
+};
+
+export async function publishJobToYoutube(
+  jobId: string,
+  opts?: {
+    title?: string;
+    description?: string;
+    privacy?: "public" | "unlisted" | "private";
+    tags?: string[];
+  },
+): Promise<YoutubePublishResult> {
+  const res = await fetch(`${apiBase()}/api/jobs/${jobId}/publish/youtube`, {
+    method: "POST",
+    headers: await authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      title: opts?.title,
+      description: opts?.description,
+      privacy: opts?.privacy ?? "unlisted",
+      tags: opts?.tags,
+    }),
+    cache: "no-store",
+  });
+  if (!res.ok) throw await readError(res, "YouTube publish failed");
+  return res.json();
+}
+
+export type PaperPipelineOptions = {
+  prompt?: string;
+  source_doc_ids: string[];
+  resolution?: "480p" | "720p" | "1080p";
+  length_preset?: LengthPreset;
+  scene_pacing?: ScenePacing;
+  audience?: Audience;
+  language?: string;
+  tts_voice?: string;
+  include_audio?: boolean;
+  include_subtitles?: boolean;
+  auto_publish?: boolean;
+  youtube_privacy?: "public" | "unlisted" | "private";
+  youtube_title?: string;
+  youtube_description?: string;
+};
+
+export async function streamPaperPipeline(
+  options: PaperPipelineOptions,
+  onEvent: (event: PipelineEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    const res = await fetch(`${apiBase()}/api/pipelines/paper/stream`, {
+      method: "POST",
+      headers: await authHeaders({
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      }),
+      body: JSON.stringify({
+        prompt: options.prompt ?? "",
+        source_doc_ids: options.source_doc_ids,
+        resolution: options.resolution ?? "720p",
+        length_preset: options.length_preset ?? "standard",
+        scene_pacing: options.scene_pacing ?? "balanced",
+        audience: options.audience ?? "general",
+        language: options.language ?? "en",
+        tts_voice: options.tts_voice ?? "Kore",
+        include_audio: options.include_audio ?? true,
+        include_subtitles: options.include_subtitles ?? true,
+        plan_only: false,
+        kind: "paper_pipeline",
+        auto_publish: options.auto_publish ?? false,
+        youtube_privacy: options.youtube_privacy ?? "unlisted",
+        youtube_title: options.youtube_title,
+        youtube_description: options.youtube_description,
+      }),
+      signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(detail || `Paper pipeline failed (${res.status})`);
+    }
+    await readSseStream(res, onEvent);
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw friendlyFetchError(err, "Paper pipeline");
+  }
 }

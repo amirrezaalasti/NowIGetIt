@@ -183,6 +183,7 @@ function sceneSummaries(
       narration,
       beats,
       has_code: typeof art.code_final === "string" && art.code_final.length > 40,
+      visual_engine: scene.visual_engine === "movie" ? "movie" : "manim",
       clip_path: typeof art.video_url === "string" ? art.video_url : null,
       preview_path:
         typeof lastReview?.frame_url === "string" ? lastReview.frame_url : previewPath,
@@ -298,10 +299,19 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     plan,
     Array.isArray(job.scenes) ? (job.scenes as Array<Record<string, unknown>>) : [],
   );
-  const codedCount = rawScenes.filter((scene) => scene.has_code).length;
+  const manimScenes = rawScenes.filter((scene) => scene.visual_engine !== "movie");
+  const codedCount = manimScenes.filter((scene) => scene.has_code).length;
   const totalScenes = rawScenes.length;
-  const allCoded = totalScenes > 0 && codedCount === totalScenes;
-  const writingCode = codedCount > 0 && !allCoded && !running && !done && !failed && !awaiting;
+  const manimTotal = manimScenes.length;
+  const allCoded = totalScenes > 0 && manimScenes.every((scene) => scene.has_code);
+  const writingCode =
+    manimTotal > 0 &&
+    codedCount > 0 &&
+    !allCoded &&
+    !running &&
+    !done &&
+    !failed &&
+    !awaiting;
   const readyToRender =
     (status === "awaiting_render" || allCoded) &&
     allCoded &&
@@ -322,11 +332,15 @@ async function jobPayload(origin: string, job: Record<string, unknown>) {
     next_step = "ask_production_options";
   } else if (awaiting) {
     message =
-      "STOP. Show the numbered storyboard to the user (title + narration per scene) and wait for approval or edit requests. They can change any scene with update_scene, or you can rewrite the plan with revise_plan / edit_storyboard. Do not render or write Manim yet.";
+      manimTotal === 0 && totalScenes > 0
+        ? "STOP. Show the numbered storyboard. After they approve, call render_video with user_confirmed true — cinematic movie scenes are filmed server-side. Do not write Manim."
+        : manimTotal < totalScenes
+          ? "STOP. Show the numbered storyboard. After approval, write Manim only for visual_engine=manim scenes (video_codegen_spec + submit_scene_code). Movie scenes are filmed at render_video. Do not render yet."
+          : "STOP. Show the numbered storyboard to the user (title + narration per scene) and wait for approval or edit requests. They can change any scene with update_scene, or you can rewrite the plan with revise_plan / edit_storyboard. Do not render or write Manim yet.";
     next_step = "present_storyboard_to_user";
   } else if (writingCode) {
     message =
-      `Writing Manim: ${codedCount} of ${totalScenes} scenes have code. LOOK AT THE PREVIEW IMAGE for the scene you just saved. Write 1-2 sentences to the user about what the frame shows (and any layout issues). Then video_codegen_spec + submit_scene_code for the next missing scene. Do not call render_video yet. Never submit another scene without describing this preview.`;
+      `Writing diagram scenes: ${codedCount} of ${manimTotal} Manim scenes have code. LOOK AT THE PREVIEW IMAGE for the scene you just saved. Then video_codegen_spec + submit_scene_code for the next missing Manim scene. Movie scenes are filmed at render_video.`;
     next_step = "write_next_scene";
     do_not_call.push("render_video", "continue_video");
   } else if (readyToRender) {
@@ -809,6 +823,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
                   visual_description: z.string().optional(),
                   camera_notes: z.string().optional(),
                   visual_device: z.string().optional(),
+                  visual_engine: z.enum(["manim", "movie"]).optional(),
                   beats: z
                     .array(
                       z.object({
@@ -832,6 +847,12 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
           ),
         audience: z.enum(["hs", "undergrad", "general"]).optional(),
         language: z.string().min(2).max(16).optional(),
+        visual_engine: z
+          .enum(["auto", "manim", "movie"])
+          .optional()
+          .describe(
+            "auto = Manim for diagrams, cinematic movie shots for real-world scenes. manim = diagrams only. movie = illustrated cinematic shots (no Manim).",
+          ),
         source_doc_ids: z
           .array(z.string().min(1))
           .max(6)
@@ -842,7 +863,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
       outputSchema: JOB_OUTPUT,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ prompt, plan, length_preset, audience, language, source_doc_ids }) => {
+    async ({ prompt, plan, length_preset, audience, language, visual_engine, source_doc_ids }) => {
       try {
         const started = await startSse(
           origin,
@@ -856,6 +877,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
             scene_pacing: "balanced",
             audience: audience ?? "general",
             language: language ?? "en",
+            visual_engine: visual_engine ?? "auto",
             plan_only: true,
             scene_plan: plan,
           }),
@@ -887,7 +909,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
     {
       title: "Manim codegen spec",
       description:
-        "Only after the user approved the storyboard AND you saved their audio/subtitle/voice choices with update_video_options. Returns Manim rules for one scene. You write Python, then submit_scene_code. After submit, you will get a preview image — describe it to the user before the next scene. Text() only — never MathTex.",
+        "Only after the user approved the storyboard AND you saved their audio/subtitle/voice choices with update_video_options. For Manim scenes: returns Python rules. For movie scenes: returns a cinematic shot-list schema (JSON, not Manim). After submit_scene_code you may get a preview — describe it before the next scene.",
       inputSchema: z.object({
         job_id: z.string().min(4),
         scene_id: z.string().min(1).describe("e.g. scene_1"),
@@ -1236,6 +1258,7 @@ export function registerNowIGetIt(server: McpServer, origin: string) {
         visual_description: z.string().max(4000).optional(),
         duration_seconds: z.number().min(2).max(120).optional(),
         visual_device: z.string().max(200).optional(),
+        visual_engine: z.enum(["manim", "movie"]).optional(),
         camera_notes: z.string().max(2000).optional(),
         beats: z
           .array(

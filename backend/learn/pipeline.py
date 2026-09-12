@@ -86,6 +86,10 @@ def run_learn(
             on_event(etype, message, event["data"])
 
     emit("start", "Working out how to teach this…", {"step": "blueprint.start"})
+    if user_id:
+        from backend.user_settings import apply_user_settings
+
+        apply_user_settings(user_id)
     client = OpenRouterClient()
     try:
         blueprint = create_teaching_blueprint(

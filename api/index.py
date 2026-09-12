@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -77,7 +77,11 @@ from backend.schemas import (
     GenerateRequest,
     GenerateResult,
     JobSettingsRequest,
+    PaperPipelineRequest,
     PatchSceneRequest,
+    ProviderKeyRequest,
+    ProviderKeyValidateRequest,
+    ProviderPrefsRequest,
     RegenerateSceneRequest,
     RevisePlanRequest,
     SceneComment,
@@ -86,6 +90,8 @@ from backend.schemas import (
     SubmitSceneCodeRequest,
     UpdatePlanRequest,
     VideoMarkRequest,
+    YoutubeCompleteRequest,
+    YoutubePublishRequest,
 )
 
 
@@ -124,6 +130,18 @@ def _quota_http(exc: db.QuotaExceededError) -> HTTPException:
     )
 
 
+def _reserve_generation(user_id: str) -> None:
+    from backend.user_settings import using_own_llm_key
+
+    if using_own_llm_key(user_id):
+        return
+    settings = get_settings()
+    db.reserve_generation(
+        user_id,
+        estimated_tokens=settings.default_llm_estimate_tokens,
+    )
+
+
 def _prepare_user(user: CurrentUser) -> None:
     db.ensure_user(
         user_id=user.id,
@@ -131,6 +149,9 @@ def _prepare_user(user: CurrentUser) -> None:
         name=user.name,
         image_url=user.image,
     )
+    from backend.user_settings import apply_user_settings
+
+    apply_user_settings(user.id)
 
 app = FastAPI(
     title="NowIGetIt API",
@@ -145,6 +166,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _reset_byok_settings(request, call_next):
+    """Do not leak one user's BYOK overlay onto the next request on this worker."""
+    from backend.config import set_settings_override
+
+    set_settings_override(None)
+    return await call_next(request)
 
 
 def _require_job_owner(job_id: str, user_id: str) -> None:
@@ -236,6 +266,8 @@ def health() -> dict:
             docling_ok = False
             docling_detail = f"unreachable: {exc}"
 
+    from backend.youtube import youtube_oauth_configured
+
     return {
         "ok": True,
         "model": settings.openrouter_model,
@@ -250,6 +282,9 @@ def health() -> dict:
         "manim_render_enabled": settings.enable_manim_render,
         "manim_available": manim_available,
         "manim_version": manim_version,
+        "image_model": settings.openrouter_image_model,
+        "video_model": settings.openrouter_video_model or None,
+        "movie_video_gen": settings.enable_movie_video_gen,
         "artifacts_root": artifacts_path,
         "auth_configured": auth_is_configured(),
         "supabase_configured": db.supabase_enabled(),
@@ -265,6 +300,8 @@ def health() -> dict:
         "docling_worker_ok": docling_ok,
         "docling_worker_detail": docling_detail,
         "document_extensions": sorted(SUPPORTED_EXTENSIONS),
+        "byok": True,
+        "youtube_oauth_configured": youtube_oauth_configured(),
     }
 
 
@@ -315,7 +352,217 @@ async def set_my_storage(request: StorageModeRequest, user: CurrentUser) -> dict
     }
 
 
-@app.get("/api/tts/preview")
+@app.get("/api/me/keys")
+def list_my_keys(user: CurrentUser) -> dict:
+    _prepare_user(user)
+    from backend.user_settings import public_key_state
+
+    return public_key_state(user.id)
+
+
+@app.put("/api/me/keys")
+def upsert_my_key(request: ProviderKeyRequest, user: CurrentUser) -> dict:
+    _prepare_user(user)
+    from backend.user_settings import apply_user_settings, save_provider_key
+
+    try:
+        saved = save_provider_key(
+            user.id,
+            request.provider,
+            request.api_key,
+            base_url=request.base_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    apply_user_settings(user.id)
+    return saved
+
+
+@app.delete("/api/me/keys/{provider}")
+def delete_my_key(provider: str, user: CurrentUser) -> dict:
+    _prepare_user(user)
+    from backend.user_settings import apply_user_settings, delete_provider_key, public_key_state
+
+    delete_provider_key(user.id, provider)
+    apply_user_settings(user.id)
+    return public_key_state(user.id)
+
+
+@app.put("/api/me/keys/prefs")
+def update_my_key_prefs(request: ProviderPrefsRequest, user: CurrentUser) -> dict:
+    _prepare_user(user)
+    from backend.user_settings import apply_user_settings, public_key_state, save_prefs
+
+    try:
+        save_prefs(user.id, request.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    apply_user_settings(user.id)
+    return public_key_state(user.id)
+
+
+@app.post("/api/me/keys/validate")
+def validate_my_key(request: ProviderKeyValidateRequest, user: CurrentUser) -> dict:
+    _prepare_user(user)
+    from backend.user_settings import validate_provider_key
+
+    try:
+        return validate_provider_key(
+            user.id,
+            request.provider,
+            request.api_key,
+            base_url=request.base_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/me/youtube")
+def youtube_status(user: CurrentUser) -> dict:
+    _prepare_user(user)
+    from backend.youtube import public_status, youtube_oauth_configured
+
+    status = public_status(user.id)
+    status["redirect_path"] = "/api/youtube/callback"
+    status["configured"] = youtube_oauth_configured()
+    return status
+
+
+@app.get("/api/me/youtube/connect")
+def youtube_connect(
+    user: CurrentUser,
+    origin: str = Query(..., min_length=8, max_length=200),
+    return_to: str = Query("/pipeline", max_length=200),
+) -> dict:
+    _prepare_user(user)
+    from backend.youtube import auth_url, redirect_uri_for, youtube_oauth_configured
+
+    origin = origin.strip().rstrip("/")
+    if not origin.startswith("http"):
+        raise HTTPException(status_code=400, detail="origin must be an http(s) URL")
+    try:
+        url = auth_url(user_id=user.id, origin=origin, return_to=return_to)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "url": url,
+        "redirect_uri": redirect_uri_for(origin),
+        "configured": youtube_oauth_configured(),
+    }
+
+
+@app.post("/api/me/youtube/complete")
+def youtube_complete(request: YoutubeCompleteRequest, user: CurrentUser) -> dict:
+    _prepare_user(user)
+    from backend.youtube import complete_oauth, decode_oauth_state
+
+    try:
+        state = decode_oauth_state(request.state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if state["user_id"] != user.id:
+        raise HTTPException(status_code=403, detail="YouTube OAuth state does not match this account")
+    origin = request.origin.strip().rstrip("/")
+    try:
+        status = complete_oauth(user_id=user.id, code=request.code, origin=origin)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    status["return_to"] = state["return_to"]
+    return status
+
+
+@app.delete("/api/me/youtube")
+def youtube_disconnect(user: CurrentUser) -> dict:
+    _prepare_user(user)
+    from backend.youtube import disconnect
+
+    return disconnect(user.id)
+
+
+@app.post("/api/jobs/{job_id}/publish/youtube")
+def publish_job_youtube(
+    job_id: str, request: YoutubePublishRequest, user: CurrentUser
+) -> dict:
+    _prepare_user(user)
+    _require_job_owner(job_id, user.id)
+    from backend.youtube import publish_job
+
+    try:
+        return publish_job(
+            user_id=user.id,
+            job_id=job_id,
+            title=request.title,
+            description=request.description,
+            privacy=request.privacy,
+            tags=request.tags,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/pipelines/paper/stream")
+def paper_pipeline_stream(
+    request: PaperPipelineRequest, user: CurrentUser
+) -> StreamingResponse:
+    """SSE: ingest papers → render explainer → optional YouTube publish."""
+    try:
+        _prepare_user(user)
+        _reserve_generation(user.id)
+    except db.QuotaExceededError as exc:
+        raise _quota_http(exc) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    from backend.paper_pipeline import iter_paper_pipeline_events
+
+    generate = GenerateRequest(
+        prompt=request.prompt,
+        source_doc_ids=request.source_doc_ids,
+        resolution=request.resolution,
+        skip_render=request.skip_render,
+        length_preset=request.length_preset,
+        scene_pacing=request.scene_pacing,
+        audience=request.audience,
+        language=request.language,
+        tts_voice=request.tts_voice,
+        include_audio=request.include_audio,
+        include_subtitles=request.include_subtitles,
+        plan_only=False,
+        visual_engine=request.visual_engine,
+        kind="paper_pipeline",
+    )
+
+    def event_stream():
+        try:
+            for chunk in iter_paper_pipeline_events(
+                generate,
+                user_id=user.id,
+                user_email=user.email,
+                user_name=user.name,
+                auto_publish=request.auto_publish,
+                youtube_privacy=request.youtube_privacy,
+                youtube_title=request.youtube_title,
+                youtube_description=request.youtube_description,
+            ):
+                yield chunk
+        except db.QuotaExceededError as exc:
+            import json
+
+            yield (
+                f"data: {json.dumps({'type': 'error', 'message': exc.detail, 'data': {'code': exc.code}})}\n\n"
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 def preview_tts(voice: str, user: MediaUser) -> FileResponse:
     """Generate or return a cached audio preview for a specific voice."""
     try:
@@ -358,10 +605,7 @@ def generate(request: GenerateRequest, user: CurrentUser) -> GenerateResult:
     settings = get_settings()
     try:
         _prepare_user(user)
-        db.reserve_generation(
-            user.id,
-            estimated_tokens=settings.default_llm_estimate_tokens,
-        )
+        _reserve_generation(user.id)
         return run_pipeline(
             request,
             user_id=user.id,
@@ -383,10 +627,7 @@ def generate_stream(request: GenerateRequest, user: CurrentUser) -> StreamingRes
     try:
         _prepare_user(user)
         if request.scene_plan is None:
-            db.reserve_generation(
-                user.id,
-                estimated_tokens=settings.default_llm_estimate_tokens,
-            )
+            _reserve_generation(user.id)
     except db.QuotaExceededError as exc:
         raise _quota_http(exc) from exc
     except Exception as exc:  # noqa: BLE001
@@ -489,6 +730,7 @@ def patch_scene(
             visual_description=body.visual_description,
             duration_seconds=body.duration_seconds,
             visual_device=body.visual_device,
+            visual_engine=body.visual_engine,
             camera_notes=body.camera_notes,
             beats=(
                 [beat.model_dump() for beat in body.beats]
@@ -1022,10 +1264,7 @@ async def upload_document(
         )
     try:
         _prepare_user(user)
-        db.reserve_generation(
-            user.id,
-            estimated_tokens=settings.default_llm_estimate_tokens,
-        )
+        _reserve_generation(user.id)
     except db.QuotaExceededError as exc:
         raise _quota_http(exc) from exc
 
@@ -1080,10 +1319,7 @@ async def upload_document_stream(
         )
     try:
         _prepare_user(user)
-        db.reserve_generation(
-            user.id,
-            estimated_tokens=settings.default_llm_estimate_tokens,
-        )
+        _reserve_generation(user.id)
     except db.QuotaExceededError as exc:
         raise _quota_http(exc) from exc
 
@@ -1154,10 +1390,7 @@ def learn_generate(request: LearnGenerateRequest, user: CurrentUser) -> dict:
     settings = get_settings()
     try:
         _prepare_user(user)
-        db.reserve_generation(
-            user.id,
-            estimated_tokens=settings.default_llm_estimate_tokens,
-        )
+        _reserve_generation(user.id)
         return run_learn(
             request,
             user_id=user.id,
@@ -1179,10 +1412,7 @@ def learn_generate_stream(
     settings = get_settings()
     try:
         _prepare_user(user)
-        db.reserve_generation(
-            user.id,
-            estimated_tokens=settings.default_llm_estimate_tokens,
-        )
+        _reserve_generation(user.id)
     except db.QuotaExceededError as exc:
         raise _quota_http(exc) from exc
     except Exception as exc:  # noqa: BLE001

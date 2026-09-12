@@ -399,10 +399,15 @@ instead of feeling like disconnected clips):
 VISUAL DEVICE: pick ONE per scene from: number_line | unit_circle | before_after |
 particle_flow | equation_reveal | axes_graph | lattice_grid | morph_transform |
 house_section | comparison_split | labeled_box_flow | gate_mechanism |
-annotated_diagram | path_trace | vector_field | angle_tracker | boolean_sets.
+annotated_diagram | path_trace | vector_field | angle_tracker | boolean_sets |
+cinematic_shot | illustrated_metaphor | process_in_world | character_story |
+macroscopic_cutaway.
 Use labeled_box_flow / gate_mechanism / annotated_diagram for neural nets, pipelines,
 gates, and other box+arrow systems; prefer path_trace / vector_field /
 angle_tracker / boolean_sets for orbits, fields, angles, or set operations.
+Use cinematic_shot / illustrated_metaphor / process_in_world when the idea is a
+real-world process, organism, place, or story — those scenes render as a movie,
+not Manim.
 
 STYLE:
 - style_tags: 2-4 lowercase keywords for template matching, e.g. ["gate","sigmoid","lstm"].
@@ -441,12 +446,36 @@ Return ONLY a JSON object with this shape:
       "duration_seconds": number,
       "camera_notes": string,
       "visual_device": string,
+      "visual_engine": "manim" | "movie",
       "style_tags": [string],
       "covers_steps": [string]
     }
   ]
 }
 """.replace("__SCENE_MIN__", f"{MIN_SCENE_SECONDS:.0f}")
+
+ENGINE_GUIDANCE = {
+    "manim": (
+        "VISUAL ENGINE: manim. Every scene is a Manim diagram. Set "
+        "visual_engine to \"manim\" on every scene. Plan motions that a "
+        "single Scene class can draw (shapes, arrows, graphs, labels).\n"
+    ),
+    "movie": (
+        "VISUAL ENGINE: movie. Every scene is a cinematic illustrated shot, "
+        "NOT a Manim diagram. Set visual_engine to \"movie\" on every scene. "
+        "visual_action describes camera + pictured action in the real or "
+        "illustrated world (a cell splitting, a storm front, a person walking "
+        "a number line drawn on a sidewalk). Do not plan axes-and-equation "
+        "scenes — those belong to Manim.\n"
+    ),
+    "auto": (
+        "VISUAL ENGINE: auto. Set visual_engine per scene. Use \"manim\" for "
+        "graphs, equations, proofs, number lines, and geometric diagrams. Use "
+        "\"movie\" for real-world processes, biology, history, photoreal or "
+        "illustrated metaphors, and character-driven scenes. Mix them in one "
+        "video when that teaches better (a movie hook, then a Manim mechanism).\n"
+    ),
+}
 
 
 # Full multi-scene plans (esp. non-English) routinely exceed 4k completion
@@ -482,6 +511,7 @@ def create_scene_plan(
     audience: str = "general",
     language: str = "en",
     blueprint: Optional[TeachingBlueprint] = None,
+    visual_engine: str = "auto",
     on_progress: Optional[ProgressCallback] = None,
 ) -> ScenePlan:
     pacing = scene_pacing if scene_pacing in SCENE_PACING_VALUES else "balanced"
@@ -540,6 +570,8 @@ CRITICAL: the JSON MUST include a top-level "scenes" array with
 {min_scenes}-{max_scenes} scene objects. Do not stop after title/summary/
 palette — emit every scene before ending the response.
 """
+    engine_key = visual_engine if visual_engine in ENGINE_GUIDANCE else "auto"
+    user += ENGINE_GUIDANCE[engine_key]
     last_err = None
     _progress(
         f"Sketching a {length_preset} / {pacing}-paced storyboard in {lang_name} "
@@ -744,7 +776,7 @@ def planning_spec_payload() -> dict[str, Any]:
     from backend.schemas import ScenePlan
 
     return {
-        "role": "You write the storyboard. Now I Get It only validates, renders Manim, and stitches audio.",
+        "role": "You write the storyboard. Now I Get It validates, renders Manim and cinematic movie scenes, and stitches audio.",
         "length_target_seconds": {
             key: {"min": lo, "max": hi} for key, (lo, hi) in LENGTH_TARGET_SECONDS.items()
         },
@@ -764,6 +796,7 @@ def planning_spec_payload() -> dict[str, Any]:
             "Narration language must match the requested language. Keep on-screen text sparse.",
             "Reuse palette + recurring_elements so scenes look like one video.",
             "Do not use MathTex/LaTeX in later Manim code — plan visuals that work with plain Text().",
+            "Set visual_engine per scene: manim for diagrams/graphs/proofs; movie for cinematic illustrated real-world shots. Mix them when it teaches better.",
             "Total spoken duration should land inside length_target_seconds for the chosen preset.",
             "If length_preset is clip: 1–2 scenes totaling 8–15 seconds, looping GIF. One motion, one idea. Match the opening and closing pose. Narration is optional short labels — not a lecture.",
         ],
@@ -774,6 +807,7 @@ def planning_spec_payload() -> dict[str, Any]:
             "duration_seconds": 12,
             "visual_description": "A simple two-node network; an arrow labeled error points backward.",
             "visual_device": "equation_reveal",
+            "visual_engine": "manim",
             "beats": [
                 {
                     "visual_action": "Fade in two circles labeled input and output, then grow an arrow between them.",

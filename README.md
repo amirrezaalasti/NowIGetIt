@@ -23,6 +23,8 @@ Turn a sentence into a **Manim explainer video**, a **podcast**, a **quiz**, or 
 | 🎬 Make a video in the browser | [Getting started](#getting-started) |
 | 🎧 Podcast, quiz, or interactive lab | [Learn](#learn) |
 | 📄 Study a PDF / PPTX | [Understand](#understand) |
+| 🔑 Use your own LLM / TTS keys | [BYOK](#byok) |
+| 📺 Paper → YouTube | [Paper pipeline](#pipeline) |
 | 🔌 Use it from ChatGPT / Claude / Cursor | [MCP connector](#mcp) |
 | 🧪 Inspect tools locally | [MCP Inspector](#inspector) |
 | 🚀 Deploy | [Deploy](#deploy) |
@@ -64,7 +66,9 @@ On the website: open [http://localhost:3000](http://localhost:3000) after [Getti
 
 ### 🎬 Create (video)
 
-LLM scene planning → Manim codegen → VLM frame review → TTS narration → stitched video.
+LLM scene planning → **Manim** diagrams and/or **cinematic movie** shots → VLM frame review → TTS narration → stitched video.
+
+Pick **Picture: Auto / Manim / Movie** before you plan. Auto uses Manim for graphs, proofs, and equations, and illustrated cinematic shots (generated stills with camera motion, optional image-to-video) for real-world biology, history, and metaphor scenes. You can mix engines in one video.
 
 You always see a **storyboard first**. Change scenes, narration, voice, audio, and subtitles before anything renders. After a video exists, pause on a frame, **mark that moment**, leave a comment, and the agent retouches from that screenshot and timestamp.
 
@@ -84,6 +88,16 @@ Same teaching blueprint as video, three other ways to make it click:
 
 Open **`/learn`**. Jobs land in Library with a kind badge. Same file attach as Create: drop notes or pick a document, then generate from that source.
 
+### 🔑 Bring your own key (BYOK) <a id="byok"></a>
+
+Open **`/settings`**. Paste an API key for OpenRouter, OpenAI, Gemini, Anthropic, Groq, DeepSeek, Mistral, xAI, Together, Fireworks, or any OpenAI-compatible host. Keys are encrypted at rest. Choose which provider to use for LLM vs TTS. Your key skips the shared monthly quota.
+
+### 📺 Paper pipeline (PDF → video → YouTube) <a id="pipeline"></a>
+
+Open **`/pipeline`**. Connect YouTube (a separate Google grant for upload), attach papers or PDFs, pick length and voice, then run. The pipeline generates a full explainer (no storyboard pause) and can auto-publish as unlisted/private/public. You can also hit **Publish to YouTube** on any finished video in Library.
+
+In Google Cloud: enable **YouTube Data API v3**, and add redirect URI `{origin}/api/youtube/callback` to the same OAuth client as login.
+
 ### 🔌 ChatGPT / Claude / Cursor
 
 The same Create + Understand APIs as a **remote MCP server** at `/api/mcp`. Setup page: **`/connect`**. Sign in with Google — no API key to paste. Videos and docs show up in **Library**.
@@ -98,7 +112,7 @@ The same Create + Understand APIs as a **remote MCP server** at `/api/mcp`. Setu
 
 ## 🔌 MCP connector — ChatGPT, Claude & Cursor <a id="mcp"></a>
 
-Remote **Streamable HTTP** MCP. The chat model writes the storyboard and Manim; this server validates, renders, narrates, and stitches.
+Remote **Streamable HTTP** MCP. The chat model writes the storyboard (and Manim for diagram scenes); this server validates, films cinematic movie scenes, renders Manim, narrates, and stitches.
 
 **Production**
 
@@ -130,7 +144,7 @@ flowchart LR
 1. Model writes a `plan` object and calls `create_video` (never stuff JSON inside `prompt`).
 2. **Stop.** You see numbered scenes. Ask for changes if you want.
 3. Pick **spoken audio**, **burned-in subtitles**, and **voice** → `update_video_options`.
-4. After you approve: Manim **one scene at a time** (`video_codegen_spec` → `submit_scene_code`). Each submit returns a **last-frame preview image**. The model looks at it, tells you what it sees, then continues. `Text()` only — never `MathTex`.
+4. After you approve: write **Manim** only for `visual_engine=manim` scenes (`video_codegen_spec` → `submit_scene_code`). Cinematic **movie** scenes are filmed server-side at render. Each Manim submit returns a last-frame preview — describe it before the next diagram scene. `Text()` only — never `MathTex`.
 5. Tap **Fix this scene** / **Looks good** on the in-chat storyboard, or just say so in chat.
 6. `render_video` with `user_confirmed: true`. If `poll_again`, keep calling `get_job` with the **same** `job_id`. Don’t start a new job.
 7. New stills keep arriving while it renders. Use `retouch_scene` to fix one clip. If they marked frames while watching, call `list_video_marks` then `retouch_scene` with that `comment_id` and timestamp.
@@ -337,9 +351,12 @@ cp .env.example .env
 | `OPENROUTER_MODEL` | No | General text LLM (documents / Understand) |
 | `OPENROUTER_MODEL_MANIM` | No | Manim pipeline LLM (planning, codegen, code QA; falls back to `OPENROUTER_MODEL`) |
 | `OPENROUTER_VLM_MODEL` | No | Vision model for frame review |
+| `OPENROUTER_IMAGE_MODEL` | No | Image model for cinematic movie stills |
+| `OPENROUTER_VIDEO_MODEL` | No | Optional image-to-video model (Veo / Wan / Hailuo) |
+| `ENABLE_MOVIE_VIDEO_GEN` | No | `true` to animate movie stills with the video model (costs extra) |
 | `TTS_*` | No | OpenRouter TTS (defaults to Gemini 3.1 Flash TTS / voice `Kore`; key falls back to `OPENROUTER_API_KEY`) |
 | `ENABLE_MANIM_RENDER` | No | `true` for local video output |
-| `NEXT_PUBLIC_API_BASE_URL` | No | API origin (local: `http://127.0.0.1:8000`) |
+| `NEXT_PUBLIC_API_BASE_URL` | No | Leave empty (same-origin `/api`). Never set to `127.0.0.1` on a hosted deploy |
 | `AUTH_SECRET` | Yes | Shared secret for Auth.js + API JWTs (`openssl rand -hex 32`) |
 | `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | Yes | Google OAuth client credentials |
 | `MCP_CONNECTOR_TOKEN` | No | Shared bearer for MCP Inspector only |
@@ -411,6 +428,10 @@ Protected routes (except health) require `Authorization: Bearer <token>` from `G
 | `GET` | `/api/learn/{id}` | Load a Learn item |
 | `POST` | `/api/learn/{id}/grade` | Score a quiz |
 | `POST` | `/api/learn/{id}/progress` | Check a lab phase goal |
+| `GET/PUT/DELETE` | `/api/me/keys` | BYOK provider keys (encrypted) |
+| `GET` | `/api/me/youtube` | YouTube connection status |
+| `POST` | `/api/pipelines/paper/stream` | Paper → video → optional YouTube SSE |
+| `POST` | `/api/jobs/{id}/publish/youtube` | Upload `final.mp4` to the connected channel |
 | `GET/POST` | `/api/mcp` | ChatGPT / Claude / Cursor MCP connector (Streamable HTTP) |
 
 **Example request body:**
@@ -452,7 +473,7 @@ When Manim is off, a **storyboard frame** is generated so the VLM still receives
 Deploy as one Vercel project (Next.js + `api/index.py`):
 
 1. Set `OPENROUTER_API_KEY`, optional `TTS_*`, and model overrides
-2. Leave `NEXT_PUBLIC_API_BASE_URL` empty in production (same-origin `/api`)
+2. Leave `NEXT_PUBLIC_API_BASE_URL` **unset** in production (same-origin `/api`). A loopback URL is ignored on public hosts, but it must not be baked into the client bundle.
 3. `maxDuration` for the Python function **and** `/api/mcp` is `300`s in `vercel.json`
 
 Or split frontend and API into two projects and point `NEXT_PUBLIC_API_BASE_URL` at the FastAPI URL.

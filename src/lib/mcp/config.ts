@@ -1,4 +1,5 @@
 import { getPublicOrigin } from "mcp-handler";
+import { resolveServerApiOrigin } from "../api-origin";
 
 /** Shared FastAPI identity for ChatGPT/Claude — no Google profile, no extra user rows. */
 export const MCP_USER_ID = "mcp-connector";
@@ -57,11 +58,7 @@ export function publicOriginFrom(req?: Request): string {
 
 /** FastAPI origin. Local: uvicorn. Production: same-origin Python rewrites. */
 export function apiOrigin(publicOrigin: string): string {
-  const configured = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
-  if (configured) return configured.replace(/\/$/, "");
-  // Local + Railway app container: FastAPI is on loopback (see next.config rewrites).
-  if (!process.env.VERCEL) return "http://127.0.0.1:8000";
-  return publicOrigin;
+  return resolveServerApiOrigin(publicOrigin, process.env.NEXT_PUBLIC_API_BASE_URL);
 }
 
 export function mcpCorsHeaders(): Headers {

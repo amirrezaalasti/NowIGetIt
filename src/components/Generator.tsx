@@ -35,6 +35,7 @@ import {
   type ScenePlanDraft,
   type SceneSectionDraft,
   type TtsVoiceOption,
+  type VisualEngine,
 } from "@/lib/api";
 
 const DEFAULT_TTS_VOICES: TtsVoiceOption[] = [
@@ -101,6 +102,7 @@ type ScenePreview = {
   visualDescription?: string;
   beats?: string[];
   visualDevice?: string;
+  visualEngine?: string;
   duration?: number;
   approved?: boolean;
   clarity?: number;
@@ -116,6 +118,7 @@ const EXAMPLES = [
   "Show why the Pythagorean theorem works visually",
   "Animate how sine and cosine relate on the unit circle",
   "A looping GIF of binary search splitting a sorted list in half",
+  "Cinematic short: how a vaccine trains the immune system",
 ];
 
 const LENGTH_OPTIONS: { id: LengthPreset; label: string; hint: string }[] = [
@@ -141,6 +144,12 @@ const AUDIENCE_OPTIONS: { id: Audience; label: string }[] = [
   { id: "undergrad", label: "Undergrad" },
 ];
 
+const VISUAL_OPTIONS: { id: VisualEngine; label: string; hint: string }[] = [
+  { id: "auto", label: "Auto", hint: "Manim for math, movie for the real world" },
+  { id: "manim", label: "Manim", hint: "Diagrams, graphs, proofs" },
+  { id: "movie", label: "Movie", hint: "Cinematic illustrated shots" },
+];
+
 function planFromEvent(data: Record<string, unknown>): ScenePlanDraft {
   const scenes = (data.scenes as Array<Record<string, unknown>>) || [];
   return {
@@ -160,6 +169,10 @@ function planFromEvent(data: Record<string, unknown>): ScenePlanDraft {
       duration_seconds: Number(s.duration_seconds) || 8,
       camera_notes: String(s.camera_notes || ""),
       visual_device: String(s.visual_device || ""),
+      visual_engine:
+        s.visual_engine === "movie" || s.visual_engine === "manim"
+          ? s.visual_engine
+          : "",
       style_tags: Array.isArray(s.style_tags)
         ? (s.style_tags as string[])
         : [],
@@ -175,6 +188,7 @@ function scenesFromPlan(plan: ScenePlanDraft): ScenePreview[] {
     visualDescription: s.visual_description,
     beats: s.animation_beats,
     visualDevice: s.visual_device,
+    visualEngine: s.visual_engine,
     duration: s.duration_seconds,
     status: "queued",
   }));
@@ -278,6 +292,7 @@ export function Generator() {
   const [lengthPreset, setLengthPreset] = useState<LengthPreset>("standard");
   const [scenePacing, setScenePacing] = useState<ScenePacing>("balanced");
   const [audience, setAudience] = useState<Audience>("general");
+  const [visualEngine, setVisualEngine] = useState<VisualEngine>("auto");
   const [ttsVoice, setTtsVoice] = useState("Kore");
   const [language, setLanguage] = useState("en");
   const [includeAudio, setIncludeAudio] = useState(true);
@@ -807,6 +822,7 @@ export function Generator() {
         include_audio?: unknown;
         include_subtitles?: unknown;
         length_preset?: unknown;
+        visual_engine?: unknown;
       };
       if (typeof s.tts_voice === "string") setTtsVoice(s.tts_voice);
       if (typeof s.language === "string") setLanguage(s.language);
@@ -821,6 +837,13 @@ export function Generator() {
         s.length_preset === "deep"
       ) {
         setLengthPreset(s.length_preset);
+      }
+      if (
+        s.visual_engine === "auto" ||
+        s.visual_engine === "manim" ||
+        s.visual_engine === "movie"
+      ) {
+        setVisualEngine(s.visual_engine);
       }
     }
     if (job.final_video_url) setFinalVideoUrl(job.final_video_url);
@@ -1112,6 +1135,7 @@ export function Generator() {
           length_preset: lengthPreset,
           scene_pacing: scenePacing,
           audience,
+          visual_engine: visualEngine,
           language,
           plan_only: true,
           skip_render: false,
@@ -1154,6 +1178,7 @@ export function Generator() {
             patch.visual_description ?? s.visualDescription,
           beats: patch.animation_beats ?? s.beats,
           visualDevice: patch.visual_device ?? s.visualDevice,
+          visualEngine: patch.visual_engine ?? s.visualEngine,
           duration: patch.duration_seconds ?? s.duration,
         };
       }),
@@ -1409,6 +1434,13 @@ export function Generator() {
                 onChange={setAudience}
                 disabled={running}
               />
+              <SegmentedControl
+                label="Picture"
+                value={visualEngine}
+                options={VISUAL_OPTIONS}
+                onChange={setVisualEngine}
+                disabled={running}
+              />
               <label className="flex min-w-[10rem] flex-col gap-1.5">
                 <span className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-muted)]">
                   Language
@@ -1465,7 +1497,11 @@ export function Generator() {
               <p className="text-sm text-[var(--ink-muted)]">
                 {lengthPreset === "clip"
                   ? "One idea, one motion, ~12 seconds. Exports as a looping GIF. Audio stays off unless you turn it on after the plan."
-                  : "Voice, spoken audio, and subtitles come after you review the plan."}
+                  : visualEngine === "movie"
+                    ? "Cinematic illustrated shots plus narration. Voice and subtitles come after you review the plan."
+                    : visualEngine === "manim"
+                      ? "Manim diagrams. Voice, spoken audio, and subtitles come after you review the plan."
+                      : "Auto picks Manim for math diagrams and cinematic shots for real-world scenes. Voice comes after the plan."}
               </p>
             </div>
 
@@ -1675,6 +1711,16 @@ export function Generator() {
                         }
                         className="min-w-0 flex-1 bg-transparent text-lg font-medium text-[var(--ink)] outline-none"
                       />
+                      {scene.visual_engine === "movie" && (
+                        <span className="rounded-full border border-[var(--line)] px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+                          Movie
+                        </span>
+                      )}
+                      {scene.visual_engine === "manim" && (
+                        <span className="rounded-full border border-[var(--line)] px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+                          Manim
+                        </span>
+                      )}
                       {scene.visual_device && (
                         <span className="text-xs uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                           {scene.visual_device.replaceAll("_", " ")}

@@ -46,6 +46,12 @@ class GenerateRequest(BaseModel):
     plan_only: bool = False
     # Host-authored storyboard (ChatGPT/Claude MCP). Skips OpenRouter planning.
     scene_plan: Optional["ScenePlan"] = None
+    # auto = pick Manim vs cinematic movie per scene · manim · movie
+    visual_engine: str = Field(
+        default="auto", pattern="^(auto|manim|movie)$"
+    )
+    # video (default) | paper_pipeline
+    kind: str = Field(default="video", max_length=32)
 
     @field_validator("tts_voice")
     @classmethod
@@ -56,6 +62,20 @@ class GenerateRequest(BaseModel):
     @classmethod
     def _normalize_language(cls, value: str) -> str:
         return normalize_language(value)
+
+    @field_validator("visual_engine", mode="before")
+    @classmethod
+    def _normalize_engine(cls, value: object) -> str:
+        key = str(value or "").strip().lower()
+        return key if key in {"auto", "manim", "movie"} else "auto"
+
+    @field_validator("kind")
+    @classmethod
+    def _normalize_kind(cls, value: str) -> str:
+        key = (value or "").strip().lower() or "video"
+        if key in {"paper", "paper_pipeline"}:
+            return "paper_pipeline"
+        return "video" if key == "video" else key
 
     @field_validator("source_doc_ids")
     @classmethod
@@ -212,6 +232,8 @@ class SceneSection(BaseModel):
     camera_notes: str = ""
     # Pedagogical visual device, e.g. number_line, equation_reveal, particle_flow
     visual_device: str = ""
+    # Concrete renderer for this scene. None = inherit job visual_engine / auto.
+    visual_engine: Optional[str] = Field(default=None)
     # Keyword tags used for Manim template retrieval
     style_tags: list[str] = Field(default_factory=list)
     # Ids of the TeachingBlueprint steps this scene delivers (in order).
@@ -260,6 +282,8 @@ class SceneSection(BaseModel):
     def _fill_visual_description(self) -> SceneSection:
         if not self.visual_description and self.beats:
             self.visual_description = " ".join(b.visual_action for b in self.beats if b.visual_action)
+        engine = (self.visual_engine or "").strip().lower()
+        self.visual_engine = engine if engine in {"manim", "movie"} else None
         return self
 
     @computed_field  # type: ignore[prop-decorator]
@@ -322,6 +346,7 @@ class PatchSceneRequest(BaseModel):
     visual_description: Optional[str] = Field(default=None, max_length=4000)
     duration_seconds: Optional[float] = Field(default=None, ge=2.0, le=120.0)
     visual_device: Optional[str] = Field(default=None, max_length=200)
+    visual_engine: Optional[str] = Field(default=None, pattern="^(manim|movie)$")
     camera_notes: Optional[str] = Field(default=None, max_length=2000)
     beats: Optional[list[AnimationBeat]] = None
 
@@ -450,6 +475,54 @@ class GenerateResult(BaseModel):
 
 class StorageModeRequest(BaseModel):
     mode: str = Field(..., pattern="^(local|mongo|supabase)$")
+
+
+class ProviderKeyRequest(BaseModel):
+    provider: str = Field(..., min_length=2, max_length=32)
+    api_key: str = Field(..., min_length=8, max_length=512)
+    base_url: Optional[str] = Field(default=None, max_length=500)
+
+
+class ProviderKeyValidateRequest(BaseModel):
+    provider: str = Field(..., min_length=2, max_length=32)
+    api_key: Optional[str] = Field(default=None, max_length=512)
+    base_url: Optional[str] = Field(default=None, max_length=500)
+
+
+class ProviderPrefsRequest(BaseModel):
+    llm_provider: Optional[str] = Field(default=None, max_length=32)
+    tts_provider: Optional[str] = Field(default=None, max_length=32)
+    llm_model: Optional[str] = Field(default=None, max_length=200)
+    manim_model: Optional[str] = Field(default=None, max_length=200)
+    vlm_model: Optional[str] = Field(default=None, max_length=200)
+    tts_model: Optional[str] = Field(default=None, max_length=200)
+
+
+class YoutubeConnectQuery(BaseModel):
+    origin: str = Field(..., min_length=8, max_length=200)
+    return_to: str = Field(default="/pipeline", max_length=200)
+
+
+class YoutubeCompleteRequest(BaseModel):
+    code: str = Field(..., min_length=4, max_length=2048)
+    state: str = Field(..., min_length=8, max_length=4096)
+    origin: str = Field(..., min_length=8, max_length=200)
+
+
+class YoutubePublishRequest(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=4900)
+    privacy: str = Field(default="unlisted", pattern="^(public|unlisted|private)$")
+    tags: Optional[list[str]] = Field(default=None, max_length=12)
+
+
+class PaperPipelineRequest(GenerateRequest):
+    auto_publish: bool = False
+    youtube_privacy: str = Field(
+        default="unlisted", pattern="^(public|unlisted|private)$"
+    )
+    youtube_title: Optional[str] = Field(default=None, max_length=100)
+    youtube_description: Optional[str] = Field(default=None, max_length=4900)
 
 
 GenerateRequest.model_rebuild()

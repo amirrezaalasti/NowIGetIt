@@ -19,7 +19,8 @@ class OpenRouterClient:
         self.settings = settings or get_settings()
         if not self.settings.openrouter_api_key:
             raise ValueError(
-                "OPENROUTER_API_KEY is required. Set it in the environment."
+                "No LLM API key. Add your own key in Settings → Providers, "
+                "or set OPENROUTER_API_KEY on the server."
             )
         self.client = OpenAI(
             api_key=self.settings.openrouter_api_key,
@@ -27,11 +28,21 @@ class OpenRouterClient:
             default_headers={
                 "HTTP-Referer": self.settings.openrouter_site_url,
                 "X-Title": self.settings.openrouter_app_name,
+                **(
+                    {
+                        "anthropic-version": "2023-06-01",
+                        "x-api-key": self.settings.openrouter_api_key,
+                    }
+                    if "anthropic.com" in (self.settings.openrouter_base_url or "")
+                    else {}
+                ),
             },
         )
         self.model = self.settings.openrouter_model
         self.manim_model = self.settings.openrouter_model_manim
         self.vlm_model = self.settings.openrouter_vlm_model
+        self.image_model = self.settings.openrouter_image_model
+        self.video_model = self.settings.openrouter_video_model
         self.usage_log: list[dict[str, Any]] = []
 
     def _track_usage(self, response: Any, *, model: str, kind: str) -> None:
@@ -151,6 +162,161 @@ class OpenRouterClient:
             max_tokens=max_tokens,
             model=self.vlm_model,
         )
+
+    def _openrouter_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": self.settings.openrouter_site_url,
+            "X-Title": self.settings.openrouter_app_name,
+        }
+
+    def generate_image(
+        self,
+        prompt: str,
+        *,
+        aspect_ratio: str = "16:9",
+        output_format: str = "png",
+        reference_png: Optional[bytes] = None,
+        timeout: float = 90.0,
+    ) -> bytes:
+        """POST /api/v1/images — returns PNG/JPEG bytes."""
+        import httpx
+
+        payload: dict[str, Any] = {
+            "model": self.image_model,
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "output_format": output_format,
+        }
+        if reference_png:
+            b64 = base64.b64encode(reference_png).decode("utf-8")
+            payload["input_references"] = [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                }
+            ]
+        url = f"{self.settings.openrouter_base_url.rstrip('/')}/images"
+        with httpx.Client(timeout=timeout) as http:
+            response = http.post(url, headers=self._openrouter_headers(), json=payload)
+        if response.status_code >= 400:
+            raise ValueError(
+                f"Image generation failed HTTP {response.status_code}: "
+                f"{response.text[:800]}"
+            )
+        data = response.json()
+        usage = data.get("usage") if isinstance(data, dict) else None
+        if isinstance(usage, dict):
+            self.usage_log.append(
+                {
+                    "kind": "image",
+                    "model": self.image_model,
+                    "tokens_in": int(usage.get("prompt_tokens") or 0),
+                    "tokens_out": int(usage.get("completion_tokens") or 0),
+                }
+            )
+        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            raise ValueError("Image generation returned no images")
+        first = items[0] if isinstance(items[0], dict) else {}
+        b64_json = first.get("b64_json") or first.get("b64")
+        if not b64_json:
+            raise ValueError("Image generation response missing b64_json")
+        return base64.b64decode(b64_json)
+
+    def generate_video_clip(
+        self,
+        prompt: str,
+        *,
+        duration: int = 4,
+        resolution: str = "720p",
+        aspect_ratio: str = "16:9",
+        first_frame_png: Optional[bytes] = None,
+        timeout: float = 420.0,
+        poll_seconds: float = 12.0,
+    ) -> bytes:
+        """POST /api/v1/videos, poll until complete, return MP4 bytes."""
+        import time
+
+        import httpx
+
+        model = (self.video_model or "").strip()
+        if not model:
+            raise ValueError("OPENROUTER_VIDEO_MODEL is not set")
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "duration": int(duration),
+            "resolution": resolution,
+            "aspect_ratio": aspect_ratio,
+            "generate_audio": False,
+        }
+        if first_frame_png:
+            b64 = base64.b64encode(first_frame_png).decode("utf-8")
+            payload["frame_images"] = [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                    "frame_type": "first_frame",
+                }
+            ]
+        base = self.settings.openrouter_base_url.rstrip("/")
+        headers = self._openrouter_headers()
+        with httpx.Client(timeout=60.0) as http:
+            submitted = http.post(f"{base}/videos", headers=headers, json=payload)
+        if submitted.status_code >= 400:
+            raise ValueError(
+                f"Video generation failed HTTP {submitted.status_code}: "
+                f"{submitted.text[:800]}"
+            )
+        body = submitted.json()
+        job_id = str(body.get("id") or "")
+        polling_url = str(body.get("polling_url") or f"{base}/videos/{job_id}")
+        if not job_id:
+            raise ValueError("Video generation did not return a job id")
+        deadline = time.time() + timeout
+        status_body: dict[str, Any] = body
+        with httpx.Client(timeout=60.0) as http:
+            while time.time() < deadline:
+                status = str(status_body.get("status") or "pending")
+                if status == "completed":
+                    urls = status_body.get("unsigned_urls") or []
+                    content_url = (
+                        urls[0]
+                        if isinstance(urls, list) and urls
+                        else f"{base}/videos/{job_id}/content?index=0"
+                    )
+                    clip = http.get(str(content_url), headers=headers)
+                    if clip.status_code >= 400:
+                        raise ValueError(
+                            f"Video download failed HTTP {clip.status_code}"
+                        )
+                    usage = status_body.get("usage")
+                    if isinstance(usage, dict):
+                        self.usage_log.append(
+                            {
+                                "kind": "video",
+                                "model": model,
+                                "tokens_in": 0,
+                                "tokens_out": 0,
+                            }
+                        )
+                    return clip.content
+                if status in {"failed", "cancelled", "expired"}:
+                    raise ValueError(
+                        f"Video generation {status}: "
+                        f"{status_body.get('error') or 'unknown error'}"
+                    )
+                time.sleep(poll_seconds)
+                polled = http.get(polling_url, headers=headers)
+                if polled.status_code >= 400:
+                    raise ValueError(
+                        f"Video poll failed HTTP {polled.status_code}: "
+                        f"{polled.text[:400]}"
+                    )
+                status_body = polled.json()
+        raise ValueError("Video generation timed out")
 
 
 def repair_llm_json(text: str) -> str:
