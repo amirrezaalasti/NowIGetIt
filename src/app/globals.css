@@ -135,17 +135,42 @@ body {
   }
 }
 
-/* Theme-aware brand marks (data-theme set on <html>) */
-.brand-logo-light {
-  display: none;
+.brand-logo-mark {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 10px 22px rgba(113, 136, 250, 0.28));
 }
 
-html[data-theme="light"] .brand-logo-dark {
-  display: none;
+.brand-wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.28em;
+  font-family: var(--font-display), ui-serif, Georgia, serif;
+  font-weight: 600;
+  line-height: 1.05;
+  color: var(--ink);
+  font-variation-settings: "SOFT" 28, "WONK" 1, "opsz" 48;
+  white-space: nowrap;
 }
 
-html[data-theme="light"] .brand-logo-light {
-  display: block;
+.brand-wordmark-get {
+  font-style: italic;
+  font-weight: 650;
+  color: #8b9cff;
+}
+
+html[data-theme="light"] .brand-wordmark-get {
+  color: #3d56d6;
+}
+
+.brand-wordmark-sparkle {
+  width: 0.52em;
+  height: 0.52em;
+  color: #f0b429;
+  flex-shrink: 0;
+  align-self: center;
+  translate: 0 -0.06em;
 }
 
 /* LLM reply markdown */

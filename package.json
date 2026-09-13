@@ -5,6 +5,8 @@
   "license": "UNLICENSED",
   "author": "Amirreza Alasti <amirrezaalasti@gmail.com>",
   "scripts": {
+    "copy-sample-video": "mkdir -p public/samples && (test -s sampleVideo/Full_Cooling_Demand_WithAudio_1080p60.mp4 && (cp -c sampleVideo/Full_Cooling_Demand_WithAudio_1080p60.mp4 public/samples/cooling-demand.mp4 2>/dev/null || cp sampleVideo/Full_Cooling_Demand_WithAudio_1080p60.mp4 public/samples/cooling-demand.mp4) || true)",
+    "predev": "npm run copy-sample-video",
     "dev": "next dev",
     "dev:api": ".venv/bin/uvicorn api.index:app --reload --reload-dir backend --reload-dir api --host 127.0.0.1 --port 8000",
     "dev:all": "npx --yes concurrently -k -n api,web -c cyan,magenta \"npm run dev:api\" \"npm run dev\"",

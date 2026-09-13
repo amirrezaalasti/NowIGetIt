@@ -24,12 +24,10 @@ export function AppHeader() {
         <div className="flex min-w-0 items-center gap-6">
           <Link
             href="/"
-            className="flex shrink-0 items-center gap-2.5 transition opacity-95 hover:opacity-100"
+            className="flex shrink-0 transition opacity-95 hover:opacity-100"
+            aria-label="Now I Get It home"
           >
-            <BrandLogo size="sm" />
-            <span className="font-[family-name:var(--font-display)] text-lg tracking-tight text-[var(--ink)]">
-              NowIGetIt
-            </span>
+            <BrandLogo size="sm" align="center" priority />
           </Link>
           <nav className="hidden items-center gap-1 sm:flex" aria-label="Primary">
             {NAV.map((item) => {

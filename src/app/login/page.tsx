@@ -31,10 +31,7 @@ export default async function LoginPage({
 
       <div className="relative z-10 flex w-full max-w-md flex-col items-center text-center">
         <BrandLogo size="lg" priority />
-        <p className="mt-4 font-[family-name:var(--font-display)] text-3xl tracking-tight text-[var(--ink)]">
-          NowIGetIt
-        </p>
-        <h1 className="mt-3 text-lg text-[var(--ink-muted)]">
+        <h1 className="mt-5 text-lg text-[var(--ink-muted)]">
           Sign in to save and revisit your explanations.
         </h1>
 

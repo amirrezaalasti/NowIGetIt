@@ -113,7 +113,7 @@ function Shell({ children }: { children: ReactNode }) {
       <div className="pointer-events-none absolute inset-0 grid-haze" aria-hidden />
       <div className="relative z-10 w-full max-w-md">
         <BrandLogo size="md" />
-        <div className="mt-8">{children}</div>
+        <div className="mt-6">{children}</div>
       </div>
     </main>
   );

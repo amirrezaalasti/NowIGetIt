@@ -1,14 +1,18 @@
-# Now I Get It ✨
+<p align="center">
+  <img src="public/brand-lockup.png" alt="Now I Get It" width="280" />
+</p>
 
-[![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs&logoColor=white)](https://nextjs.org/)
-[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
-[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Manim](https://img.shields.io/badge/Manim-GL-e07a5f?logo=python&logoColor=white)](https://3b1b.github.io/manim/)
-[![MCP](https://img.shields.io/badge/MCP-ChatGPT%20%2F%20Claude%20%2F%20Cursor-6366f1)](https://modelcontextprotocol.io/)
-[![Vercel](https://img.shields.io/badge/Deploy-Vercel-000000?logo=vercel&logoColor=white)](https://vercel.com/)
-[![OpenRouter](https://img.shields.io/badge/LLM-OpenRouter-6366f1)](https://openrouter.ai/)
-[![License](https://img.shields.io/badge/License-Proprietary-red)](./LICENSE)
+<p align="center">
+  <a href="https://nextjs.org/"><img src="https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs&logoColor=white" alt="Next.js" /></a>
+  <a href="https://react.dev/"><img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black" alt="React" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" alt="Python" /></a>
+  <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white" alt="FastAPI" /></a>
+  <a href="https://3b1b.github.io/manim/"><img src="https://img.shields.io/badge/Manim-GL-e07a5f?logo=python&logoColor=white" alt="Manim" /></a>
+  <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-ChatGPT%20%2F%20Claude%20%2F%20Cursor-6366f1" alt="MCP" /></a>
+  <a href="https://vercel.com/"><img src="https://img.shields.io/badge/Deploy-Vercel-000000?logo=vercel&logoColor=white" alt="Vercel" /></a>
+  <a href="https://openrouter.ai/"><img src="https://img.shields.io/badge/LLM-OpenRouter-6366f1" alt="OpenRouter" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Proprietary-red" alt="License" /></a>
+</p>
 
 Turn a sentence into a **Manim explainer video**, a **podcast**, a **quiz**, or an **interactive lab** — or drop a PDF/deck and **quiz every slide**. Same engine in the browser **and** inside ChatGPT, Claude, and Cursor via a remote MCP connector.
 
