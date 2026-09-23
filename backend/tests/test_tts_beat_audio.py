@@ -76,3 +76,30 @@ def test_missing_and_empty_inputs_are_survivable(tmp_path: Path) -> None:
     # A part that never got written is skipped, not fatal.
     durations = concat_wav_files([good, tmp_path / "missing.wav"], tmp_path / "o.wav")
     assert durations == pytest.approx([1.0])
+
+
+def test_concat_falls_back_instead_of_crashing_on_mp3_without_ffmpeg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-Gemini TTS returns MP3; without ffmpeg we must return [] (fallback), not raise."""
+    from backend.pipeline import tts
+
+    monkeypatch.setattr(tts.shutil, "which", lambda name: None)
+    good = _tone(tmp_path / "a.wav", 0.5)
+    bad = tmp_path / "b.mp3"
+    bad.write_bytes(b"ID3\x04\x00" + b"\x00" * 200)
+    assert concat_wav_files([good, bad], tmp_path / "joined.wav") == []
+
+
+@pytest.mark.skipif(__import__("shutil").which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_concat_transcodes_mp3_parts_with_ffmpeg(tmp_path: Path) -> None:
+    import subprocess
+
+    wav = _tone(tmp_path / "a.wav", 0.6)
+    mp3 = tmp_path / "b.mp3"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), str(mp3)], check=True)
+    out = tmp_path / "joined.wav"
+    durations = concat_wav_files([wav, mp3], out)
+    assert len(durations) == 2
+    assert all(d > 0.4 for d in durations)
+    assert abs(wav_duration_seconds(out) - sum(durations)) < 0.05

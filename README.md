@@ -25,6 +25,7 @@ Turn a sentence into a **Manim explainer video**, a **podcast**, a **quiz**, or 
 | I want to… | Go here |
 |---|---|
 | 🎬 Make a video in the browser | [Getting started](#getting-started) |
+| 👀 See finished examples | [Examples](#examples) |
 | 🎧 Podcast, quiz, or interactive lab | [Learn](#learn) |
 | 📄 Study a PDF / PPTX | [Understand](#understand) |
 | 🔑 Use your own LLM / TTS keys | [BYOK](#byok) |
@@ -63,6 +64,26 @@ Then quiz me, and make a short podcast of the same idea.
 ```
 
 On the website: open [http://localhost:3000](http://localhost:3000) after [Getting started](#-getting-started), sign in with Google, and type the same kind of prompt. Learn modes live at `/learn`.
+
+---
+
+## Examples <a id="examples"></a>
+
+Open **`/examples`** for a public gallery made entirely from a chat: a model connected over the MCP connector wrote each storyboard, chose narration/subtitles/voice, wrote the Manim for every scene, and rendered. Nothing on the page needs a sign-in.
+
+| Example | Kind | How it was made |
+|---|---|---|
+| Gradient Descent: Walking Downhill (1:38) | Narrated video, 7 scenes | `create_video` → `update_video_options` → `submit_scene_code` × 7 → `render_video` |
+| Why a² + b² = c² Is True (1:04) | Narrated video, 5 scenes | Same loop, `short` preset |
+| Binary Search: Halving the Haystack (1:05) | Narrated video, 5 scenes | Same loop, `short` preset |
+| Sine Is a Height (0:12) | Looping GIF clip | `clip` preset, exported as `final.gif` |
+| Projectile Angle Explorer | Interactive lab, 7 phases | `create_interactive` |
+| Unit Circle Basics Quiz | 8-question quiz | `create_quiz` |
+| Bayes' theorem, base rates (1:32) | Two-voice podcast, 5 chapters | `create_podcast` (pipeline run locally after the WAV/MP3 fix in `backend/pipeline/tts.py`) |
+
+The quiz and lab are graded in the browser (`src/lib/examples/local-grading.ts` mirrors the Learn API rules) so the page works without an account. Items are declared in `src/lib/examples/manifest.ts`.
+
+**Media.** Videos are Git LFS files under `sampleVideo/`; `npm run dev` copies them into `public/samples/` (gitignored). Posters, the GIF, and any audio live in `public/samples/` directly. Hosted deploys exclude `*.mp4` from the build, so upload the four small MP4s somewhere public and set `NEXT_PUBLIC_SAMPLES_BASE_URL` (same pattern as `NEXT_PUBLIC_SAMPLE_VIDEO_URL` for the home-page sample).
 
 ---
 

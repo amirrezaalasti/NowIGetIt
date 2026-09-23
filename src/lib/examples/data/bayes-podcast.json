@@ -1,0 +1,131 @@
+{
+  "title": "Bayes' Theorem in the Doctor's Office",
+  "tagline": "A positive test for a rare disease usually means you are still healthy.",
+  "style": "dialogue",
+  "host_name": "Alex",
+  "guide_name": "Jordan",
+  "chapters": [
+    {
+      "id": "step_1",
+      "title": "Start with the actual number of sick people",
+      "covers_step": "step_1",
+      "summary": "In 100,000 people only 100 actually have the disease.",
+      "lines": [
+        {
+          "speaker": "host",
+          "text": "If only one person in a thousand has this disease, how many blue squares should I picture in a crowd of one hundred thousand?"
+        },
+        {
+          "speaker": "guide",
+          "text": "Exactly one hundred blue squares. The rest, ninety-nine thousand nine hundred, stay gray."
+        },
+        {
+          "speaker": "host",
+          "text": "That already feels tiny."
+        }
+      ],
+      "duration_seconds": 16.632,
+      "start_seconds": 0.0
+    },
+    {
+      "id": "step_2",
+      "title": "Count the true positives",
+      "covers_step": "step_2",
+      "summary": "Of those 100 diseased people, 99 will test positive.",
+      "lines": [
+        {
+          "speaker": "host",
+          "text": "So the test catches almost all of them, right?"
+        },
+        {
+          "speaker": "guide",
+          "text": "Ninety-nine of the one hundred blue squares get a bright green outline. Only one blue square stays plain."
+        },
+        {
+          "speaker": "host",
+          "text": "Ninety-nine true positives. Got it."
+        }
+      ],
+      "duration_seconds": 14.088,
+      "start_seconds": 16.632
+    },
+    {
+      "id": "step_3",
+      "title": "Count the false positives",
+      "covers_step": "step_3",
+      "summary": "Of the 99,900 healthy people, 4,995 will still test positive.",
+      "lines": [
+        {
+          "speaker": "host",
+          "text": "Now the healthy people. How many of them get a green outline by mistake?"
+        },
+        {
+          "speaker": "guide",
+          "text": "Five percent of the ninety-nine thousand nine hundred gray squares. That is four thousand nine hundred ninety-five gray squares with green outlines."
+        },
+        {
+          "speaker": "host",
+          "text": "Whoa, thousands of them."
+        }
+      ],
+      "duration_seconds": 16.584,
+      "start_seconds": 30.72
+    },
+    {
+      "id": "step_4",
+      "title": "Put all the green squares together",
+      "covers_step": "step_4",
+      "summary": "The total number of positive tests is 5,094, most of which come from healthy people.",
+      "lines": [
+        {
+          "speaker": "host",
+          "text": "If I add the two groups that tested positive, what do I see?"
+        },
+        {
+          "speaker": "guide",
+          "text": "Ninety-nine blue-green squares next to four thousand nine hundred ninety-five gray-green squares. The gray pile is fifty times bigger."
+        },
+        {
+          "speaker": "host",
+          "text": "So most positive tests are actually false alarms."
+        }
+      ],
+      "duration_seconds": 19.392,
+      "start_seconds": 47.304
+    },
+    {
+      "id": "step_5",
+      "title": "Find the real chance after a positive test",
+      "covers_step": "step_5",
+      "summary": "Only about 2% of people who test positive actually have the disease.",
+      "lines": [
+        {
+          "speaker": "host",
+          "text": "If I divide the true positives by every green square, what number do I get?"
+        },
+        {
+          "speaker": "guide",
+          "text": "Ninety-nine divided by five thousand ninety-four. That is roughly two percent."
+        },
+        {
+          "speaker": "host",
+          "text": "So even after the positive result, the odds I actually have the disease are only two in a hundred."
+        },
+        {
+          "speaker": "guide",
+          "text": "Exactly. The base rate of the disease keeps most of those green outlines on healthy people."
+        }
+      ],
+      "duration_seconds": 25.368,
+      "start_seconds": 66.696
+    }
+  ],
+  "takeaways": [
+    "Count the actual sick and healthy people first before looking at test results.",
+    "False positives from the huge healthy group usually outnumber true positives.",
+    "A positive test raises your chance only to about two percent when the disease is this rare."
+  ],
+  "duration_seconds": 92.064,
+  "host_voice": "echo",
+  "guide_voice": "nova"
+}

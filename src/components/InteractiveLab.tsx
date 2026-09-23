@@ -9,17 +9,27 @@ import {
   type LabPhase,
 } from "@/lib/api";
 
+type ProgressBody = {
+  phase_id: string;
+  params: Record<string, number>;
+  answers: Record<string, string>;
+  completed_phases: string[];
+};
+type ProgressResult = Awaited<ReturnType<typeof submitLabProgress>>;
+
 type Props = {
   itemId: string;
   lesson: InteractiveLesson;
   initialProgress?: Record<string, unknown>;
+  /** Override the API goal check (used by the public /examples page). */
+  checkProgress?: (body: ProgressBody, baseline: Record<string, number>) => Promise<ProgressResult>;
 };
 
 function defaults(lesson: InteractiveLesson): Record<string, number> {
   return Object.fromEntries(lesson.parameters.map((p) => [p.id, p.default]));
 }
 
-export function InteractiveLab({ itemId, lesson, initialProgress }: Props) {
+export function InteractiveLab({ itemId, lesson, initialProgress, checkProgress }: Props) {
   const [params, setParams] = useState<Record<string, number>>(() => {
     const saved = initialProgress?.params;
     if (saved && typeof saved === "object") {
@@ -67,12 +77,15 @@ export function InteractiveLab({ itemId, lesson, initialProgress }: Props) {
     setBusy(true);
     setMessage(null);
     try {
-      const result = await submitLabProgress(itemId, {
+      const body: ProgressBody = {
         phase_id: phase.id,
         params,
         answers: answer ? { [phase.id]: answer } : {},
         completed_phases: completed,
-      });
+      };
+      const result = await (checkProgress
+        ? checkProgress(body, baseline)
+        : submitLabProgress(itemId, body));
       setCompleted(result.completed_phases);
       setMessage(result.message);
       if (result.goal_met) {

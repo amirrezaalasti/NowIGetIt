@@ -9,6 +9,8 @@ type Props = {
   script: PodcastScript;
   takeaways?: string[];
   audioSkipped?: boolean;
+  /** Use audioUrl verbatim (static/public files) instead of a signed job URL. */
+  rawAudioSrc?: boolean;
 };
 
 function formatTime(seconds: number): string {
@@ -24,9 +26,11 @@ export function PodcastPlayer({
   script,
   takeaways,
   audioSkipped,
+  rawAudioSrc = false,
 }: Props) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [src, setSrc] = useState<string>("");
+  // Static sources are known at render time, so the audio element is in the SSR output.
+  const [src, setSrc] = useState<string>(() => (rawAudioSrc && audioUrl ? audioUrl : ""));
   const [current, setCurrent] = useState(0);
   const [playing, setPlaying] = useState(false);
 
@@ -35,8 +39,8 @@ export function PodcastPlayer({
       setSrc("");
       return;
     }
-    setSrc(mediaUrl(audioUrl, Date.now()));
-  }, [audioUrl]);
+    setSrc(rawAudioSrc ? audioUrl : mediaUrl(audioUrl, Date.now()));
+  }, [audioUrl, rawAudioSrc]);
 
   const chapter = useMemo(() => {
     const list = script.chapters || [];

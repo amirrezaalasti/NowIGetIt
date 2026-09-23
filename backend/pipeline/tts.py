@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -54,14 +56,65 @@ def pcm_to_wav(
         wf.writeframes(pcm_bytes)
 
 
+def _is_wav(path: Path) -> bool:
+    """True when the file carries a RIFF/WAVE header (what the stdlib can read)."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"RIFF"
+    except OSError:
+        return False
+
+
+def _transcode_to_wav(src: Path) -> Optional[Path]:
+    """Convert a compressed narration part (mp3/ogg/…) to s16le WAV via ffmpeg.
+
+    Non-Gemini TTS models return MP3, but the podcast/beat stitchers work on WAV
+    with the stdlib. On hosts with ffmpeg (Railway, local) we transcode; without
+    it (Vercel) we return None so callers fall back instead of crashing.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    src = Path(src)
+    dest = src.with_name(f"{src.stem}_pcm.wav")
+    cmd = [
+        ffmpeg, "-y", "-loglevel", "error", "-i", str(src),
+        "-ac", "1", "-ar", "24000", "-sample_fmt", "s16", str(dest),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=180)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return dest if dest.exists() and dest.stat().st_size > 44 else None
+
+
+def ensure_wav(path: Path) -> Optional[Path]:
+    """Return a WAV path for `path`, transcoding when it is not already WAV."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    if _is_wav(path):
+        return path
+    return _transcode_to_wav(path)
+
+
 def wav_duration_seconds(wav_path: Path) -> float:
-    """Duration from WAV header; 0 if unreadable."""
+    """Duration from WAV header; falls back to a transcode for MP3; 0 if unreadable."""
     try:
         with wave.open(str(wav_path), "rb") as wf:
             rate = wf.getframerate()
             if rate <= 0:
                 return 0.0
             return wf.getnframes() / float(rate)
+    except Exception:  # noqa: BLE001
+        pass
+    converted = ensure_wav(Path(wav_path))
+    if converted is None or Path(converted) == Path(wav_path):
+        return 0.0
+    try:
+        with wave.open(str(converted), "rb") as wf:
+            rate = wf.getframerate()
+            return wf.getnframes() / float(rate) if rate > 0 else 0.0
     except Exception:  # noqa: BLE001
         return 0.0
 
@@ -79,12 +132,24 @@ def concat_wav_files(
     and is counted into the preceding part's duration, so the returned numbers
     still tile the output exactly.
     """
-    readable = [p for p in parts if Path(p).exists()]
+    readable: list[Path] = []
+    for part in parts:
+        if not Path(part).exists():
+            continue
+        wav = ensure_wav(Path(part))
+        if wav is None:
+            # A part we cannot read as WAV (MP3 without ffmpeg) — bail out so
+            # the caller falls back to a single whole-script render.
+            return []
+        readable.append(wav)
     if not readable:
         return []
 
-    with wave.open(str(readable[0]), "rb") as first:
-        params = first.getparams()
+    try:
+        with wave.open(str(readable[0]), "rb") as first:
+            params = first.getparams()
+    except wave.Error:
+        return []
     gap_frames = max(0, int(params.framerate * max(0.0, gap_seconds)))
     silence = b"\x00" * (gap_frames * params.sampwidth * params.nchannels)
 

@@ -8,6 +8,7 @@ import { UserMenu } from "@/components/UserMenu";
 
 const NAV = [
   { href: "/", label: "Create" },
+  { href: "/examples", label: "Examples" },
   { href: "/pipeline", label: "Pipeline" },
   { href: "/learn", label: "Learn" },
   { href: "/understand", label: "Understand" },

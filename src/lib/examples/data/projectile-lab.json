@@ -1,0 +1,150 @@
+{
+  "title": "Projectile Angle Explorer",
+  "tagline": "Discover why 45° travels farthest on flat ground",
+  "core_question": "Why does a 45-degree launch angle make a projectile travel farther on flat ground than other angles?",
+  "payoff": "You can predict the best angle by seeing how the horizontal speed and the time of flight trade off against each other, then test it with sliders.",
+  "running_example": "A projectile launched at exactly 20 m/s from ground level on flat ground, with g = 10 m/s²; we test angles 30°, 45°, and 60° and read the range each time.",
+  "visual": {
+    "kind": "projectile",
+    "title": "Trajectory on flat ground",
+    "x_label": "Horizontal distance (m)",
+    "y_label": "Height (m)",
+    "x_min": 0,
+    "x_max": 50,
+    "y_min": 0,
+    "y_max": 25,
+    "expr": "",
+    "animate": true,
+    "points": [],
+    "segments": [],
+    "fills": [],
+    "target_x": 40,
+    "target_y": 0,
+    "target_radius": 2
+  },
+  "parameters": [
+    { "id": "theta", "label": "Launch angle", "min": 0, "max": 90, "step": 1, "default": 45, "unit": "°", "description": "Angle above the horizontal" },
+    { "id": "v", "label": "Launch speed", "min": 10, "max": 30, "step": 1, "default": 20, "unit": "m/s", "description": "Initial speed (fixed at 20 m/s in examples)" }
+  ],
+  "readouts": [
+    { "id": "range", "label": "Range", "expr": "v*v*sin(2*radians(theta))/10", "unit": "m", "precision": 1 },
+    { "id": "maxh", "label": "Max height", "expr": "pow(v*sin(radians(theta)),2)/20", "unit": "m", "precision": 1 }
+  ],
+  "phases": [
+    {
+      "id": "p1",
+      "kind": "orient",
+      "title": "See the default flight",
+      "coach": "Watch the projectile launched at 45° with speed 20 m/s. Notice the green horizontal arrow and blue vertical arrow at launch.",
+      "locked_params": [],
+      "suggested_params": {},
+      "goal": { "type": "observe", "param": "", "min_delta": 0, "readout": "", "value": 0, "tolerance": 1, "quiz": null },
+      "hint": "Just watch the path and readouts.",
+      "success": "You see the curved path and current range."
+    },
+    {
+      "id": "p2",
+      "kind": "explore",
+      "title": "Change the angle",
+      "coach": "Move only the angle slider. Watch how the green arrow shortens while the blue arrow lengthens.",
+      "locked_params": ["v"],
+      "suggested_params": {},
+      "goal": { "type": "change_param", "param": "theta", "min_delta": 15, "readout": "", "value": 0, "tolerance": 1, "quiz": null },
+      "hint": "Try angles from 30° to 60°.",
+      "success": "You observed the trade-off between horizontal and vertical speed."
+    },
+    {
+      "id": "p3",
+      "kind": "predict",
+      "title": "Predict the winner",
+      "coach": "Before testing, decide which angle will give the longest red range arrow.",
+      "locked_params": ["theta", "v"],
+      "suggested_params": {},
+      "goal": {
+        "type": "quiz",
+        "param": "",
+        "min_delta": 0,
+        "readout": "",
+        "value": 0,
+        "tolerance": 1,
+        "quiz": {
+          "prompt": "At which angle do you expect the longest range?",
+          "choices": [
+            { "id": "a", "text": "30° because horizontal speed is highest" },
+            { "id": "b", "text": "45° because horizontal and vertical effects balance" },
+            { "id": "c", "text": "60° because time in air is longest" }
+          ],
+          "correct": "b",
+          "explanation": "The product of horizontal speed and flight time peaks at 45°."
+        }
+      },
+      "hint": "Think about the green and gray lengths multiplying.",
+      "success": ""
+    },
+    {
+      "id": "p4",
+      "kind": "test",
+      "title": "Test your prediction",
+      "coach": "Unlock the slider and try 30°, 45°, and 60°. Watch the red range arrow.",
+      "locked_params": [],
+      "suggested_params": {},
+      "goal": { "type": "observe", "param": "", "min_delta": 0, "readout": "", "value": 0, "tolerance": 1, "quiz": null },
+      "hint": "Compare the three ranges.",
+      "success": "45° indeed gives the longest range; 30° and 60° match each other."
+    },
+    {
+      "id": "p5",
+      "kind": "challenge",
+      "title": "Hit the target",
+      "coach": "Adjust angle and speed until the projectile lands inside the target zone at 40 m.",
+      "locked_params": [],
+      "suggested_params": {},
+      "goal": { "type": "target", "param": "range", "min_delta": 0, "readout": "range", "value": 40, "tolerance": 2, "quiz": null },
+      "hint": "Start near 45° and fine-tune.",
+      "success": "You hit the target by balancing the two speeds."
+    },
+    {
+      "id": "p6",
+      "kind": "check",
+      "title": "Check the trade-off",
+      "coach": "Answer using what you just saw with the arrows.",
+      "locked_params": [],
+      "suggested_params": {},
+      "goal": {
+        "type": "quiz",
+        "param": "",
+        "min_delta": 0,
+        "readout": "",
+        "value": 0,
+        "tolerance": 1,
+        "quiz": {
+          "prompt": "Why does range drop again after 45° even though flight time keeps rising?",
+          "choices": [
+            { "id": "a", "text": "Horizontal speed shrinks faster than flight time grows" },
+            { "id": "b", "text": "Gravity suddenly gets stronger" },
+            { "id": "c", "text": "The projectile starts to curve backward" }
+          ],
+          "correct": "a",
+          "explanation": "The shrinking green arrow wins over the growing gray bar past 45°."
+        }
+      },
+      "hint": "Look at the green arrow length versus the gray bar.",
+      "success": ""
+    },
+    {
+      "id": "p7",
+      "kind": "reflect",
+      "title": "Name the payoff",
+      "coach": "You now see that range is the product of constant horizontal speed and total flight time; their best balance is at 45°.",
+      "locked_params": [],
+      "suggested_params": {},
+      "goal": { "type": "acknowledge", "param": "", "min_delta": 0, "readout": "", "value": 0, "tolerance": 1, "quiz": null },
+      "hint": "",
+      "success": "You can predict the longest-range angle without guessing."
+    }
+  ],
+  "misconceptions": [
+    "A higher launch always travels farther because it stays in the air longer.",
+    "The angle for maximum height is also the angle for maximum range."
+  ]
+}

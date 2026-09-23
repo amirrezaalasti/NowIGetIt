@@ -1,0 +1,121 @@
+{
+  "title": "Unit Circle Basics Quiz",
+  "intro": "Answer these questions to check your understanding of the unit circle, where angles in radians equal arc lengths, x and y coordinates are cosine and sine, and the running example uses arc length 1.047 reaching the point (0.500, 0.866).",
+  "pass_score": 0.7,
+  "questions": [
+    {
+      "id": "q1",
+      "type": "true_false",
+      "prompt": "On the unit circle, is every point exactly distance 1 from the origin?",
+      "choices": [{ "id": "true", "text": "True" }, { "id": "false", "text": "False" }],
+      "correct": "true",
+      "numeric_tolerance": 0.05,
+      "explanation": "The unit circle is defined as the set of all points exactly 1 unit from the center, so the white circle outline confirms that every radius segment measures 1.",
+      "hint": "Recall the definition shown by the ruler on the white circle.",
+      "covers_step": "step_1",
+      "difficulty": "easy",
+      "why_it_matters": "This confirms the learner accepts the basic geometric definition before assigning coordinates."
+    },
+    {
+      "id": "q2",
+      "type": "numeric",
+      "prompt": "If the orange arc on the unit circle measures 1.047, what is the angle θ in radians? Round to three decimal places.",
+      "choices": [],
+      "correct": "1.047",
+      "numeric_tolerance": 0.001,
+      "explanation": "By definition on the unit circle, the angle θ in radians is identical to the arc length of the orange arc, so the displayed length 1.047 is θ itself.",
+      "hint": "The orange arc length and the θ label are the same number.",
+      "covers_step": "step_2",
+      "difficulty": "easy",
+      "why_it_matters": "This verifies the learner understands radians as arc length rather than an arbitrary unit."
+    },
+    {
+      "id": "q3",
+      "type": "true_false",
+      "prompt": "At the running-example arc length 1.047, is the point reached in the first quadrant?",
+      "choices": [{ "id": "true", "text": "True" }, { "id": "false", "text": "False" }],
+      "correct": "true",
+      "numeric_tolerance": 0.05,
+      "explanation": "The orange arc of length 1.047 starts at (1,0) and travels counterclockwise less than a quarter turn, landing where both the blue x segment and green y segment are positive.",
+      "hint": "Think about where one-sixth of the way around the circle lands.",
+      "covers_step": "step_3",
+      "difficulty": "easy",
+      "why_it_matters": "This checks that the learner can locate the point using the angle before naming the coordinates."
+    },
+    {
+      "id": "q4",
+      "type": "multiple_choice",
+      "prompt": "At θ = 1.047, which length is labeled cosine and which is labeled sine?",
+      "choices": [
+        { "id": "a", "text": "The blue horizontal length is cosine and the green vertical length is sine." },
+        { "id": "b", "text": "The green vertical length is cosine and the blue horizontal length is sine." },
+        { "id": "c", "text": "Both lengths together are called cosine." },
+        { "id": "d", "text": "Both lengths together are called sine." }
+      ],
+      "correct": "a",
+      "numeric_tolerance": 0.05,
+      "explanation": "The blue segment measures the horizontal distance x and receives the label cos θ; the green segment measures the vertical distance y and receives the label sin θ.",
+      "hint": "Watch which color segment gets which label when the arc stops.",
+      "covers_step": "step_4",
+      "difficulty": "medium",
+      "why_it_matters": "This ensures the learner connects the coordinate lengths directly to the names cosine and sine."
+    },
+    {
+      "id": "q5",
+      "type": "numeric",
+      "prompt": "Round to three decimal places: what is sin(1.047) for the running-example point?",
+      "choices": [],
+      "correct": "0.866",
+      "numeric_tolerance": 0.001,
+      "explanation": "The green vertical segment at arc length 1.047 measures 0.866, and that length is defined as sin θ.",
+      "hint": "Look at the length of the green segment in the running example.",
+      "covers_step": "step_5",
+      "difficulty": "medium",
+      "why_it_matters": "This confirms the learner can read the sine value directly from the coordinate on the unit circle."
+    },
+    {
+      "id": "q6",
+      "type": "true_false",
+      "prompt": "For the running-example point, is 0.500 squared plus 0.866 squared equal to 1.000?",
+      "choices": [{ "id": "true", "text": "True" }, { "id": "false", "text": "False" }],
+      "correct": "true",
+      "numeric_tolerance": 0.05,
+      "explanation": "The blue and green segments form the legs of a right triangle whose hypotenuse is the radius 1, so Pythagoras requires their squares to sum exactly to 1.",
+      "hint": "Imagine the two square areas growing from the blue and green segments and compare their total to the radius square.",
+      "covers_step": "step_6",
+      "difficulty": "medium",
+      "why_it_matters": "This shows the learner sees the Pythagorean identity as a visible geometric fact rather than a memorized rule."
+    },
+    {
+      "id": "q7",
+      "type": "numeric",
+      "prompt": "Round to three decimal places: what is cos(1.047) for the running-example point?",
+      "choices": [],
+      "correct": "0.500",
+      "numeric_tolerance": 0.001,
+      "explanation": "The blue horizontal segment at arc length 1.047 measures 0.500, and that length is defined as cos θ.",
+      "hint": "Look at the length of the blue segment in the running example.",
+      "covers_step": "step_5",
+      "difficulty": "medium",
+      "why_it_matters": "This confirms the learner can read the cosine value directly from the coordinate on the unit circle."
+    },
+    {
+      "id": "q8",
+      "type": "multiple_choice",
+      "prompt": "Why must the square of the blue length plus the square of the green length always equal 1 at any angle on the unit circle?",
+      "choices": [
+        { "id": "a", "text": "Because sine and cosine are defined that way on a calculator." },
+        { "id": "b", "text": "Because the blue and green segments form the legs of a right triangle with hypotenuse equal to the radius 1." },
+        { "id": "c", "text": "Because the orange arc length forces the sum to be 1." },
+        { "id": "d", "text": "Because the x-axis and y-axis are perpendicular by definition." }
+      ],
+      "correct": "b",
+      "numeric_tolerance": 0.05,
+      "explanation": "The blue horizontal and green vertical segments are the two legs of the right triangle whose hypotenuse is the fixed radius of length 1, so their squares sum to 1 by the Pythagorean theorem.",
+      "hint": "Focus on the right triangle formed by the two colored segments and the radius.",
+      "covers_step": "step_6",
+      "difficulty": "hard",
+      "why_it_matters": "This verifies the learner can explain the identity geometrically using the running example rather than treating it as arbitrary."
+    }
+  ]
+}

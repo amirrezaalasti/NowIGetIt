@@ -3,17 +3,20 @@
 import { useMemo, useState } from "react";
 import { gradeQuiz, type QuizPaper } from "@/lib/api";
 
+type QuizAnswer = { question_id: string; answer: string | number | boolean | null };
+type GradeResult = Awaited<ReturnType<typeof gradeQuiz>>;
+
 type Props = {
   itemId: string;
   paper: QuizPaper;
+  /** Override the API grader (used by the public /examples page). */
+  grade?: (answers: QuizAnswer[]) => Promise<GradeResult>;
 };
 
-export function QuizRunner({ itemId, paper }: Props) {
+export function QuizRunner({ itemId, paper, grade }: Props) {
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [result, setResult] = useState<Awaited<ReturnType<typeof gradeQuiz>> | null>(
-    null,
-  );
+  const [result, setResult] = useState<GradeResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,7 +34,7 @@ export function QuizRunner({ itemId, paper }: Props) {
         question_id: q.id,
         answer: answers[q.id] ?? null,
       }));
-      const gradedResult = await gradeQuiz(itemId, payload);
+      const gradedResult = await (grade ? grade(payload) : gradeQuiz(itemId, payload));
       setResult(gradedResult);
     } catch (err) {
       setError((err as Error).message);

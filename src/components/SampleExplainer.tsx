@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 const SAMPLE_SRC =
   process.env.NEXT_PUBLIC_SAMPLE_VIDEO_URL || "/samples/cooling-demand.mp4";
 const SAMPLE_POSTER =
@@ -19,8 +21,11 @@ export function SampleExplainer({ className = "" }: { className?: string }) {
           <a href={SAMPLE_SRC}>Download the sample explainer</a>
         </video>
       </div>
-      <figcaption className="mt-3 text-sm text-[var(--ink-muted)]">
-        Sample explainer · cooling demand with voiceover
+      <figcaption className="mt-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-sm text-[var(--ink-muted)]">
+        <span>Sample explainer · cooling demand with voiceover</span>
+        <Link href="/examples" className="text-[var(--accent)] hover:underline">
+          More examples, made from a chat →
+        </Link>
       </figcaption>
     </figure>
   );
