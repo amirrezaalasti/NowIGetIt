@@ -16,7 +16,7 @@ export function SampleExplainer({ className = "" }: { className?: string }) {
           poster={SAMPLE_POSTER}
           controls
           playsInline
-          preload="metadata"
+          preload="none"
         >
           <a href={SAMPLE_SRC}>Download the sample explainer</a>
         </video>

@@ -20,15 +20,15 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://nowigetit.app"),
   title: "Now I Get It — Explain it until it clicks",
   description:
-    "Turn a prompt into a scene-planned educational video with VLM review and voiceover.",
+    "Explain anything until it clicks. Turn a prompt or PDF into a narrated explainer video, podcast, quiz, or interactive lab.",
   openGraph: {
     title: "Now I Get It",
-    description: "Turn ideas into understanding.",
+    description: "Explain anything until it clicks.",
   },
   twitter: {
     card: "summary_large_image",
     title: "Now I Get It",
-    description: "Turn ideas into understanding.",
+    description: "Explain anything until it clicks.",
   },
 };
 

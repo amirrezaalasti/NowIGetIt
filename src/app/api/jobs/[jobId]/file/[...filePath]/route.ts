@@ -97,7 +97,8 @@ export async function GET(
     const meta = JSON.parse(await readFile(metaPath, "utf8")) as {
       user_id?: string;
     };
-    if (meta.user_id && meta.user_id !== userId) {
+    // Ownerless (legacy) jobs are not readable by anyone, matching the API.
+    if (meta.user_id !== userId) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
   } catch {

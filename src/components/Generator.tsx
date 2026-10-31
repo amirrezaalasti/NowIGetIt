@@ -7,7 +7,7 @@ import { useSession } from "next-auth/react";
 import { AuthMedia } from "@/components/AuthMedia";
 import { MarkedVideoPlayer } from "@/components/MarkedVideoPlayer";
 import { BrandLogo } from "@/components/BrandLogo";
-import { SampleExplainer } from "@/components/SampleExplainer";
+import { Landing } from "@/components/Landing";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import {
   SourceAttachments,
@@ -1347,37 +1347,17 @@ export function Generator() {
 
   if (authStatus === "loading") {
     return (
-      <section className="relative mx-auto w-full max-w-3xl px-6 py-10 sm:py-16">
-        <BrandLogo size="lg" align="start" priority />
-        <h1 className="mt-4 max-w-xl text-lg leading-snug text-[var(--ink-muted)] sm:text-xl">
-          Prompt in. Scene plan, visual QA, voice — until the idea clicks.
-        </h1>
-        <SampleExplainer className="mt-8" />
-        <p className="mt-6 text-sm text-[var(--ink-muted)]">Checking session…</p>
+      <section className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-center px-6 py-24">
+        <BrandLogo size="lg" />
+        <p className="mt-6 text-sm text-[var(--ink-muted)]" role="status">
+          Checking session…
+        </p>
       </section>
     );
   }
 
   if (!signedIn) {
-    return (
-      <section className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col px-6 py-10 sm:py-16">
-        <BrandLogo size="lg" align="start" priority />
-        <h1 className="mt-4 text-lg leading-snug text-[var(--ink-muted)] sm:text-xl">
-          Prompt in. Scene plan, visual QA, voice — until the idea clicks.
-        </h1>
-        <SampleExplainer className="mt-8" />
-        <p className="mt-6 max-w-md text-sm text-[var(--ink-muted)]">
-          Sign in to plan storyboards, generate videos, and keep every revision
-          private to your account.
-        </p>
-        <Link
-          href="/login"
-          className="mt-8 inline-flex self-start rounded-full bg-[var(--accent)] px-8 py-3.5 text-base font-semibold text-[var(--on-accent)] transition hover:brightness-110"
-        >
-          Continue with Google
-        </Link>
-      </section>
-    );
+    return <Landing />;
   }
 
   return (
@@ -1389,11 +1369,10 @@ export function Generator() {
       >
         {mode === "compose" && (
           <div className="animate-rise">
-            <BrandLogo size="lg" align="start" priority />
+            <BrandLogo size="lg" align="start" />
             <h1 className="mt-4 max-w-xl text-lg leading-snug text-[var(--ink-muted)] sm:text-xl">
               Prompt in. Scene plan, visual QA, voice — until the idea clicks.
             </h1>
-            <SampleExplainer className="mt-8" />
 
             <label className="sr-only" htmlFor="prompt">
               Prompt

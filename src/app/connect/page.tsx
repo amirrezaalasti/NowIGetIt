@@ -28,7 +28,7 @@ export default async function ConnectPage() {
   const oauthReady = googleAuthConfigured();
 
   return (
-    <main className="relative flex flex-1 flex-col overflow-x-hidden bg-atmosphere">
+    <main className="relative flex flex-1 flex-col overflow-x-clip bg-atmosphere">
       <div className="pointer-events-none absolute inset-0 grid-haze" aria-hidden />
       <AppHeader />
       <div className="relative z-10 mx-auto w-full max-w-2xl px-6 py-12">

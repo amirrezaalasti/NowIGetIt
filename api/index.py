@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -21,7 +22,7 @@ if str(ROOT) not in sys.path:
 from backend import artifacts as store
 from backend import supabase_db as db
 from backend.config import get_settings, settings_for_user
-from backend.auth import CurrentUser, MediaUser, auth_is_configured
+from backend.auth import AuthUser, CurrentUser, MediaUser, auth_is_configured
 from backend import job_runner
 from backend.languages import languages_for_api
 from backend.tts_voices import voices_for_api
@@ -339,10 +340,30 @@ async def me(user: CurrentUser) -> dict:
     }
 
 
+def _can_switch_storage(user: AuthUser) -> bool:
+    """The storage mode applies to every user, so gate it behind ADMIN_EMAILS.
+
+    Without ADMIN_EMAILS, only allow it off hosted platforms (local dev).
+    """
+    admins = {
+        e.strip().lower()
+        for e in (os.getenv("ADMIN_EMAILS") or "").split(",")
+        if e.strip()
+    }
+    if admins:
+        return bool(user.email) and user.email.lower() in admins
+    hosted = any(os.getenv(k) for k in ("VERCEL", "RAILWAY_ENVIRONMENT", "RENDER"))
+    return not hosted
+
+
 @app.put("/api/me/storage")
 async def set_my_storage(request: StorageModeRequest, user: CurrentUser) -> dict:
     """Switch between local disk and Supabase for this server."""
-    del user
+    if not _can_switch_storage(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Storage is server-wide; only admins (ADMIN_EMAILS) can switch it.",
+        )
     from backend.local_db import set_storage_mode
 
     get_settings()

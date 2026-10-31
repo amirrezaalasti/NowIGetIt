@@ -60,7 +60,8 @@ body {
   background: var(--bg-deep);
   color: var(--ink);
   font-family: var(--font-sans), system-ui, sans-serif;
-  min-height: 100%;
+  /* Unlayered, so this must not undercut Tailwind's min-h-screen on <body>. */
+  min-height: 100dvh;
 }
 
 @keyframes rise {
@@ -135,11 +136,179 @@ body {
   }
 }
 
-.brand-logo-mark {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  filter: drop-shadow(0 10px 22px rgba(113, 136, 250, 0.28));
+/* Mascot: inline SVG themed through these tokens (see BrandLogo.tsx). */
+:root,
+[data-theme="dark"] {
+  --mascot-body-hi: #7cefb6;
+  --mascot-body: #3ecf8e;
+  --mascot-body-lo: #2cb67b;
+  --mascot-shade: #178556;
+  --mascot-ink: #0a1a14;
+  --mascot-eye: #f6fbf8;
+  --mascot-spark: #f0c75e;
+  --mascot-tongue: #ff8f8f;
+}
+
+[data-theme="light"] {
+  --mascot-body-hi: #6ee7a8;
+  --mascot-body: #34c584;
+  --mascot-body-lo: #22a56c;
+  --mascot-shade: #137a4e;
+  --mascot-spark: #e8a917;
+}
+
+.brand-mark {
+  overflow: visible;
+  filter: drop-shadow(0 10px 24px var(--glow));
+}
+
+.brand-mark-shadow {
+  fill: var(--accent);
+  opacity: 0.22;
+}
+
+.brand-mark-burst {
+  fill: none;
+  stroke: var(--mascot-spark);
+  stroke-width: 4.2;
+  stroke-linecap: round;
+}
+
+.brand-mark-spark {
+  fill: var(--mascot-spark);
+}
+
+.brand-mark-shade {
+  fill: var(--mascot-shade);
+}
+
+.brand-mark-brows {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 3.6;
+  stroke-linecap: round;
+}
+
+.brand-mark-sclera {
+  fill: var(--mascot-eye);
+}
+
+.brand-mark-pupil {
+  fill: var(--mascot-ink);
+}
+
+.brand-mark-glint {
+  fill: #fff;
+}
+
+.brand-mark-tongue {
+  fill: var(--mascot-tongue);
+}
+
+.brand-mark-spark,
+.brand-mark-burst,
+.brand-mark-eye,
+.brand-mark-body,
+.brand-mark-shadow {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes mascot-blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+  95% {
+    transform: scaleY(0.08);
+  }
+}
+
+@keyframes mascot-twinkle {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.72) rotate(18deg);
+    opacity: 0.75;
+  }
+}
+
+@keyframes mascot-burst {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.92);
+  }
+}
+
+@keyframes mascot-float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-4px) rotate(-2deg);
+  }
+}
+
+@keyframes mascot-shadow {
+  0%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0.22;
+  }
+  50% {
+    transform: scaleX(0.82);
+    opacity: 0.14;
+  }
+}
+
+.brand-mark--animated .brand-mark-eye {
+  animation: mascot-blink 5.5s ease-in-out infinite;
+}
+
+.brand-mark--animated .brand-mark-spark {
+  animation: mascot-twinkle 2.8s ease-in-out infinite;
+}
+
+.brand-mark--animated .brand-mark-burst {
+  animation: mascot-burst 2.8s ease-in-out infinite;
+}
+
+.brand-mark--animated .brand-mark-body {
+  animation: mascot-float 4.2s ease-in-out infinite;
+}
+
+.brand-mark--animated .brand-mark-shadow {
+  animation: mascot-shadow 4.2s ease-in-out infinite;
+}
+
+/* Static header mark still reacts on hover. */
+.brand-lockup:hover .brand-mark-spark,
+a:hover > .brand-lockup .brand-mark-spark {
+  animation: mascot-twinkle 0.9s ease-in-out;
+}
+
+a:hover > .brand-lockup .brand-mark-eye {
+  animation: mascot-blink 0.9s ease-in-out;
+  animation-delay: -0.75s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-mark *,
+  .brand-lockup:hover .brand-mark-spark,
+  a:hover > .brand-lockup .brand-mark-spark,
+  a:hover > .brand-lockup .brand-mark-eye {
+    animation: none !important;
+  }
 }
 
 .brand-wordmark {
@@ -157,20 +326,76 @@ body {
 .brand-wordmark-get {
   font-style: italic;
   font-weight: 650;
-  color: #8b9cff;
-}
-
-html[data-theme="light"] .brand-wordmark-get {
-  color: #3d56d6;
+  color: var(--accent);
 }
 
 .brand-wordmark-sparkle {
   width: 0.52em;
   height: 0.52em;
-  color: #f0b429;
+  color: var(--mascot-spark);
   flex-shrink: 0;
   align-self: center;
   translate: 0 -0.06em;
+}
+
+/* Landing */
+.landing-clicks::after {
+  content: "";
+  position: absolute;
+  left: 0.02em;
+  right: 0.3em;
+  bottom: -0.08em;
+  height: 0.22em;
+  background: var(--mascot-spark);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 12' preserveAspectRatio='none'%3E%3Cpath d='M2 8c40-6 80-7 120-4s52 2 76-2' fill='none' stroke='black' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E")
+    center / 100% 100% no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 12' preserveAspectRatio='none'%3E%3Cpath d='M2 8c40-6 80-7 120-4s52 2 76-2' fill='none' stroke='black' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E")
+    center / 100% 100% no-repeat;
+  transform-origin: left;
+  animation: underline-draw 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.5s both;
+}
+
+@keyframes underline-draw {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.landing-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-left: 2px;
+  vertical-align: -0.2em;
+  background: var(--accent);
+  animation: caret-blink 1.1s steps(1) infinite;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.landing-demo {
+  rotate: 1.2deg;
+}
+
+.landing-cta {
+  background:
+    radial-gradient(ellipse 60% 80% at 50% 0%, var(--glow), transparent 70%),
+    radial-gradient(ellipse 40% 60% at 85% 100%, var(--glow-hot), transparent 70%),
+    var(--surface);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-clicks::after,
+  .landing-caret {
+    animation: none !important;
+  }
 }
 
 /* LLM reply markdown */

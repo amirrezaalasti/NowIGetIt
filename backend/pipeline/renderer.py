@@ -281,6 +281,7 @@ def _render_scene_local(
             text=True,
             timeout=PREVIEW_TIMEOUT_SECONDS if save_last_frame else 300,
             cwd=str(scene_dir),
+            env=_scene_env(),
         )
         log = (proc.stdout or "") + "\n" + (proc.stderr or "")
         if proc.returncode != 0:
@@ -308,6 +309,21 @@ def _render_scene_local(
     video_path = str(sorted(videos, key=lambda p: p.stat().st_mtime)[-1])
     frame_path = _extract_preview_frame(video_path, scene_dir / "preview.png")
     return video_path, frame_path, log[-2500:]
+
+
+_SECRET_ENV = re.compile(
+    r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|_URI|_DSN|DATABASE_URL)",
+    re.IGNORECASE,
+)
+
+
+def _scene_env() -> dict[str, str]:
+    """Environment for the Manim subprocess, minus API keys and DB credentials.
+
+    Scene code is model-written (or user-edited), so it must not be able to read
+    the server's secrets from os.environ.
+    """
+    return {k: v for k, v in os.environ.items() if not _SECRET_ENV.search(k)}
 
 
 def _probe_video_duration(video_path: str) -> Optional[float]:

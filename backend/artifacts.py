@@ -902,7 +902,7 @@ def resolve_job_file(job_id: str, relative: str) -> Path:
     """Resolve a path under the job dir; reject path traversal."""
     root = job_dir(job_id).resolve()
     target = (root / relative).resolve()
-    if not str(target).startswith(str(root)):
+    if not target.is_relative_to(root):
         raise ValueError("Invalid path")
     if not target.exists() or not target.is_file():
         raise FileNotFoundError(relative)

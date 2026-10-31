@@ -30,7 +30,7 @@ export default async function LoginPage({
       <div className="pointer-events-none absolute inset-0 grid-haze" aria-hidden />
 
       <div className="relative z-10 flex w-full max-w-md flex-col items-center text-center">
-        <BrandLogo size="lg" priority />
+        <BrandLogo size="lg" />
         <h1 className="mt-5 text-lg text-[var(--ink-muted)]">
           Sign in to save and revisit your explanations.
         </h1>
